@@ -133,6 +133,7 @@ from src.api.time_utils import normalize_event_time
 
 from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
                                    _review_pass, _review_reject, _set_issue_pending_review,
+                                   _set_issue_pending_review_with_prior,
                                    _read_issue_status)
 
 router = APIRouter(prefix="/api/issues", tags=["issues"])
@@ -175,10 +176,13 @@ def _enforce_session_repo_scope(user: dict, repo_keys: list[str]):
     """tk_ 会话 token 限定其绑定仓库：请求 repo_keys 含该 repo 才放行（防 agent 跨仓库读事件）。"""
     if user.get("auth_type") == "session_token":
         _tok_repo = user.get("repo_key") or ""
-        if _tok_repo and _tok_repo not in repo_keys:
-            raise HTTPException(
-                status_code=403,
-                detail={"code": 403, "message": "会话 token 无权访问该仓库事件"})
+        if _tok_repo:
+            # Issue #3397：大小写不敏感比对（token 签发仓库写法与请求路径可能不同）
+            from src.kernel.repo_key import same_repo_key
+            if not any(same_repo_key(_tok_repo, k) for k in repo_keys):
+                raise HTTPException(
+                    status_code=403,
+                    detail={"code": 403, "message": "会话 token 无权访问该仓库事件"})
 
 def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
     """查 PR 订阅事件（issue_id LIKE '#pr_%'），按 PR 号聚合为伪卡片。"""
@@ -287,14 +291,16 @@ def _repo_key_of(owner: str, repo: str) -> str:
     return to_repo_key(f"{owner}/{repo}")
 
 def _repo_keys_of(owner: str, repo: str) -> list[str]:
-    """跨 provider 候选键全集（S104/D78：repo_key_candidates 卡派生）。
+    """跨 provider 候选键全集 + 仓登记实际大小写（S104/D78 + Issue #3397）。
 
     用户可能经任意平台 Webhook 接入仓库，DB 前缀不定——手写双平台互查
     （gitcode↔github）会漏 gitee/gitlab；候选集含裸键+全平台前缀，
     repo_key 名空间全局唯一，超集查询安全。
+    Issue #3397：请求路径可能全小写，而 `issue`/`events` 行按 VCS 实际大小写存储，
+    故再按登记反查补入实际大小写候选（歧义不合并），否则列表/详情读路径漏查存量行。
     """
-    from src.kernel.repo_key import repo_key_candidates
-    return repo_key_candidates(f"{owner}/{repo}")
+    from src.kernel.repo_key import repo_key_candidates_ci
+    return repo_key_candidates_ci(f"{owner}/{repo}")
 
 
 def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
@@ -378,6 +384,35 @@ def _task_status_map(repo_keys: list[str]) -> dict:
         except Exception as e:
             log.warning(f"issues: load tasks status failed: {e}")
     return out
+
+def _review_point_readonly(repo_keys: list[str], number: str) -> dict:
+    """Issue #4063：审核点只读投影（review_point.status / review_point.references）。
+
+    权威源 = `issue.status`（与 detail.task_status、status get.status 同一行）：
+    - 在位（status=pending_review）→ status="pending_review"，references 取在位快照；
+    - 非在位 → status=""、references=""（不把已流转审核点的历史参考当在位态暴露）。
+    仅读，不写、不触发状态迁移；下游技能据 status 即可幂等判断是否已在位。
+    """
+    from src.kernel.session_manager import db_lock
+    placeholders = ",".join("?" * len(repo_keys))
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute(
+                f"SELECT status, review_refs FROM issue "
+                f"WHERE repo_key IN ({placeholders}) AND issue_number=?",
+                repo_keys + [number])
+            row = c.fetchone()
+    except Exception as e:
+        log.warning(f"issues: load review_point failed: {e}")
+        return {"status": "", "references": ""}
+    if not row:
+        return {"status": "", "references": ""}
+    _in_place = ((row[0] or "") or "").strip() == "pending_review"
+    return {
+        "status": "pending_review" if _in_place else "",
+        "references": ((row[1] or "") if _in_place else ""),
+    }
 
 def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> dict:
     """仓库内 issue_id → events 列表（seq 升序），带时间格式化。
@@ -470,12 +505,17 @@ def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dic
     # D105 字符串 ident：数字 ident 保持 int 契约不变；平台字符串 ident（gitee IK*）
     # 原样透传——对 IK* 裸强转 int 会抛 ValueError（2026-11-10 :3001 实测 500）。
     # Issue #3055：数字→int（#995/#2072 契约），平台 ident 原样 str
+    _native_num = native_issue_number(number)
     return {
-        "number": native_issue_number(number),
+        "number": _native_num,
         # Issue #569：内部需求卡片 id（issue 表主键）——awaiting-input/pending-review/review-pass
         # 的 --issue_id 用此值；与 GitCode 侧 issue number 语义不同，与 git-repo issues get 的
         # id（GitCode 侧 id）不可混用。无 issue 卡片行（过渡期兜底）时为 null。
         "issue_id": stage.get("internal_id"),
+        # Issue #4063（In Scope 3 / #3981）：与 `issues status get` 的 id/issue_number 同口径
+        # 别名——`id` = 内部需求卡片主键，`issue_number` = 平台 Issue 编号（原 number）。
+        "id": stage.get("internal_id"),
+        "issue_number": _native_num,
         "title": title_map.get(number) or stage.get("issue_id") or f"Issue #{number}",
         # Issue #2111（#1214 移植）：枚举字段出口归一（or 兜 None/空串）——与 /mine 出口（_query_tasks
         # 空值归一 vod）同口径同值，消除 detail/mine 出口 stage 分歧（#1214 遗留）。
@@ -746,15 +786,15 @@ def start_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该需求"})
         return {"status": row[1]}
 
-@router.get("/{issue_id}/status", operation_id="issues_status_get", summary="Query issue status (polling)", description="Returns the Issue status with context for CLI 'grape issues wait' polling.")
+@router.get("/{issue_id}/status", operation_id="issues_status_get", summary="Query issue status (polling)", description="Returns the Issue status with context for CLI 'grape issues wait' polling. Authoritative status is `issue.status` (same row as `issues detail.task_status`); `review_point.status`/`review_point.references` are read-only projections of that row (Issue #4063). CLI availability note (Issue #4026): the `grape issues status get --issue_id` subcommand exists in CLI >= 0.3.4; CLI 0.3.2 does not provide this subcommand.")
 def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """返回 Issue 当前状态（含 repo/issue 上下文），供 CLI `grape issues wait` 轮询至终态。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = _rt_db.cursor()
         c.execute(
-            "SELECT id, status, repo_key, issue_number, title, completed_reason, completed_at "
-            "FROM issue WHERE id=?",
+            "SELECT id, status, repo_key, issue_number, title, completed_reason, completed_at, "
+            "review_refs FROM issue WHERE id=?",
             (issue_id,),
         )
         row = c.fetchone()
@@ -763,10 +803,18 @@ def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api
     # Issue #2072: 数值形态归一为 int，字母 ident（gitee IKSQ4O）原样透传
     # （与 _query_tasks / 详情 _assemble_issue 同口径，禁止无条件 int() 强转）
     from src.domains.runtime.vcs.api_client import _native_issue_number
+    # Issue #4063：status 是权威源；review_point.status 为同一行的派生只读投影，
+    # detail.task_status/review_point.status 与本接口在读位上恒等。
+    # 与 _review_point_readonly 同口径：归一空白后再判 pending_review（避免尾随空白误判）。
+    _in_place = ((row[1] or "") or "").strip() == "pending_review"
     return {
         "id": row[0], "status": row[1], "repo_key": row[2],
         "issue_number": _native_issue_number(row[3]),
         "title": row[4], "completed_reason": row[5] or "", "completed_at": row[6],
+        "review_point": {
+            "status": "pending_review" if _in_place else "",
+            "references": ((row[7] or "") if _in_place else ""),
+        },
     }
 
 class _IssueStatusBody(BaseModel):
@@ -1989,7 +2037,7 @@ async def issue_pending_review_empty_id():
 
 @router.post("/{issue_id}/pending-review", operation_id="issues_pending-review",
              summary="Agent declares issue pending_review (阶段审核点)",
-             description="任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。重复调用幂等（Issue #725）：已是 pending_review 时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。issue_id 必须是纯数字内部 id（Issue #2695：空/非数字在入口前置返回 400 invalid issue_id，不是 GitCode issue number）。")
+             description="任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。幂等（Issue #725/#4063）：已在位且 review_points/references 未变时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）；审核点**内容变更**时 changed:true 并刷新快照。Issue #4103：回执新增 prior_status（写入前同事务实读状态），与 status（写后实读）成对返回；changed 仅表示本次真实写入（rowcount>0），并发 CAS 未命中时为 false，不重复触发通知。`issue.status` 是权威状态，`issues detail.task_status` 与 `issues status get.status` 均回读同一行（detail 的 `review_point.status` 为其派生只读投影）。非审核事件（issue_comment 等）不驱动 pending_review 流转。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。issue_id 必须是纯数字内部 id（Issue #2695：空/非数字在入口前置返回 400 invalid issue_id，不是 GitCode issue number）。")
 async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                                _issue_id_check: None = Depends(_require_numeric_issue_id),
                                user: dict = Depends(get_current_user_or_api_key)):
@@ -2001,11 +2049,13 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
     if not review_points:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "review_points 必填（本次需审核的内容）"})
     it = _session_devops_issue(issue_id, user)
-    if it["status"] in ("completed", "cancelled"):
-        return {"ok": True, "issue_id": it["id"], "status": it["status"], "changed": False}
-    _changed = _set_issue_pending_review(it["repo_key"], it["issue_number"])
+    # Issue #4103：统一在同一事务内实读 prior_status，不再用 it["status"] 旧读做终态
+    # 早返回；completed/cancelled 不在可覆盖源状态集合内，函数会写前/写后实读且零写入。
+    _refs_for_store = (body.references or "").strip()
+    prior_status, status_after, _changed = _set_issue_pending_review_with_prior(
+        it["repo_key"], it["issue_number"], review_points, _refs_for_store)
     conv_id = ""
-    if str(it["user_id"] or "") not in ("", "0") and _changed:
+    if str(it["user_id"] or "") not in ("", "0") and _changed and status_after == "pending_review":
         try:
             conv_id = _ensure_task_conversation(it["user_id"], it["repo_key"], it["issue_number"], it["title"], "",
                                                 write_context_on_reuse=False)
@@ -2023,7 +2073,7 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
         except Exception as e:
             log.warning(f"Issue pending-review: conversation write failed: {e}")
     # 飞书静态卡片触达（同 awaiting）：等用户双态的“待审核”必须主动通知用户
-    if _changed:
+    if _changed and status_after == "pending_review":
         try:
             from src.api.issues_center import (_get_feishu_open_id, _get_feishu_open_id_by_user_id,
                                                _resolve_user_chat_bot, _run_pending_review_notify)
@@ -2037,7 +2087,8 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                 body.references or "", it["repo_key"], it["issue_number"], _cfg))
         except Exception as e:
             log.warning(f"Issue pending-review: notify schedule failed: {e}")
-    return {"ok": True, "issue_id": it["id"], "status": "pending_review", "changed": _changed}
+    return {"ok": True, "issue_id": it["id"], "prior_status": prior_status,
+            "status": status_after, "changed": _changed, "idempotent": not _changed}
 
 class _ReviewPassBody(BaseModel):
     target: str = "processing"   # processing | done
@@ -2209,6 +2260,18 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
     dir_name = str(issue_number) if issue_number else "pending"
     url = _attach_save(owner, rname, dir_name, safe_name, content)
     log.info(f"Issue attachment uploaded: issue={issue_id} file={original_name} -> {safe_name} ({len(content)} bytes)")
+    # Issue #648：已建单附件（issue_number 目录）同步「## 附件」链接清单评论到 VCS issue（best-effort 过渡方案）
+    if issue_number:
+        try:
+            from src.api.issues_center import (_ATTACH_IMAGE_EXTS,
+                                               sync_issue_attachment_comment)
+            # Issue #3349：同步 VCS 评论不能在事件循环线程内执行，卸载到工作线程。
+            await asyncio.to_thread(
+                sync_issue_attachment_comment,
+                repo_key, issue_number,
+                {"filename": original_name, "url": url, "is_image": ext in _ATTACH_IMAGE_EXTS})
+        except Exception as e:
+            log.warning(f"Issue attachment sync comment failed: issue={issue_id} file={original_name}: {e}")
     return {"url": url, "filename": original_name, "size": len(content)}
 
 @router.get("/{issue_id}/attachments", operation_id="issues_list_attachments", summary="List issue attachments", description="Lists attachments of an issue.")
@@ -2378,8 +2441,8 @@ def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_inpu
         # 跨 provider 候选：前端传入 owner/repo 可能无 provider 信息。
         # P1-10：候选集由平台卡目录派生（repo_key_candidates），不再只查
         # gitcode/github 双前缀——gitee/gitlab 仓的 issue 也要命中。
-        from src.kernel.repo_key import repo_key_candidates
-        _rk_list = repo_key_candidates(repo_key)
+        from src.kernel.repo_key import repo_key_candidates_ci
+        _rk_list = repo_key_candidates_ci(repo_key)
         if _rk_list:
             _rk_ph = ",".join("?" * len(_rk_list))
             clauses.append(f"repo_key IN ({_rk_ph})")
@@ -2838,7 +2901,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     )
     return await create_task_via_issue(b, user)
 
-@router.get("/{owner}/{repo}/{number}", operation_id="issues_detail", summary="Issue detail (stage+events+pipeline)", description="Single issue detail: base fields + events (seq asc) + pipeline segments. D105 string-ident: `number` accepts numeric idents and platform string idents (gitee IK*, # prefix tolerated).")
+@router.get("/{owner}/{repo}/{number}", operation_id="issues_detail", summary="Issue detail (stage+events+pipeline)", description="Single issue detail: base fields + events (seq asc) + pipeline segments + read-only `review_point` (Issue #4063: `review_point.status`/`review_point.references`; status is a projection of the authoritative `issue.status`, identical to `task_status` and `issues status get.status` — no separate review-point state column). Response carries `id`/`issue_number` aliases aligned with `issues status get` (`id` = internal card id, `issue_number` = platform issue number; `number`/`issue_id` kept for compatibility, Issue #4063 In Scope 3 / #3981). D105 string-ident: `number` accepts numeric idents and platform string idents (gitee IK*, # prefix tolerated).")
 def get_issue_detail(owner: str, repo: str, number: str,
                      user: dict = Depends(get_current_user_or_api_key)):
     repo_keys = _repo_keys_of(owner, repo)
@@ -2865,9 +2928,14 @@ def get_issue_detail(owner: str, repo: str, number: str,
         # Issue #805: VCS 兜底详情透出创建人（GitCode issue 作者 login）
         _vcs_user = _vi.get("user") or {}
         _vcs_creator = (_vcs_user.get("login") or _vcs_user.get("username") or "") if isinstance(_vcs_user, dict) else ""
+        _fb_native_num = native_issue_number(number)
         return {
-            "number": native_issue_number(number),
+            "number": _fb_native_num,
             "issue_id": None,
+            # Issue #4063：与 `issues status get` 口径对齐（id 为内部卡片主键，
+            # VCS 兜底无内部行 → null；issue_number 为平台 Issue 编号）。
+            "id": None,
+            "issue_number": _fb_native_num,
             "title": (_vi.get("title") or f"Issue #{number}"),
             "stage": "vod",
             "task_status": "",
@@ -2880,11 +2948,12 @@ def get_issue_detail(owner: str, repo: str, number: str,
             "events_count": 0,
             "latest_event": None,
             "events": [],
-            "pipeline": {"issue": {"number": native_issue_number(number)}, "summary": "", "status": "unknown", "segments": []},
+            "pipeline": {"issue": {"number": _fb_native_num}, "summary": "", "status": "unknown", "segments": []},
             "source": "vcs",
             "vcs_provider": _resolved["vcs_provider"],
             "vcs_id": _vi.get("id"),
             "state": _vi.get("state", ""),
+            "review_point": {"status": "", "references": ""},
         }
     if _resolved["state"] != "exists":
         # Issue #667：三表未命中 → VCS 兜底核实并自动补建内部行（存在）/
@@ -2900,6 +2969,8 @@ def get_issue_detail(owner: str, repo: str, number: str,
         # Issue #667 契约（test_issue_667_detail_fallback 断言）：仅「本次经 VCS 核实并补建」的
         # 响应带该存在性标志；后续命中内部行不再出现（区分「已登记」与「刚补建」）。
         base["synced_by_fallback"] = True
+    # Issue #4063：只读审核点投影，与 task_status / status get.status 同源（issue.status）。
+    base["review_point"] = _review_point_readonly(repo_keys, num)
     events = group_map.get(num) or []
     pipeline = _pipeline_from_archive(repo_keys, num) or _pipeline_from_events(repo_keys[0], num, events)
     # Issue #539：详情内嵌 pipeline 同步叠加需求级业务状态与任务/结果引用

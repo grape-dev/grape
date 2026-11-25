@@ -46,7 +46,9 @@ from src.kernel.ports import repos as _repos
 from src.kernel.ports import tokens as _tokens
 from src.kernel.ports import vcs_cards as _vcs_cards
 from src.kernel.ports import vcs_provider as _vcs_provider
+from src.kernel.ports._base import PortNotBound as _PortNotBound
 from src.kernel.ports.vcs_provider import VCSProviderPort
+from src.kernel.ports.vcs_provider import create_provider_from_repo_key
 
 # 凭据不可用分类（Issue #3713）——**唯一一份**枚举，两个消费面各自渲染：
 #   换券面（HTTP）  424 + code + stage（前端/CLI 需区分该轮换还是该重新配置）
@@ -61,7 +63,7 @@ CREDENTIAL_STAGES = (CREDENTIAL_STAGE_EMPTY, CREDENTIAL_STAGE_UNDECRYPTABLE,
                      CREDENTIAL_STAGE_EXPIRED)
 
 
-# ────────────────────────────────────────────────────────────────────────────
+# 归因状态
 # Issue #3740：RepoBotToken 解析结果进程内短 TTL 缓存
 #
 # 动因：token 解析是热路径（每次 VCS 调用前都走），一次 issue 收尾会对同一
@@ -136,6 +138,18 @@ def invalidate_repo_bot_token_cache(repo_key: str = "", field: str = "") -> int:
         _repo_bot_cache.pop(key, None)
     return len(stale_keys)
 
+# 归因状态（Issue #3923）——「没有凭据」与「归因做不了」必须分开：
+#   no_credential  链跑完仍为空：确实没有可用凭据（任务面渲染 credential_not_configured）
+#   unavailable    本进程没有装配层（vcs_cards/vcs_provider 端口未绑定），归因不成立
+#   unattributed   归因过程异常/无法判定：不得默认当成「没配凭据」
+# worker 进程永远不会绑定装配层（MANIFEST 不含 src/api/contracts_wiring.py），
+# 所以 worker 上任何 git 失败都不得落 no_credential —— 那是猜测。
+CREDENTIAL_ATTRIBUTION_RESOLVED = "resolved"
+CREDENTIAL_ATTRIBUTION_NONE = "no_credential"
+CREDENTIAL_ATTRIBUTION_UNAVAILABLE = "unavailable"
+CREDENTIAL_ATTRIBUTION_UNATTRIBUTED = "unattributed"
+CREDENTIAL_ATTRIBUTIONS = (CREDENTIAL_ATTRIBUTION_RESOLVED, CREDENTIAL_ATTRIBUTION_NONE,
+                           CREDENTIAL_ATTRIBUTION_UNAVAILABLE, CREDENTIAL_ATTRIBUTION_UNATTRIBUTED)
 
 # 链首显式仓库 bot 行的级别标识（换券面 / 任务面 / 审计共用同一个词）
 EXPLICIT_REPO_BOT_LEVEL = "rc_bot"
@@ -183,6 +197,10 @@ class TokenResult:
     stage: str = ""               # Issue #3713: 显式失败分类（empty/undecryptable/expired），
                                   # 空串 = 未失败。换券面渲染 424+stage，任务面渲染
                                   # credential_<stage>（分类统一、渲染分离）。
+    attribution: str = ""         # Issue #3923: 归因状态（CREDENTIAL_ATTRIBUTIONS）。
+                                  # resolved/no_credential 是「跑完了」，unavailable/unattributed
+                                  # 是「跑不了/没跑完」——后者严禁当成「没配凭据」。
+    attribution_detail: str = ""  # 归因不可用的原因（端口名/异常摘要），只用于日志与事实陈述。
 
 class TokenStrategy:
     """token 获取策略基类。每个子类代表 fallback 链中的一级。
@@ -732,13 +750,42 @@ def resolve_exec_token(repo_key: str) -> TokenResult:
     """模块级便捷入口（Issue #3713）：按 repo_key 造 provider → 统一执行凭据选择器。
 
     建树面（worker `repogit`）与换券面（mgmt 路由）都从这里取判定，避免再各写一遍。
-    provider 造不出来时返回空结果（stage 空 = 无法归因，交回上层原语义）。
+    provider 造不出来时**不再返回「空结果 = 无凭据」**（Issue #3923）：worker 进程
+    MANIFEST 不含 `src/api/contracts_wiring.py`，`vcs_provider` 端口永远绑不上，
+    任何 git 失败都会被上层误渲染成 `credential_not_configured`。这里显式区分：
+    - `PortNotBound` → attribution=unavailable（归因不可用，不是没有凭据）；
+    - 其它异常 → attribution=unattributed（归因没跑成，同样不是没有凭据）。
     """
+    if not repo_key:
+        return TokenResult(token="", level="", repo_key="",
+                           attribution=CREDENTIAL_ATTRIBUTION_UNATTRIBUTED,
+                           attribution_detail="empty repo_key")
     try:
-        return TokenResolver(_vcs_provider.create_provider_from_repo_key(repo_key)).resolve_exec_token(repo_key)
+        provider = _vcs_provider.create_provider_from_repo_key(repo_key)
+    except _PortNotBound as e:
+        log.warning(f"resolve_exec_token({repo_key}) unavailable: {e}")
+        return TokenResult(token="", level="", repo_key=repo_key,
+                           attribution=CREDENTIAL_ATTRIBUTION_UNAVAILABLE,
+                           attribution_detail=f"vcs_provider 端口未绑定（{e}）")
+    except Exception as e:  # noqa: BLE001 - 归因不可用不得打断任务
+        log.warning(f"resolve_exec_token({repo_key}) provider failed: {e}")
+        return TokenResult(token="", level="", repo_key=repo_key,
+                           attribution=CREDENTIAL_ATTRIBUTION_UNATTRIBUTED,
+                           attribution_detail=f"provider 构造失败（{e}）")
+    try:
+        return TokenResolver(provider).resolve_exec_token(repo_key)
     except Exception as e:
         log.warning(f"resolve_exec_token({repo_key}) failed: {e}")
-        return TokenResult(token="", level="", repo_key=repo_key or "")
+        return TokenResult(token="", level="", repo_key=repo_key,
+                           attribution=CREDENTIAL_ATTRIBUTION_UNATTRIBUTED,
+                           attribution_detail=f"选择器异常（{e}）")
+
+
+# Issue #3427（QA 复审 R1 修复）：带原因码的单点凭据解析器
+# resolve_credential_detailed / _probe_credential_token / CredentialResolution
+# 已整体迁到 src/domains/mgmt/auth/credential_resolver.py（解析器需要读
+# mgmt/insight 域内数据，kernel 不得 import domains）。调用方（repos host /
+# POST /api/issues / a2a）从 mgmt 域侧取解析器；本模块不再持有该职责。
 
 
 class TokenResolver:
@@ -824,11 +871,13 @@ class TokenResolver:
             if stage:
                 return TokenResult(token="", level=EXPLICIT_REPO_BOT_LEVEL,
                                    provider=self.provider, repo_key=repo_key,
-                                   config_level=EXPLICIT_REPO_BOT_LEVEL, stage=stage)
+                                   config_level=EXPLICIT_REPO_BOT_LEVEL, stage=stage,
+                                   attribution=CREDENTIAL_ATTRIBUTION_RESOLVED)
             if explicit_token:
                 return TokenResult(token=explicit_token, level=EXPLICIT_REPO_BOT_LEVEL,
                                    provider=self.provider, repo_key=repo_key,
-                                   config_level=EXPLICIT_REPO_BOT_LEVEL)
+                                   config_level=EXPLICIT_REPO_BOT_LEVEL,
+                                   attribution=CREDENTIAL_ATTRIBUTION_RESOLVED)
         for strategy in self.strategies:
             if strategy is head:
                 continue
@@ -837,8 +886,11 @@ class TokenResolver:
                 return TokenResult(token=token, level=strategy.level,
                                    provider=self.provider, repo_key=repo_key,
                                    expired=strategy._is_expired(repo_key),
-                                   config_level=strategy.level)
-        return TokenResult(token="", level="", provider=self.provider, repo_key=repo_key)
+                                   config_level=strategy.level,
+                                   attribution=CREDENTIAL_ATTRIBUTION_RESOLVED)
+        # 链跑完仍为空 = 确实没有可用凭据（这是「已完成归因」的结论，不是猜测）
+        return TokenResult(token="", level="", provider=self.provider, repo_key=repo_key,
+                           attribution=CREDENTIAL_ATTRIBUTION_NONE)
 
     def get_token(self, repo_key: str) -> str:
         """获取可用执行 token。含过期短路。返回空串=无可用 token。

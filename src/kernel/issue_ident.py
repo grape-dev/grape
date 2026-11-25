@@ -34,6 +34,34 @@ SYNTHETIC_CARD_PREFIX = "autopilot-"
 # Issue #4065：订阅伪 id（`pr_123`、`#pr_123_scene_id`）永不对应真实 Issue，也永不对应卡片。
 PSEUDO_IDENT_PREFIXES = ("pr_", "pr-")
 
+# Issue #3908：autopilot 任务不使用 events 表，agent_tasks.event_seq 用高位命名空间
+# （900_000_000 + autopilot_executions.id）隔离。判据下沉 kernel 单点，scheduler 与
+# event_pipeline 共用，避免字面量漂移；event_pipeline 不能反向 import scheduler（成环）。
+AUTOPILOT_EVENT_SEQ_BASE = 900_000_000
+
+# autopilot 任务统计回链合成键形如 `autopilot-<纯字母>`（scheduler._autopilot_issue_ref），
+# 永不对应真实 Issue。与 SYNTHETIC_CARD_PREFIX 同源，禁止在业务层另写正则。
+_AUTOPILOT_ISSUE_REF_RE = re.compile(re.escape(SYNTHETIC_CARD_PREFIX) + r"[a-z]+")
+
+
+def is_autopilot_event_seq(value) -> bool:
+    """事件序号是否落在 autopilot 高位合成命名空间（Issue #3908）。
+
+    安全 int 化：None/空串/非法形态一律 False，避免异常影响真实任务路径。
+    """
+    try:
+        return int(value or 0) >= AUTOPILOT_EVENT_SEQ_BASE
+    except (TypeError, ValueError):
+        return False
+
+
+def is_autopilot_issue_ref(value) -> bool:
+    """是否为 autopilot 合成 issue 回链键 `autopilot-<纯字母>`（Issue #3908）。"""
+    if value is None:
+        return False
+    t = str(value).strip().lstrip("#").strip()
+    return bool(_AUTOPILOT_ISSUE_REF_RE.fullmatch(t))
+
 # 卡片主键字符域：数字 / 字母开头的紧凑标识（拒空白、分隔文本、URL 片段）
 _CARD_IDENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-]*")
 

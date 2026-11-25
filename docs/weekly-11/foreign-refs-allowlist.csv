@@ -10,12 +10,14 @@ engine_capabilities,runtime,api,1
 external_identities,mgmt,api,1
 external_identities,mgmt,platform,1
 grape_t_category_dict,mgmt,api,2
+grape_t_comment_dispatch_guard,runtime,api,1
 grape_t_engine_sandbox_whitelist,mgmt,api,1
 grape_t_external_identity_tombstones,mgmt,api,2
 grape_t_repo_credentials,insight,platform,1
 grape_t_repo_platforms,mgmt,api,5
 grape_t_user_repo_platform_link,mgmt,platform,1
 gsb_provider_route,mgmt,kernel,4
+managed_repos,mgmt,kernel,1
 meta,runtime,api,5
 meta,runtime,platform,1
 runtime_credentials,runtime,api,6

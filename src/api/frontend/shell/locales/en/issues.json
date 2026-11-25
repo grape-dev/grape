@@ -63,5 +63,22 @@
   "stall_banner": {
     "title": "Completed but not handed off (stalled {{minutes}} min)",
     "hint": "Alerted — confirm the next hop manually; scene-order derivation is advisory, no auto-dispatch"
-  }
+  },
+  "repo_scope_tag": "[Repo]",
+  "engine_health_error": "Engine health query failed, please retry later",
+  "engine_health_error_prefix": "Engine health query failed: ",
+  "retry_later": "please retry later",
+  "engine_unreachable_nodes": "Unreachable (nodes: {nodes})",
+  "engine_low_score_nodes": "Low health score (nodes: {nodes})",
+  "scene_engine_warning_prefix": "Bound engines of this scene report unhealthy state: ",
+  "scene_engine_warning_suffix": ", tasks created here cannot be dispatched",
+  "scene_engine_reason_prefix": ". Reasons: ",
+  "engine_reason_low_score": "Low health score (below dispatch threshold)",
+  "engine_reason_consecutive_failures": "Too many consecutive failures",
+  "engine_reason_heartbeat_lost": "Heartbeat lost",
+  "engine_reason_unreachable": "Unreachable (offline or heartbeat lost)",
+  "engine_reason_engine_missing": "Engine missing or deleted",
+  "engine_reason_health_unavailable": "Health data unavailable",
+  "retry": "Retry",
+  "engine_health_checking": "Checking engine health..."
 }

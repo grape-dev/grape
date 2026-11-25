@@ -206,8 +206,8 @@ def _invalidate_token_resolve_cache(repo_key: str) -> None:
         from src.kernel.token_resolver import invalidate_repo_bot_token_cache
 
         invalidate_repo_bot_token_cache(repo_key)
-    except Exception:  # noqa: BLE001 - kernel 未就位/缓存空时不阻断写路径
-        pass
+    except Exception as e:  # noqa: BLE001 - kernel 未就位/缓存空时不阻断写路径
+        log.debug(f"insight: repo bot token cache invalidate skipped {repo_key}: {e}")
 
 
 def repo_credential_value(repo_key: str, cred_type: str) -> str:
@@ -611,6 +611,12 @@ def record_repo_dispatch_busy(repo_key: str) -> None:
     return _impl(repo_key)
 
 
+def record_no_progress_scan_failure() -> None:
+    """no_progress 扫描失败计数（runtime scheduler → insight Prometheus 指标）。"""
+    from src.domains.insight.observability import record_no_progress_scan_failure as _impl
+    return _impl()
+
+
 def record_llm_usage(provider: str, model: str, input_tokens: int, output_tokens: int,
                      cache_tokens: int = 0) -> None:
     """Prometheus 侧 LLM token 埋点（与用量台账同源）。"""
@@ -659,7 +665,8 @@ def new_run_id(prefix: str) -> str:
 
 __all__ += ["redact_issue_text", "normalize_tokens", "pipeline_trace_id",
             "record_task_enqueued", "record_task_dispatched", "record_task_terminal",
-            "record_task_failed", "record_llm_usage", "record_usage",
+            "record_task_failed", "record_no_progress_scan_failure",
+            "record_llm_usage", "record_usage",
             "record_repo_dispatch_lease_wait", "record_repo_dispatch_busy",
             "task_model_summary", "master_usage_for_task", "master_run", "new_run_id"]
 
@@ -814,9 +821,33 @@ def resolve_error_messages(errors: list, lang: str = "zh") -> list:
     return _impl(errors, lang)
 
 
+def token_fingerprint(value: Any) -> str:
+    """webhook 验签 token 指纹（`sha256:<12>`；空值 → `absent`）——#3897/#3750 唯一实现。"""
+    from src.domains.insight.observability.webhook_rejects import token_fingerprint as _impl
+    return _impl(value)
+
+
+def reject_reason(token: Any) -> str:
+    """webhook 验签拒绝原因（`absent`=没带 token / `mismatch`=带了但不匹配）——日志与落库共用。"""
+    from src.domains.insight.observability.webhook_rejects import reject_reason as _impl
+    return _impl(token)
+
+
+def record_webhook_reject(repo_key: str, provider: str = "", event: str = "", ip: str = "",
+                          token: str = "", expected: str = "") -> bool:
+    """记录一次 webhook 验签拒绝（#3750）：有界队列落 `grape_t_obs_webhook_rejects` + 计数器自增。
+
+    幂等键由调用方流量天然保证（每次 403 一条事实）；任何异常都不上抛，绝不改变 403 返回。
+    """
+    from src.domains.insight.observability.webhook_rejects import record_reject as _impl
+    return _impl(repo_key=repo_key, provider=provider, event=event, ip=ip,
+                 token=token, expected=expected)
+
+
 __all__ += ["list_alert_rules", "set_alert_rule_policy", "alert_severities",
             "alert_aggregate_modes", "obs_loop_snapshot", "obs_silent_targets",
             "unified_events", "metric_series", "metric_resolutions", "all_metrics",
             "metric_global_dim", "list_slo_summaries", "slo_detail", "create_slo",
             "update_slo", "get_slo", "ingest_logs", "prometheus_registry", "emit_event",
-            "resolve_error_messages"]
+            "resolve_error_messages", "token_fingerprint", "reject_reason",
+            "record_webhook_reject"]

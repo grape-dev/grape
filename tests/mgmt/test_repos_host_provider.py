@@ -125,8 +125,9 @@ def test_HT04_github_no_token_400_not_gitcode(monkeypatch):
     r = client.post("/api/repos/host?provider=github",
                     json={"full_name": "Jason7602/testhost"}, headers=_HEADERS_GH)
     assert r.status_code == 400
-    assert r.json()["detail"].get("error_code") == "TOKEN_NOT_BOUND"
-    assert "GitHub API Token 未配置或已过期" in r.json()["detail"]["message"]  # D85: 文案多平台化后的新口径
+    # Issue #3427：无凭据升级为分层错误码 TOKEN_MISSING（可行动文案指向显式绑定接口）
+    assert r.json()["detail"].get("error_code") == "TOKEN_MISSING"
+    assert "未检测到任何可用凭据" in r.json()["detail"]["message"]
     assert rec["gh"] == 0 and rec["gc"] == 0, "github 无 token 不得回退 gitcode"
 
 def test_HT05_gitcode_404_message(monkeypatch):

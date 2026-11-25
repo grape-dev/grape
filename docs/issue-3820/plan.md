@@ -50,8 +50,8 @@
 | 切片 | 公开 seam | 测试 |
 |---|---|---|
 | 分类 | `classify_stream_failure` / `retry_transient_task` | `tests/runtime/test_issue_3820_config_error_classification.py` |
-| 配置解析 + 校验 | `read_opencode_model_config` / `validate_engine_model` / `probe_engine_model_call` | `tests/test_issue_3820_engine_model_opencode.py` |
-| 注册 + 探活 | `registry.validate_registration_model` / `agent._discover_local_runtimes` / `probe_local_engines` | `tests/test_issue_3820_registration_probe.py` |
+| 配置解析 + 校验 | `read_opencode_model_config` / `validate_engine_model` / `probe_engine_model_call` | `tests/runtime/test_issue_3820_engine_model_opencode.py` |
+| 注册 + 探活 | `registry.validate_registration_model` / `agent._discover_local_runtimes` / `probe_local_engines` | `tests/runtime/test_issue_3820_registration_probe.py` |
 
 全部网络交互通过注入 `fetch`/`post` 替身，测试不出网。
 

@@ -23,6 +23,7 @@
     "api_tokens": "mgmt",
     "audit_logs": "mgmt",
     "autopilot_executions": "runtime",
+    "grape_t_autopilot_payload_guard": "runtime",
     "autopilot_subscriptions": "mgmt",
     "autopilot_tasks": "mgmt",
     "binding_tickets": "mgmt",
@@ -99,6 +100,7 @@
     "obs_runtime_samples": "insight",
     "obs_slo": "insight",
     "obs_slo_snapshots": "insight",
+    "grape_t_obs_webhook_rejects": "insight",
     "org_invitation": "mgmt",
     "org_member": "mgmt",
     "grape_t_org_context": "mgmt",
@@ -153,7 +155,8 @@
     "devops_pipeline_scene_uid_backup_1208": "mgmt",
     "grape_t_skill_version": "runtime",
     "grape_t_skill_file": "runtime",
-    "grape_t_skill_comment": "runtime"
+    "grape_t_skill_comment": "runtime",
+    "grape_t_comment_dispatch_guard": "runtime"
   },
   "views": {
     "admin_accounts": [

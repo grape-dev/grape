@@ -7,7 +7,7 @@
 三库模式下 runtime 域进程更是只跑登记迁移 → 1205 根因（NOT EXISTS 逐行扫热表）
 在生产未消除。本用例钉住三条契约：
 
-1. 迁移已登记（version=202611240003 / kind=safe / domains=runtime）；
+1. 迁移已登记（version=202611240009 / kind=safe / domains=runtime）；
 2. fn 幂等：建组合索引 + 回收左前缀冗余 idx_agent_tasks_event，重跑不报错；
 3. 老轨 `_create_indexes()` 内不得再出现该索引（否则存量库仍不会建）。
 """
@@ -18,7 +18,7 @@ import pytest
 
 from src.api import db_setup
 
-VERSION = "202611240003"
+VERSION = "202611240009"
 NAME = "add-agent-tasks-event-seq-status-index"
 COMPOSITE = "idx_agent_tasks_event_seq_status"
 REDUNDANT = "idx_agent_tasks_event"
@@ -41,6 +41,9 @@ def conn(tmp_path, monkeypatch):
     c.commit()
     from src.kernel import session_manager
     monkeypatch.setattr(session_manager, "db", c)
+    # 三库拓扑（配了 runtime DSN）下 _migration_conn 会切到真 runtime 库，本用例只验 DDL
+    # 语义，强制回落到 fixture 的 sqlite 连接，保证有 DSN 的开发机/CI 同样可跑。
+    monkeypatch.setattr(db_setup, "_migration_conn", lambda domain, default=None: c)
     return c
 
 
@@ -71,6 +74,42 @@ def test_fn_is_idempotent(conn):
     names = _index_names(conn)
     assert COMPOSITE in names
     assert REDUNDANT not in names
+
+
+def test_mysql_ddl_uses_text_prefix_and_avoids_if_not_exists(monkeypatch):
+    """MySQL 契约：`IF NOT EXISTS` 会 1064，`status` 为 TEXT 必须带前缀长度（1170）。
+
+    三库拓扑下迁移走 db_registry._CompatCursor，mysql_compat 的「自动补 (191)」特判
+    不生效；若仍下发 IF NOT EXISTS 或裸列名，迁移每次启动失败不盖章，组合索引永远不建，
+    1205 根因在生产依旧存在（本地实测 1064=真实证据）。
+    """
+    executed = []
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            executed.append(sql)
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    fake = _Conn()
+    monkeypatch.setattr(db_setup, "_migration_conn", lambda domain, default=None: fake)
+    monkeypatch.setattr(db_setup, "_mysql_backend", lambda: True)
+    monkeypatch.setattr(db_setup, "_index_present", lambda c, table, name: False)
+
+    db_setup._fn_add_agent_tasks_event_seq_status_index()
+
+    creates = [s for s in executed if "CREATE INDEX" in s]
+    assert creates, "MySQL 路径必须下发 CREATE INDEX"
+    assert "IF NOT EXISTS" not in creates[0], "MySQL 不支持 CREATE INDEX IF NOT EXISTS（1064）"
+    assert "status(191)" in creates[0], "TEXT 列建索引必须带前缀长度（1170）"
 
 
 def test_index_ddl_not_in_frozen_legacy_track():

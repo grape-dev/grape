@@ -36,13 +36,13 @@ def test_out_track_id_numeric_identity_unchanged():
     assert out_track_id("24", "email_change", "", 0, "feishu", "inst-1") == expected
 
 
-def test_norm_user_id_keeps_uuid_and_coerces_digits():
-    from src.domains.runtime.im.outbox import norm_user_id
+def test_norm_uid_keeps_uuid_and_coerces_digits():
+    from src.kernel.user_ids import norm_uid
 
-    assert norm_user_id(UUID_UID) == UUID_UID
-    assert norm_user_id(" 24 ") == 24
-    assert norm_user_id(24) == 24
-    assert norm_user_id(None) == ""
+    assert norm_uid(UUID_UID) == UUID_UID
+    assert norm_uid(" 24 ") == 24
+    assert norm_uid(24) == 24
+    assert norm_uid(None) == ""
     # 历史上 `int(user_id or 0)` 对 UUID 必炸——这里反向锁住"别再回来"
     with pytest.raises(ValueError):
         int(UUID_UID)

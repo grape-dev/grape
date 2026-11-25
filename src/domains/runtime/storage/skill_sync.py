@@ -20,9 +20,17 @@ import shutil
 import zipfile
 
 from src.kernel.config import SKILLS_DIR, CONFIG_DIR, log, resolve_official_skill_path
+from src.kernel.startup_metrics import record_startup_degraded
 
 logger = logging.getLogger(__name__)
 _bg_tasks: set[asyncio.Task] = set()
+
+#: Issue #3798：轮级未命中聚合告警的样例技能上限（与 #3796 scene_sync 同口径）。
+_UNRESOLVED_SAMPLE_LIMIT = 3
+
+# Issue #3742：外层 `skill_sync` 锁 TTL 单点来源——worker 的 CM、续期默认值与
+# 周期超时阈值（ttl/2）全部由此派生，避免 1800/900 硬编码各自漂移。
+SKILL_SYNC_LOCK_TTL = int(os.environ.get("SKILL_SYNC_LOCK_TTL", "600"))
 
 # Issue #3229：SKILL.md 等文本文件首部的 UTF-8 BOM 会让前端 frontmatter 正则失配，
 # 入库时统一剥离；_compute_skill_hash 对 BOM 不敏感，保证归一化后能命中 skip。
@@ -122,6 +130,71 @@ def _resolve_skill_category(info: dict, dict_map: dict) -> tuple[int, int]:
     return resolve_category_slugs(info, dict_map, logger=logger, label="skill_sync")
 
 
+def _record_unresolved(sink: dict, slug: str, skill_name: str) -> None:
+    """按同步轮聚合未命中的 `sub_scene` slug（Issue #3798）。
+
+    循环内的未命中只降 debug 进 sink，轮末由 `_log_unresolved_misses` 发 **≤1 条**
+    聚合 WARNING，替代原来「每技能每轮一条」的刷屏（线上 576 条/小时）。
+    结构：`slug → {"count": 次数, "skills": 样例技能名（≤3，去重）}`，
+    与 #3796 在 `scene_sync` 落地的口径一致。
+    """
+    entry = sink.setdefault(slug, {"count": 0, "skills": []})
+    entry["count"] += 1
+    if skill_name and skill_name not in entry["skills"] \
+            and len(entry["skills"]) < _UNRESOLVED_SAMPLE_LIMIT:
+        entry["skills"].append(skill_name)
+
+
+def _log_unresolved_misses(miss_sink: dict) -> None:
+    """轮末输出 ≤1 条未命中聚合 WARNING（Issue #3798）；全部命中则一条都不发。
+
+    文案刻意**不含**旧字面量 `has no matching skill_category slug`：Loki 侧按该串
+    计数的告警规则必须归零（验收项），信号改由这条聚合行承载（slug + 命中次数 +
+    ≤3 个样例技能），逐技能的明细降为 DEBUG。
+    """
+    if not miss_sink:
+        return
+    parts = []
+    for slug in sorted(miss_sink):
+        entry = miss_sink[slug]
+        samples = ", ".join(entry["skills"])
+        parts.append(f"'{slug}'×{entry['count']} skills"
+                     + (f" (e.g. {samples})" if samples else ""))
+    logger.warning(
+        f"skill sync: {len(miss_sink)} sub_scene slug(s) unresolved in skill_category "
+        f"this round, category_id stays 0 (aggregated per round): " + "; ".join(parts))
+
+
+def _load_skill_category_map() -> dict[str, int]:
+    """读取「启用中」的技能分类字典（`skill_category` 归 mgmt，走 owner 域 public）。
+
+    Issue #3798：原实现把整段读取吞成 DEBUG——分库拓扑下字典不可用、或本表全部
+    停用时 `cat_map` 为空、`category_id` 恒 0，日志里没有任何可判定信号（线上表现
+    为 100% 未分类 + 无告警）。现在改为**每轮各 1 条** ERROR + 启动降级打点：
+
+    - 读失败（异常：缺表 / DSN 不对 / 跨域通道坏）→ `reason=read_failed`；
+    - 读到空字典（表在但无启用行，例如种子缺失或整表停用）→ `reason=empty`。
+
+    两类都只降级、不中断同步（`category_id=0` 语义保持不变），因此每轮最多 1 条
+    ERROR，不会回到「逐技能刷屏」。
+    """
+    try:
+        from src.domains.mgmt import public as _mgmt_public_cat  # noqa: PLC0415
+        cat_map = _mgmt_public_cat.skill_category_active_map() or {}
+    except Exception as exc:  # noqa: BLE001 - 分类不可用只降级为 category_id=0（与原实现同口径）
+        logger.error("skill sync: skill_category dictionary read failed, category_id "
+                     f"falls back to 0 this round (reason: {exc})")
+        record_startup_degraded("skill_category", "read_failed")
+        return {}
+    if not cat_map:
+        logger.error("skill sync: skill_category dictionary is empty (no active row), "
+                     "category_id falls back to 0 this round — check the mgmt-domain "
+                     "skill_category seed / is_active state")
+        record_startup_degraded("skill_category", "empty")
+        return {}
+    return cat_map
+
+
 def _sync_skills_to_db(data: dict) -> int:
     """从 skill-description.json 数据同步官方技能元信息到 DB（INSERT/UPDATE，含 category_id）。
 
@@ -138,16 +211,14 @@ def _sync_skills_to_db(data: dict) -> int:
     _db, _db_lock = _db_pair("runtime")
 
     count = 0
+    # Issue #3798：未命中 slug 的轮级聚合 sink（循环内只进 sink + DEBUG，轮末 ≤1 条 WARNING）
+    miss_sink: dict = {}
     with _db_lock:
         c = _db.cursor()
         # 构建 slug → category_id 缓存（skill_category 归 mgmt：取映射走 owner 域 public，
-        # 本域只留 skill 表的 SQL。原语句 `WHERE is_active=1` 的口径由原语保留）
-        cat_map = {}
-        try:
-            from src.domains.mgmt import public as _mgmt_public_cat  # noqa: PLC0415
-            cat_map = _mgmt_public_cat.skill_category_active_map()
-        except Exception as exc:  # noqa: BLE001 - 分类不可用只降级为 category_id=0（与原实现同口径）
-            logger.debug(f"skill_category map unavailable, category_id falls back to 0: {exc}")
+        # 本域只留 skill 表的 SQL。原语句 `WHERE is_active=1` 的口径由原语保留）。
+        # 字典不可用/为空 → 每轮 1 条 ERROR + 启动降级打点（Issue #3798，不再静默）
+        cat_map = _load_skill_category_map()
         dict_map = {}
         try:
             from src.domains.mgmt import public as _mgmt_public_dict  # noqa: PLC0415
@@ -165,7 +236,10 @@ def _sync_skills_to_db(data: dict) -> int:
                 sub_scene = info.get("sub_scene", "")
                 category_id = cat_map.get(sub_scene, 0)
                 if sub_scene and category_id == 0:
-                    logger.warning(f"skill '{skill_name}' sub_scene='{sub_scene}' has no matching skill_category slug, category_id=0")
+                    # Issue #3798：逐技能明细降 DEBUG 并进轮级 sink（轮末 1 条聚合 WARNING）
+                    _record_unresolved(miss_sink, sub_scene, skill_name)
+                    logger.debug(f"skill sync: skill '{skill_name}' sub_scene='{sub_scene}' "
+                                 "unresolved in skill_category (aggregated per round)")
                 new_l1, new_l2 = _resolve_skill_category(info, dict_map)
                 raw_tags = info.get("tags")
                 if isinstance(raw_tags, str):
@@ -228,6 +302,8 @@ def _sync_skills_to_db(data: dict) -> int:
             except Exception:
                 logger.exception(f"sync skill '{skill_name}' to DB failed, skipping")
         _db.commit()
+    # Issue #3798：轮末一次性输出未命中聚合告警（≤1 条；全部命中则不输出）
+    _log_unresolved_misses(miss_sink)
     return count
 
 
@@ -495,27 +571,37 @@ async def sync_official_skills() -> dict:
             logger.exception(f"skill sync: remote sync failed: {e}")
 
         # 2. DB 同步：读本地 json → _sync_skills_to_db → P46.4 stale 检测（只读）
+        #    Issue #3742：写 DB 前先续期外层锁；续不上 → 中止本轮剩余步骤
+        #    （锁被其它实例接管后仍写 DB 就是双实例并发写）。
+        outer_lock_held = await _renew_stage_lock("DB sync step")
         db_sync_complete = False
-        try:
-            json_path = os.path.join(CONFIG_DIR, "skill-description.json")
-            if os.path.exists(json_path):
-                with open(json_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                result["db_synced"] = _sync_skills_to_db(data)
-                db_sync_complete = True
-                # P46.4：以合并后 json 键集为准只读检测（铁律 1.0：零 DB 写）
-                result["stale_skill"] = _detect_stale_official_skills(set(data.keys()), db_sync_complete)
-        except Exception as e:
-            logger.exception(f"skill sync: DB sync failed: {e}")
+        if outer_lock_held:
+            try:
+                json_path = os.path.join(CONFIG_DIR, "skill-description.json")
+                if os.path.exists(json_path):
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    result["db_synced"] = _sync_skills_to_db(data)
+                    db_sync_complete = True
+                    # P46.4：以合并后 json 键集为准只读检测（铁律 1.0：零 DB 写）
+                    result["stale_skill"] = _detect_stale_official_skills(set(data.keys()), db_sync_complete)
+            except Exception as e:
+                logger.exception(f"skill sync: DB sync failed: {e}")
 
         # 3. OBS 同步：算 hash → 打包 → 上传
-        try:
-            obs_result = await sync_official_skills_to_obs()
-            result["obs_added"] = obs_result.get("added", 0)
-            result["obs_updated"] = obs_result.get("updated", 0)
-            result["obs_skipped"] = obs_result.get("skipped", 0)
-        except Exception as e:
-            logger.exception(f"skill sync: OBS sync failed: {e}")
+        #    Issue #3742（QA Required）：上传前续期外层锁，避免长阶段（打包/上传）中途
+        #    自然过期被接管；续期失败（含异常分支）→ INFO + 中止本轮 OBS 与场景步骤，
+        #    否则锁已被其它实例接管仍会上传 OBS，与「单实例独占同步」目标冲突。
+        if outer_lock_held:
+            outer_lock_held = await _renew_stage_lock("OBS step")
+        if outer_lock_held:
+            try:
+                obs_result = await sync_official_skills_to_obs()
+                result["obs_added"] = obs_result.get("added", 0)
+                result["obs_updated"] = obs_result.get("updated", 0)
+                result["obs_skipped"] = obs_result.get("skipped", 0)
+            except Exception as e:
+                logger.exception(f"skill sync: OBS sync failed: {e}")
 
         # 4. R31 串行场景同步：skill 表已就绪，复用已下载的 repo_root。
         #    §6.3 外层锁续期（to_thread 卸载）：锁被抢 → 中止本轮剩余步骤。
@@ -524,7 +610,9 @@ async def sync_official_skills() -> dict:
             from src.kernel.lock import acquire_lock as _al, release_lock as _rl
             from src.domains.runtime.storage.scene_sync import sync_official_scenes
             # §6.3 外层锁续期（to_thread 卸载，与下方 acquire/release 一致）
-            if await _ensure_outer_lock():
+            if outer_lock_held:
+                outer_lock_held = await _renew_stage_lock("scene step")
+            if outer_lock_held:
                 scene_lock = await asyncio.to_thread(_al, "scene_sync", 300)
                 if not scene_lock:
                     logger.warning("skill sync: legacy scene_sync lock held, skipping scene step this cycle")
@@ -540,11 +628,14 @@ async def sync_official_skills() -> dict:
         # §3.5 唯一清理点（含父目录，P45/§4.5 统一形式）——任何退出路径都执行
         if repo_root:
             shutil.rmtree(os.path.dirname(repo_root), ignore_errors=True)
-        # §6.3 超时观测：周期 > TTL/2（900s）提前 ERROR 告警（锁过期风险可观测）
+        # §6.3 超时观测：周期 > TTL/2（由 SKILL_SYNC_LOCK_TTL 派生）提前 ERROR 告警。
+        #   监控关键字稳定为 `skill sync: cycle exceeded`，具体秒数随 TTL 派生
+        #   （默认 TTL=600 → 阈值 300s），告警规则请按关键字匹配而非秒数。
         _elapsed = _time.monotonic() - _cycle_start
-        if _elapsed > 900:
-            logger.error(f"skill sync: cycle exceeded 900s ({_elapsed:.0f}s), "
-                         f"check TTL adjustment or stuck-cycle causes")
+        _threshold = SKILL_SYNC_LOCK_TTL / 2
+        if _elapsed > _threshold:
+            logger.error(f"skill sync: cycle exceeded {_threshold:.0f}s ({_elapsed:.0f}s), "
+                         f"check TTL adjustment ({SKILL_SYNC_LOCK_TTL}s) or stuck-cycle causes")
 
     return result
 
@@ -563,8 +654,11 @@ async def _skill_sync_worker(interval: float = 1800.0):
     _consecutive_failures = 0
     while True:
         try:
-            async with run_with_distributed_lock("skill_sync", ttl=1800):
-                await sync_official_skills()
+            async with run_with_distributed_lock("skill_sync", ttl=SKILL_SYNC_LOCK_TTL) as acquired:
+                if acquired:
+                    await sync_official_skills()
+                else:
+                    logger.debug("skill sync: skipped, another instance holds the lock")
             _consecutive_failures = 0
         except asyncio.CancelledError:
             logger.info("skill sync worker cancelled")
@@ -579,26 +673,45 @@ async def _skill_sync_worker(interval: float = 1800.0):
         await asyncio.sleep(interval)
 
 
-async def _ensure_outer_lock(ttl: int = 1800) -> bool:
+async def _ensure_outer_lock(ttl: int = SKILL_SYNC_LOCK_TTL, stage: str = "scene step") -> bool:
     """续期外层 `skill_sync` 锁；续不上时按同一 holder 重抢一次。
 
     为什么需要重抢：同一进程里可能存在不止一个调度器（历史上 main / server_tasks /
     grape_server 三个入口各调一次 start_skill_sync_scheduler，而它并不幂等）。
     两个 worker 共用模块级的锁 holder，A 的 release 会按 holder 删掉 B 刚拿到的行，
     B 在下一轮续期时就必然失败并放弃剩余步骤——日志表现为每轮一条
-    `outer lock lost before scene step`，而场上其实只有一个存活进程。
+    `outer lock lost before <stage>`，而场上其实只有一个存活进程。
 
-    重抢成功说明「行被自己人删了」（竞态）；抢不到说明锁真被别的实例接管，
-    这时确实该中止本轮剩余步骤。
+    重抢成功说明「行被自己人删了」（竞态，WARN，继续本轮）；续期与重抢都失败说明
+    锁真被别的实例接管（INFO，跳过本轮）；过程中抛异常说明锁服务异常（ERROR，跳过）。
+
+    `stage` 仅用于日志定位（DB sync / OBS / scene step），不影响续期语义。
     """
     from src.kernel.lock import acquire_lock as _al, renew_lock as _rn
 
-    if await asyncio.to_thread(_rn, "skill_sync", ttl):
+    try:
+        if await asyncio.to_thread(_rn, "skill_sync", ttl):
+            return True
+        if await asyncio.to_thread(_al, "skill_sync", ttl):
+            logger.warning(f"skill sync: outer lock re-acquired before {stage} (lock row was dropped)")
+            return True
+        logger.info(f"skill sync: outer lock lost before {stage}, skipped by another instance")
+        return False
+    except Exception:
+        logger.exception("skill sync: outer lock renew/re-acquire failed with error")
+        return False
+
+
+async def _renew_stage_lock(stage: str) -> bool:
+    """Issue #3742：阶段开始前续期外层 `skill_sync` 锁，续不上即中止本轮剩余步骤。
+
+    锁被其它实例接管后仍继续上传 OBS / 写 DB 就是多实例并发写同一份产物，与
+    「单实例独占同步」目标冲突。因此续期失败（被接管 INFO / 锁服务异常 ERROR）一律
+    返回 False，由调用方跳过本轮 OBS、场景等剩余步骤（锁已不归本实例，无权续跑）。
+    """
+    if await _ensure_outer_lock(stage=stage):
         return True
-    if await asyncio.to_thread(_al, "skill_sync", ttl):
-        logger.warning("skill sync: outer lock re-acquired before scene step (lock row was dropped)")
-        return True
-    logger.error("skill sync: outer lock lost before scene step, aborting remaining steps")
+    logger.info(f"skill sync: aborting remaining steps this cycle, outer lock lost before {stage}")
     return False
 
 

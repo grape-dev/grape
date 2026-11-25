@@ -226,7 +226,7 @@ def set_platform_bot(provider: str, body: BotBody, admin: dict = Depends(require
         # 靠人手填必然出错（实测填组织名/grape 账号名 → git clone 恒 403）。
         # 这里把约束变成派生：坏令牌当场 400（不静默入库），好令牌自动带回 login。
         try:
-            from src.domains.mgmt.admin.config_store import verify_token_scopes as _verify_scopes
+            from src.domains.mgmt.admin.config_store import verify_token_with_scopes as _verify_scopes
 
             _verified, _bot_scopes = _verify_scopes(provider, body.token)
             verified_login = str((_verified or {}).get("login") or "").strip()
@@ -238,12 +238,9 @@ def set_platform_bot(provider: str, body: BotBody, admin: dict = Depends(require
         # Issue #4301 第二批（2026-11-25 负责人拍板）：平台 Bot 也在推送链上
         # （仓库无 bot 时落到全局 bot），绑定期预检 workflow 能力并落 meta，
         # 供 spec 阶段诊断按真实档位判定。
-        from src.domains.mgmt.user.repo_manager import (
-            workflows_probe_supported as _wf_probe_ok,
-            workflows_write_from_scopes as _wf_from_scopes,
-        )
+        from src.domains.mgmt.user.repo_manager import workflows_probe_supported as _wf_probe_ok
         if _wf_probe_ok(provider):
-            _wf_cap = _wf_from_scopes(_bot_scopes)
+            _wf_cap = None if _bot_scopes is None else ("workflow" in _bot_scopes)
             if _wf_cap is False:
                 scope_warnings.append(
                     f"{provider} Bot 令牌缺少 workflow 权限：涉及 .github/workflows 的推送会被"

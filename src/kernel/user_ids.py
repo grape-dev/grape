@@ -15,7 +15,7 @@ TEXT / VARCHAR(36)。历史代码大量使用 ``user_id > 0`` 判断"是否归�
 
 from typing import Any
 
-__all__ = ["has_user_id", "user_id_set_sql", "user_id_unset_sql", "USER_ID_UNSET"]
+__all__ = ["USER_ID_UNSET", "has_user_id", "norm_uid", "user_id_set_sql", "user_id_unset_sql"]
 
 # 未归属哨兵的字面量集合（小写比较，覆盖 int 0 / str "0" / 空串 / None 字符串化）
 USER_ID_UNSET = frozenset({"", "0", "none", "null"})
@@ -32,6 +32,20 @@ def has_user_id(value: Any) -> bool:
     if isinstance(value, (int, float)):
         return value != 0
     return str(value).strip().lower() not in USER_ID_UNSET
+
+
+def norm_uid(value: Any) -> int | str:
+    """账号 id 归一：纯数字串转 ``int``，其余（D105 后的 UUIDv7 字符串）原样保留。
+
+    历史通知链直接 ``int(user_id)``，对 UUID 抛 ``ValueError`` 后被各层 ``except``
+    静默吞掉，表现为「通知没发但调用方以为成功」（Issue #3510）。纯数字仍转 int，
+    保证既有以 int 参与 sha1 的 ``out_track_id`` 单号不漂移（跨进程幂等不受影响）。
+    """
+    text = str(value if value is not None else "").strip()
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return text
 
 
 def user_id_set_sql(col: str = "user_id") -> str:

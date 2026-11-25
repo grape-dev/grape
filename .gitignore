@@ -102,6 +102,8 @@ scripts/check_*.py
 # Issue #4158：Makefile lint / scripts/check-all.sh / .github/workflows/lint.yml 引用的门禁脚本
 !scripts/check_duplicate_defs.py
 !scripts/check_f811.py
+# Issue #4295：db_lock 锁内外部 IO 门禁（Makefile lint 引用）
+!scripts/check_db_lock_external_io.py
 scripts/clean_*.py
 !scripts/clean_empty_strings_to_null.py
 scripts/batch_*.py
@@ -126,6 +128,8 @@ scripts/check-*-*.py
 !scripts/check_lib_query_names.py
 # Issue #2227：grape CLI 能力漂移守卫（进入 check-all.sh，须入库）
 !scripts/check_grape_cli_drift.py
+# Issue #3796：场景分类 slug 门禁（linux-backend CI 引用，须入库）
+!scripts/check_category_slugs.py
 scripts/verify-*-*.py
 scripts/install-worker.sh.bak.*
 start-cluster.sh

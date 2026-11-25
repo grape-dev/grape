@@ -238,6 +238,27 @@ CREATE TABLE IF NOT EXISTS obs_log (
 """
 
 
+# ===== webhook 验签拒绝事实（Issue #3750）=====
+# 归 insight：每次 403 token 不匹配落一行，支撑两件现有链路做不到的事——
+#   1) 「同仓库 token mismatch 速率」告警（按 repo 60s 窗口计数，告警体在 alerts.py）；
+#   2) 按 (ip, token_fp) 反查是哪条残留旧 secret 的 webhook 在发事件。
+# 只存 sha256 短指纹，**绝不存明文 token / 任意长度前缀**（#860 脱敏口径，#3750 验收）。
+# created_at 由写入方统一写 ISO(UTC)：字符串比较即时间比较（SQLite/MySQL 同语义）。
+_OBS_WEBHOOK_REJECTS_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_obs_webhook_rejects (
+    id          VARCHAR(32) NOT NULL PRIMARY KEY,
+    repo_key    TEXT NOT NULL DEFAULT '',
+    provider    TEXT NOT NULL DEFAULT '',
+    event       TEXT NOT NULL DEFAULT '',
+    ip          TEXT NOT NULL DEFAULT '',
+    token_fp    TEXT NOT NULL DEFAULT '',
+    expected_fp TEXT NOT NULL DEFAULT '',
+    reason      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT ''
+)
+"""
+
+
 # ===== 仓库凭据单表（S80/D55 + D99）=====
 # 归属 insight：读写语句全在 insight public（runtime public 转发）。DDL 原在
 # src/api/db_setup.py 的迁移函数里（2026-11-15 归位），建表仍由该迁移触发，

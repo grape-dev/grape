@@ -44,6 +44,11 @@
         <div class="dbv-sechead">
           <h2>{{ t('execution_flow') }}</h2>
         </div>
+        <!-- Issue #3508：健康查询失败兜底——可读错误 + 重试，不白屏 -->
+        <div v-if="sceneEngineHealth.error" class="dbv-enghealth-err">
+          ⚠️ {{ sceneEngineHealth.error }}
+          <a @click="retrySceneEngineHealth">{{ t('retry') }}</a>
+        </div>
         <div class="ap-grid">
           <template v-for="(node, i) in editNodes" :key="node.id">
             <div :class="['ap-nd', { off: node.enabled === false }]">
@@ -86,6 +91,8 @@
                 <div class="ap-nd-lbl">{{ t('label_engine') }}</div>
                 <template v-if="node.enabled !== false">
                   <div v-html="engineBadgeHtml(node)"></div>
+                  <!-- Issue #3508：引擎健康双指标（健康分 / 物理可达性 + 可读原因） -->
+                  <div v-html="engineHealthChipHtml(node)"></div>
                   <button class="ap-nd-engbtn" @click.stop="openEngineModal(node.id)">
                     {{ t('select_engine') }}
                   </button>
@@ -299,6 +306,15 @@
             </div>
           </div>
           <div class="ap-grid">
+            <!-- Issue #3508：健康查询失败兜底——可读错误 + 重试，不白屏 -->
+            <div
+              v-if="sceneEngineHealth.error"
+              class="dbv-enghealth-err"
+              style="grid-column: 1 / -1"
+            >
+              ⚠️ {{ sceneEngineHealth.error }}
+              <a @click="retrySceneEngineHealth">{{ t('retry') }}</a>
+            </div>
             <template
               v-for="(node, i) in flowEditing ? editNodes : viewNodes"
               :key="node.id + '-' + i"
@@ -371,6 +387,8 @@
                   <div class="ap-nd-lbl">{{ t('label_engine') }}</div>
                   <template v-if="node.enabled !== false">
                     <div v-html="engineBadgeHtml(node)"></div>
+                    <!-- Issue #3508：引擎健康双指标（健康分 / 物理可达性 + 可读原因） -->
+                    <div v-html="engineHealthChipHtml(node)"></div>
                     <button
                       v-if="flowEditing"
                       class="ap-nd-engbtn"
@@ -902,6 +920,9 @@
           {{
             t('engines_available', { count: (agentEngines[engineModal.agentType] || []).length })
           }}
+          <div v-if="engineModal.mode === 'engine'" class="dbv-engprio-hint">
+            {{ t('engine_priority_hint') }}
+          </div>
         </div>
         <div v-if="engineDetachHint" v-html="engineDetachHint"></div>
         <!-- Issue #1208：两模式 radio——切换只换内容，互不清空、互不派生（用户口径 2026-11-09） -->
@@ -1146,9 +1167,30 @@
                     {{ e.device || '' }}{{ e.cred_name ? ' · ' + e.cred_name : '' }}
                   </div>
                 </div>
-                <span class="dbv-engstatus" :style="{ color: engStatusColor(e.status) }">{{
-                  engStatusLabel(e.status)
-                }}</span>
+<span
+                  class="dbv-engstatus"
+                  :style="{ color: engStatusColor(e.status) }"
+                >
+                  {{ engStatusLabel(e.status) }}
+                  <!-- Issue #3508：双指标健康标签（健康分 / 物理可达性） -->
+                  <span
+                    class="dbv-engstatus-health"
+                    v-html="engineModalHealthChip(e)"
+                  ></span>
+                </span>
+                <select
+                  v-if="engCurIds.includes(e.id)"
+                  class="dbv-engprio"
+                  :value="enginePriority(e.id)"
+                  :title="t('engine_priority')"
+                  @click.stop
+                  @change="setEnginePriority(e.id, $event.target.value)"
+                >
+                  <option value="">{{ t('engine_priority_unset') }}</option>
+                  <option value="1">{{ t('engine_priority_high') }}</option>
+                  <option value="5">{{ t('engine_priority_mid') }}</option>
+                  <option value="9">{{ t('engine_priority_low') }}</option>
+                </select>
               </label>
             </template>
           </template>
@@ -1426,6 +1468,11 @@ const detailError = ref('')
 const viewNodes = ref([])
 const agents = ref([])
 const agentEngines = ref({})
+// Issue #3508：场景引擎健康（双指标：health_score / reachability + reason），
+// 由 /scenes/{id}/engine-status 按需加载，失败可重试（不白屏）
+const sceneEngineHealth = ref({ loading: false, error: '', data: null })
+// Issue #3508：候选引擎健康（machine-health，供换绑弹窗未绑定引擎的健康标签）
+const machineHealthMap = ref({})
 const pipesLoading = ref(false)
 const scenePipes = ref([])
 const pipePage = ref(0)
@@ -1843,6 +1890,8 @@ function closeEngineModal() {
   engineModal.open = false
 }
 const engCurIds = ref([])
+// Issue #3564：实例绑定优先级（仅引擎绑定弹窗内编辑，{engine_id: 1|5|9} 空=未配置）
+const engPriorities = ref({})
 const engineDetachHint = ref('')
 // 场景标签缓存（显示名）
 const sceneTagsCache = ref(null)
@@ -2262,6 +2311,138 @@ function engineBadgeHtml(node) {
   return `<span class="dbv-engbadge blue">${esc(t('engine_count', { count: st.total }))}</span>`
 }
 
+// ═══ Issue #3508：引擎健康双指标（健康分 + 物理可达性）═══
+// 徽章只区分在线/离线；这里按 engine-status 的结构化条目
+// （{id, name, health_score, reachability, reason}）逐台展示双指标与可读原因。
+function loadMachineHealth() {
+  // Issue #3508：一次性拉全部引擎健康（候选换绑引擎也需要双指标标签）
+  API()
+    .get('/runtime/admin/machine-health')
+    .then(function (d) {
+      const m = {}
+      ;((d && d.engines) || []).forEach(function (x) {
+        if (x && x.runtime_id != null) m[x.runtime_id] = x
+      })
+      machineHealthMap.value = m
+    })
+    .catch(function () {
+      // 降级：候选引擎无健康标签，不影响选引擎与保存
+      machineHealthMap.value = {}
+    })
+}
+function loadSceneEngineHealth(sceneId) {
+  if (!sceneId || !dashOwner.value || !dashName.value) return
+  sceneEngineHealth.value = { loading: true, error: '', data: sceneEngineHealth.value.data }
+  API()
+    .get(
+      '/scenes/' +
+        encodeURIComponent(sceneId) +
+        '/engine-status?repo=' +
+        encodeURIComponent(dashOwner.value + '/' + dashName.value)
+    )
+    .then(function (d) {
+      if (d && d.degraded) {
+        // 接口错误兜底：可读错误 + 可重试，不白屏
+        sceneEngineHealth.value = {
+          loading: false,
+          error: d.error || t('engine_health_error'),
+          data: null,
+        }
+        return
+      }
+      sceneEngineHealth.value = { loading: false, error: '', data: d }
+    })
+    .catch(function (e) {
+      sceneEngineHealth.value = {
+        loading: false,
+        error:
+          t('engine_health_error_prefix') +
+          ((e && e.detail && e.detail.message) || (e && e.message) || t('retry_later')),
+        data: null,
+      }
+    })
+}
+function retrySceneEngineHealth() {
+  const sid = detail.value ? detail.value.id : ''
+  if (sid) loadSceneEngineHealth(sid)
+}
+function engineHealthEntriesFor(node) {
+  // Issue #955/#3508：与后端 node_agent_role 同口径——id 优先、tag 兜底
+  const tag = node.id || node.tag
+  const d = sceneEngineHealth.value.data
+  if (!d || !d.engines) return []
+  return d.engines.filter(function (e) {
+    return e.node === tag
+  })
+}
+// Issue #3508：原因码集合（后端 health_reason 结构化字段，不按中文文案反推）
+const REASON_CODES = ['low_score', 'consecutive_failures', 'heartbeat_lost']
+function engineReasonText(h) {
+  const code = h && h.health_reason
+  return code ? t('engine_reason_' + code) : ''
+}
+// Issue #3508：健康分类单一函数（徽章/弹窗共用，避免两处重复判定）
+function classifyEngineHealth(h) {
+  if (!h) return { unreachable: false, lowScore: false, cls: 'green' }
+  const unreachable = h.reachability === 'unreachable'
+  const lowScore =
+    !unreachable &&
+    h.reachability === 'reachable' &&
+    (h.health_abnormal === true || REASON_CODES.indexOf(h.health_reason) >= 0)
+  return { unreachable, lowScore, cls: unreachable ? 'red' : lowScore ? 'yellow' : 'green' }
+}
+const engineHealthMap = computed(function () {
+  const m = {}
+  const d = sceneEngineHealth.value.data
+  if (d && d.engines) d.engines.forEach((e) => (m[e.id] = e))
+  return m
+})
+// 候选引擎（含未绑定）：machine-health 提供健康分/异常原因，agent_engines 状态提供可达性
+function candidateEngineHealth(e) {
+  if (!e) return null
+  const mh = machineHealthMap.value[e.id]
+  if (!mh && e.health_score == null) return null
+  const reachable = e.status === 'online' || e.status === 'recently_lost'
+  const hr = (mh && mh.health_reason) || ''
+  let reason = ''
+  if (!reachable) reason = t('engine_unreachable_reason')
+  else if (hr === 'low_score') reason = t('engine_low_score')
+  else if (hr === 'consecutive_failures') reason = t('engine_consecutive_failures')
+  else if (hr === 'heartbeat_lost') reason = t('engine_heartbeat_lost')
+  return {
+    id: e.id,
+    name: (mh && mh.engine_name) || '',
+    health_score: mh && mh.health_score != null ? mh.health_score : e.health_score,
+    health_abnormal: !!(mh && mh.health_abnormal),
+    reachability: reachable ? 'reachable' : 'unreachable',
+    reason: reason,
+  }
+}
+function engineHealthChipHtml(node) {
+  const entries = engineHealthEntriesFor(node)
+  if (!entries.length) return ''
+  const chips = entries.map(function (e) {
+    const c = classifyEngineHealth(e)
+    const label = c.unreachable
+      ? t('engine_unreachable')
+      : c.lowScore
+        ? t('engine_low_score') + (e.health_score != null ? ' ' + t('engine_score', { score: e.health_score }) : '')
+        : t('engine_ok') + (e.health_score != null ? ' ' + t('engine_score', { score: e.health_score }) : '')
+    const _rt = engineReasonText(e)
+    const tip = esc((e.name || '') + (_rt ? ': ' + _rt : ''))
+    return `<span class="dbv-engbadge ${c.cls}" title="${tip}">${esc(e.name || '')} · ${esc(label)}</span>`
+  })
+  return `<div class="dbv-enghealth">${chips.join(' ')}</div>`
+}
+function engineModalHealthChip(e) {
+  // 已绑定引擎优先用 engine-status 结构化数据；换绑候选回退 machine-health + 在线状态
+  const h = engineHealthMap.value[e.id] || candidateEngineHealth(e)
+  if (!h) return ''
+  const c = classifyEngineHealth(h)
+  const label = c.unreachable ? t('engine_unreachable') : c.lowScore ? t('engine_low_score') : t('engine_ok')
+  return `<span class="dbv-engbadge ${c.cls}" title="${esc(engineReasonText(h))}">${esc(label)}${h.health_score != null ? ' ' + t('engine_score', { score: h.health_score }) : ''}</span>`
+}
+
 // ═══ 场景链（卡片上的技能链展示） ═══
 function sceneChain(s) {
   const pipeline = scenePipelines.value[s.id] || {}
@@ -2322,8 +2503,10 @@ function loadPluginNameMap() {
 
 // ═══ host banner（托管自愈） ═══
 const hostBanner = computed(() => {
-  const hs = (dashData.value || {}).host_status || ''
+  const d = dashData.value || {}
+  const hs = d.host_status || ''
   if (!hs) return null
+  const err = d.host_error ? '：' + d.host_error : ''
   if (hs === 'bot_missing')
     return {
       error: true,
@@ -2331,8 +2514,8 @@ const hostBanner = computed(() => {
       btn: t('dv2.host_recheck'),
     }
   if (hs === 'webhook_missing')
-    return { error: false, text: t('dv2.host_webhook_missing'), btn: t('dv2.host_build_webhook') }
-  return { error: false, text: t('dv2.host_flow_incomplete'), btn: t('dv2.host_recheck') }
+    return { error: true, text: t('dv2.host_webhook_missing') + err, btn: t('dv2.host_recheck') }
+  return { error: false, text: t('dv2.host_flow_incomplete') + err, btn: t('dv2.host_recheck') }
 })
 function repairHost() {
   let owner = ''
@@ -2502,6 +2685,7 @@ function serializeNodes(nodes) {
       // Issue #1208：草稿全量透传三模式字段（uids/selector），引擎选择确认后 F5 不丢
       engine_runtime_uids: n.engine_runtime_uids || [],
       engine_selector: n.engine_selector || {},
+      engine_priorities: n.engine_priorities || {},
     }
   })
 }
@@ -2520,6 +2704,7 @@ function applyDraftNodes(draft) {
       en.plugins = dn.plugins || []
       en.engine_runtime_uids = dn.engine_runtime_uids || []
       en.engine_selector = dn.engine_selector || {}
+      en.engine_priorities = dn.engine_priorities || {}
     }
   })
   return true
@@ -2562,6 +2747,7 @@ function enterCreateMode() {
     engine_runtime_ids: [],
     engine_runtime_uids: [],
     engine_selector: {},
+    engine_priorities: {},
   }))
   createName.value = ''
   createDesc.value = ''
@@ -2721,6 +2907,7 @@ function buildNodesPayload(nodes) {
       engine_runtime_ids: (n.engine_runtime_uids || []).length ? [] : (n.engine_runtime_ids || []),
       engine_runtime_uids: n.engine_runtime_uids || [],
       engine_selector: n.engine_selector || {},
+      engine_priorities: n.engine_priorities || {},
     }))
 }
 function collectLinkedRepos() {
@@ -2814,6 +3001,8 @@ function toggleAgent(agentType) {
     node.engine_runtime_ids = []
     node.engine_runtime_uids = []
     node.engine_selector = {}
+    // Issue #3564：禁用时同清孤儿优先级，防启用后未重开引擎弹窗带旧键保存触发 strict 400
+    node.engine_priorities = {}
   }
   if (mode.value === 'create') saveCreateDraft()
   else if (flowEditing.value) saveEditDraft(detail.value ? detail.value.id : '')
@@ -3059,6 +3248,7 @@ function fetchSelHit(key, agentType, tags) {
 function openEngineModal(agentType) {
   engineModal.open = true
   engineModal.agentType = agentType
+  if (!Object.keys(machineHealthMap.value).length) loadMachineHealth()
   engineModal.q = ''
   engineModal.filterType = ''
   engineModal.filterScope = ''
@@ -3091,6 +3281,14 @@ function openEngineModal(agentType) {
       }
     })
   }
+  // Issue #3564：只保留当前可见且已勾选引擎的优先级，避免孤儿键
+  const prioSrc = (node && node.engine_priorities) || {}
+  const prioNext = {}
+  engCurIds.value.forEach(function (id) {
+    const v = prioSrc[String(id)] || prioSrc[id]
+    if (v) prioNext[String(id)] = v
+  })
+  engPriorities.value = prioNext
   // 异步拉 detached 引擎提示
   if (dashOwner.value && dashName.value) {
     API()
@@ -3100,7 +3298,15 @@ function openEngineModal(agentType) {
         const mine = hints.filter(function (h) {
           return !h.node_tag || h.node_tag === agentType
         })
-        if (!mine.length) return
+        // Issue #3909：解绑提示查询失败（runtime 域不可达）→ 显式降级文案，
+        // 不与「没有引擎被解绑」同形
+        if (!mine.length) {
+          if (d.detached_engines_degraded) {
+            engineDetachHint.value =
+              '<div class="dbv-detach">' + t('dv2.stale_unavailable') + '</div>'
+          }
+          return
+        }
         const names = mine.map(function (h) {
           return (h.runtime_name || 'engine') + '#' + h.runtime_id
         })
@@ -3189,8 +3395,17 @@ const engModalByScope = computed(() => {
 })
 function toggleEngineId(id) {
   const i = engCurIds.value.indexOf(id)
-  if (i >= 0) engCurIds.value.splice(i, 1)
-  else engCurIds.value.push(id)
+  if (i >= 0) {
+    engCurIds.value.splice(i, 1)
+    delete engPriorities.value[String(id)]
+  } else engCurIds.value.push(id)
+}
+function setEnginePriority(id, p) {
+  if (p) engPriorities.value[String(id)] = Number(p)
+  else delete engPriorities.value[String(id)]
+}
+function enginePriority(id) {
+  return engPriorities.value[String(id)] || ''
 }
 function engStatusColor(st) {
   return (
@@ -3227,6 +3442,20 @@ function confirmEnginePick() {
         node.engine_runtime_ids = engCurIds.value.slice()
         node.engine_runtime_uids = []
       }
+    }
+    if (engineModal.mode === 'tag' || (node.engine_runtime_uids || []).length) {
+      // Issue #3564：engine_priorities 仅对 engine_runtime_ids 生效。标签模式与
+      // uid 绑定模式（D11 全 uid 提交会清空 ids）的优先级池恒为空，必须同清，
+      // 否则后端 strict 校验（键须属 engine_runtime_ids）会以 400 拒绝保存。
+      node.engine_priorities = {}
+    } else {
+      // Issue #3564：只保存已勾选引擎的优先级（空对象 = 未配置 = 旧行为）
+      const prio = {}
+      engCurIds.value.forEach(function (id) {
+        const v = engPriorities.value[String(id)]
+        if (v) prio[String(id)] = Number(v)
+      })
+      node.engine_priorities = prio
     }
   }
   closeEngineModal()
@@ -3275,6 +3504,8 @@ function loadSceneDetail(sceneId) {
       viewNodes.value = (pipeline && pipeline.nodes) || []
       agents.value = dashData2.agents || []
       agentEngines.value = dashData2.agent_engines || {}
+      // Issue #3508：加载场景引擎健康双指标（独立兜底，失败不阻塞详情渲染）
+      loadSceneEngineHealth(sceneId)
       detailPrSub.value = !!scene.pr_subscription_enabled
       dashData.value = dashData2
       G.window._dashboardData = dashData2
@@ -3459,6 +3690,8 @@ function enterFlowEdit() {
       G.window._dashboardData = dashData2
       agents.value = dashData2.agents || []
       agentEngines.value = dashData2.agent_engines || {}
+      // Issue #3508：进入流程编辑时刷新引擎健康双指标
+      if (detail.value && detail.value.id) loadSceneEngineHealth(detail.value.id)
       API()
         .get(
           '/scenes/with-pipeline?repo=' + encodeURIComponent(dashOwner.value + '/' + dashName.value)
@@ -3515,6 +3748,7 @@ function buildEditNodes(originalNodes, ags) {
         plugins: node.plugins || [],
         engine_runtime_uids: node.engine_runtime_uids || a.engine_runtime_uids || [],
         engine_selector: node.engine_selector || a.engine_selector || {},
+        engine_priorities: node.engine_priorities || {},
       }
     }
     return {
@@ -3532,6 +3766,7 @@ function buildEditNodes(originalNodes, ags) {
       plugins: [],
       engine_runtime_uids: [],
       engine_selector: {},
+      engine_priorities: {},
     }
   })
 }
@@ -3647,6 +3882,15 @@ function doCopyScene() {
     })
     if (eids.length !== (n.engine_runtime_ids || []).length) dropped = true
     n.engine_runtime_ids = eids
+    const eidKeys = {}
+    eids.forEach(function (eid) {
+      eidKeys[String(eid)] = 1
+    })
+    const keptPrio = {}
+    Object.keys(n.engine_priorities || {}).forEach(function (k) {
+      if (eidKeys[String(k)]) keptPrio[k] = n.engine_priorities[k]
+    })
+    n.engine_priorities = keptPrio
   })
   // 名称冲突处理
   const existing = {}
@@ -4734,6 +4978,32 @@ onBeforeUnmount(function () {
     background: rgba(235, 235, 245, 0.1);
     color: #aeaeb2;
   }
+}
+/* Issue #3508：健康分不足（介于健康与不可达之间的黄色告警档） */
+:deep(.dbv-engbadge.yellow) {
+  background: color-mix(in srgb, var(--c-warning) 10%, transparent);
+  color: var(--c-warning);
+}
+/* Issue #3508：节点引擎健康双指标行 */
+:deep(.dbv-enghealth) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+/* Issue #3508：健康加载失败兜底（可重试，不白屏） */
+.dbv-enghealth-err {
+  font-size: 12px;
+  color: var(--r);
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dbv-enghealth-err a {
+  color: var(--a-text);
+  cursor: pointer;
+  text-decoration: underline;
 }
 /* PR 订阅 */
 .dbv-prsub {
@@ -6043,6 +6313,23 @@ onBeforeUnmount(function () {
   font-size: 11px;
   font-weight: 500;
   flex-shrink: 0;
+}
+/* Issue #3564：实例绑定优先级（仅勾选后出现，空=未配置最低档） */
+.dbv-engprio {
+  margin-left: 8px;
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--bd);
+  background: var(--c);
+  color: var(--t2);
+  cursor: pointer;
+}
+.dbv-engprio-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--t3);
 }
 .dbv-engfoot {
   display: flex;

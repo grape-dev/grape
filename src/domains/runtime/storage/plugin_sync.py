@@ -225,12 +225,21 @@ async def sync_official_plugins() -> dict:
 
 
 async def _plugin_sync_worker(interval: float = 1800.0):
-    """定时同步 worker：启动即执行，之后每 interval 秒（对齐 _skill_sync_worker 模式）。"""
+    """定时同步 worker：启动即执行，之后每 interval 秒（对齐 _skill_sync_worker 模式）。
+
+    P1-D (Issue #357): Distributed lock keeps a single syncing instance when
+    uvicorn runs with --workers N.
+    Issue #3742: 该 CM 不跳过 body，未拿到锁必须在此消费 `acquired` 跳过本轮，
+    否则每个实例每周期各拉一遍外部插件、各写一遍 OBS。
+    """
     from src.domains.runtime.engine.task_lock import run_with_distributed_lock
     while True:
         try:
-            async with run_with_distributed_lock("plugin_sync", ttl=1800):
-                await sync_official_plugins()
+            async with run_with_distributed_lock("plugin_sync", ttl=1800) as acquired:
+                if acquired:
+                    await sync_official_plugins()
+                else:
+                    logger.debug("plugin sync: skipped, another instance holds the lock")
         except asyncio.CancelledError:
             logger.info("plugin sync worker cancelled")
             raise

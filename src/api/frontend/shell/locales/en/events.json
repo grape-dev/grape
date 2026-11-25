@@ -127,5 +127,15 @@
   "status_task_cancelled": "task cancelled",
   "status_task_timeout": "task timed out",
   "status_task_queued": "task queued",
-  "status_task_dispatched": "task dispatched"
+  "status_task_dispatched": "task dispatched",
+  "seq_copy_title": "Copy event seq",
+  "seq_copied": "Copied event seq #{{seq}}",
+  "seq_copy_failed": "Copy failed",
+  "fail_phase": "Failure phase",
+  "fail_type": "Error type",
+  "fail_engine": "Runtime",
+  "fail_legacy_hint": "This is a legacy event without structured failure attribution; check the processing record and logs below.",
+  "fail_actions": "Suggested actions",
+  "btn_fail_retry": "Retry",
+  "btn_contact_human": "Contact support"
 }

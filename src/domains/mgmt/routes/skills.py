@@ -1027,6 +1027,12 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
 
     raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用且技能对象缺失，下载失败。请检查服务端存储配置后重试。"})
 
+@router.get("/by-id/", include_in_schema=False)
+def get_skill_detail_by_id_empty():
+    """空 id（路径末段缺失）属参数错误，返回 400 而非 404「技能未找到」（Issue #4260）。"""
+    raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid_skill_id"})
+
+
 @router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="Skill detail (incl. SKILL.md)", description="Skill detail including SKILL.md. Access: official public, user=owner, repo=managed by caller.")
 def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_or_api_key_or_admin),
                                  repo: str = ""):
@@ -1037,8 +1043,15 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
       未知名称返回 404 而非 422，避免把「名称当 id 解析失败」暴露成参数错误。
     查到后按 scope 校验归属权限：official 可见；user 需本人；repo 需当前用户托管。
     """
-    # Issue #630：name→sid 解析（复用 resolve_skill_id 的 user scope 逻辑）
+    # Issue #4260：三个哨兵值（''/'undefined'/'null'）是前端缺参/占位产物，语义务必与
+    # 「技能不存在」区分——返回 400 invalid_skill_id，而不是落到名称解析误报 404。
+    # ⚠️ 仅拦截这三个字面量，不得扩大为「非数字即 400」：Issue #630 明确保留
+    # 「非数字按 skill_name 解析、未知名称仍 404」的契约，扩大拦截会打断名称深链。
     _raw = str(skill_id or "").strip()
+    if _raw.lower() in ("", "undefined", "null"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid_skill_id"})
+
+    # Issue #630：name→sid 解析（复用 resolve_skill_id 的 user scope 逻辑）
     if not _raw.isdigit():
         from src.domains.mgmt.user.db import resolve_skill_id
         _repo_key = _resolve_repo_key(repo) if repo else ""

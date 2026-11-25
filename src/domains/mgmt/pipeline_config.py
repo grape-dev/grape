@@ -1304,6 +1304,26 @@ def scene_exists_in_repo(scene_id: str, repo_key: str) -> bool:
         return False
 
 
+def scene_pool_binding_warning(scene_id: str, repo_key: str) -> str:
+    """Issue #3790：场景未在仓内 scene pool 登记时的保存/建仓提示（空串 = 已登记）。
+
+    与派发侧 `get_scene_pool_engine_ids` 的 scene_missing 判定同源（同一个
+    `scene_exists_in_repo`）：场景里绑的 scene_id 不是该仓库的副本（典型为误绑模板
+    场景名）时，派发会跳过全局模板回退并降级为 scene_missing，运营只能看到「引擎离线」。
+    写侧只提示不阻断——历史直写路径仍需落库（派发侧另有 fail-closed 防线）。
+    """
+    if not scene_id or not repo_key:
+        return ""
+    try:
+        if scene_exists_in_repo(scene_id, repo_key):
+            return ""
+    except Exception as e:
+        log.warning(f"scene_pool_binding_warning: check failed ({scene_id}/{repo_key}): {e}")
+        return ""
+    return (f"场景 {scene_id} 未在仓库 {repo_key} 的 scene pool 登记（scene_missing）："
+            f"派发将跳过全局模板回退并降级为无引擎派发，请先应用/创建仓内场景副本")
+
+
 def _query_official_scene_ids() -> set[str]:
     """Return set of official scene_ids available in scene_market(source='official')."""
     db, lock = _db()
@@ -1319,11 +1339,62 @@ def _query_official_scene_ids() -> set[str]:
             return set()
 
 
+# Issue #3564：实例绑定优先级档位常量（唯一真源；service / routes / copy_scene 共用）。
+ENGINE_PRIORITY_MIN = 1   # 最高档
+ENGINE_PRIORITY_MAX = 9  # 最低档
+ENGINE_PRIORITY_DEFAULT = 9  # 未配置优先级的引擎默认按最低档处理
+
+
+def normalize_engine_priorities(raw, allowed_ids=None, strict: bool = False) -> dict[str, int]:
+    """Issue #3564：engine_priorities 归一化唯一真源（4 处调用收敛：写侧校验 /
+    get_scene_engine_binding 读侧 / copy_scene 清洗 / runtime service 任务侧）。
+
+    - raw 非 dict：strict 抛 ValueError，非 strict 返回 {}；
+    - 键必须可 int 化，且（allowed_ids 非 None 时）在绑定引擎集合内：孤儿键不产生
+      派发语义；allowed_ids 显式传空集合 = 不允许任何键（节点无绑定引擎时优先级整体拒绝/丢弃）；
+    - 值必须为 ENGINE_PRIORITY_MIN..ENGINE_PRIORITY_MAX 整数（1 最高）；
+    - strict=True：任一非法条目抛 ValueError（保存侧拒绝，避免落库后静默失效）；
+      strict=False：非法条目静默丢弃（读侧 / 复制清洗兼容手写与历史 JSON）。
+    返回 {str(engine_id): priority}，空 dict 表示未配置（旧行为）。
+    """
+    if not isinstance(raw, dict):
+        if strict:
+            raise ValueError("engine_priorities 必须为对象（engine_id → 1..9）")
+        return {}
+    filter_keys = allowed_ids is not None
+    allowed: set[str] = set()
+    for _a in (allowed_ids or []):
+        try:
+            allowed.add(str(int(_a)))
+        except (TypeError, ValueError):
+            log.warning("normalize_engine_priorities: skip non-numeric allowed id %r", _a)
+            continue
+    out: dict[str, int] = {}
+    for _k, _v in raw.items():
+        try:
+            _eid, _p = int(_k), int(_v)
+        except (TypeError, ValueError):
+            if strict:
+                raise ValueError(f"engine_priorities 含非法键/值：{_k!r}={_v!r}")
+            continue
+        if filter_keys and str(_eid) not in allowed:
+            if strict:
+                raise ValueError(f"优先级引擎 {_eid} 不在已绑定引擎列表中")
+            continue
+        if not (ENGINE_PRIORITY_MIN <= _p <= ENGINE_PRIORITY_MAX):
+            if strict:
+                raise ValueError(f"引擎 {_eid} 优先级必须为 1..9（1 最高）")
+            continue
+        out[str(_eid)] = _p
+    return out
+
+
 def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
                              user_id: int = 0) -> dict:
     """Issue #653：解析场景节点的 engine_runtime_ids 绑定状态（空值语义单点收口）。
 
-    返回 {"status": <状态>, "engine_ids": [...], "engine_uids": [...]}，status 四态：
+    返回 {"status": <状态>, "engine_ids": [...], "engine_uids": [...],
+    "engine_priorities": {...}}，status 四态：
     - "no_scene"：场景配置整体不存在（查询失败 / 未创建）
     - "no_node" ：场景存在但无该 agent 节点
     - "unbound" ：节点存在但引擎绑定字段全空（未配置 → 保持全量广播）
@@ -1333,20 +1404,27 @@ def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
     ——双非空由保存端拒绝，此处以 uids 为权威防双轨漂移），空则回落 engine_runtime_ids
     （legacy 只读兼容）。存量 id 节点 uids 恒空 → 读侧行为零变化。
 
+    Issue #3564：engine_priorities 为节点旁挂的实例绑定优先级映射
+    （{str(engine_id): 1..9}，1 最高）；空 dict = 未配置 = 旧行为，调用方不得
+    据此改变认领顺序。优先级仅对 engine_runtime_ids 实例绑定生效（uid 池不产
+    生机器粒度排序，恒为空）。
+
     此前 get_scene_engine_ids 对「节点不存在/查询失败」与「未配置」均返回 []，
     派发侧无法区分，已配置节点解析落空时被静默当作未配置回退全局池（#653 根因）。
     """
+    _empty = {"status": "no_scene", "engine_ids": [], "engine_uids": [],
+              "engine_priorities": {}}
     try:
         cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     except Exception as e:
         log.warning(f"get_scene_engine_binding: scene query failed: {e}")
-        return {"status": "no_scene", "engine_ids": [], "engine_uids": []}
+        return _empty
     if not cfg:
-        return {"status": "no_scene", "engine_ids": [], "engine_uids": []}
+        return _empty
     # pipelines.json default 兜底（fallback=True）：请求的 scene_id 未解析到真实场景
     # → 视为 no_scene（Issue #653：不得把兜底 default 节点当作真实绑定语义）
     if cfg.get("fallback"):
-        return {"status": "no_scene", "engine_ids": [], "engine_uids": []}
+        return _empty
     node = None
     # Issue #955：id 优先、tag 兜底——节点 id 即角色名（agent_type），tag 为展示
     # 阶段名；非标准 tag（如中文阶段名）的存量场景按 id 匹配恢复引擎绑定
@@ -1356,7 +1434,8 @@ def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
             node = n
             break
     if node is None:
-        return {"status": "no_node", "engine_ids": [], "engine_uids": []}
+        return {"status": "no_node", "engine_ids": [], "engine_uids": [],
+                "engine_priorities": {}}
     uids = [str(u or "").strip().lower() for u in (node.get("engine_runtime_uids") or [])
             if str(u or "").strip()]
     out_ids = []
@@ -1364,14 +1443,20 @@ def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
         try:
             _xi = int(_x)
         except (TypeError, ValueError):
+            log.warning("resolve_node_engines: skip non-numeric engine_runtime_ids entry %r", _x)
             continue
         if _xi:
             out_ids.append(_xi)
     if not uids and not out_ids:
-        return {"status": "unbound", "engine_ids": [], "engine_uids": []}
+        return {"status": "unbound", "engine_ids": [], "engine_uids": [],
+                "engine_priorities": {}}
     if uids:
-        return {"status": "bound", "engine_ids": [], "engine_uids": uids}
-    return {"status": "bound", "engine_ids": out_ids, "engine_uids": []}
+        return {"status": "bound", "engine_ids": [], "engine_uids": uids,
+                "engine_priorities": {}}
+    priorities = normalize_engine_priorities(
+        node.get("engine_priorities"), set(out_ids))
+    return {"status": "bound", "engine_ids": out_ids, "engine_uids": [],
+            "engine_priorities": priorities}
 
 
 def get_scene_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0) -> list[int]:

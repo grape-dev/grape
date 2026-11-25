@@ -1,5 +1,10 @@
 <template>
   <div class="ev">
+    <!-- Issue #3812：会话失效软横幅（保留页面，给明确的重新登录入口） -->
+    <div v-if="sessionExpired" class="ev-session-banner">
+      <span>⚠ {{ tb('session_expired') }}</span>
+      <button class="bt bt-p bt-s" @click="relogin">{{ tb('relogin') }}</button>
+    </div>
     <button v-if="backToTask" class="bt bt-o bt-s ev__back" @click="goBackToTask">
       ← {{ t('back_to_requirement') }}
     </button>
@@ -24,7 +29,17 @@
           >
             ‹
           </button>
-          <span class="ts t3 ev__seq">Event #{{ data.seq || '—' }}</span>
+          <span class="ts t3 ev__seq"
+            >Event #{{ data.seq || '—' }}
+            <button
+              v-if="data.seq"
+              class="ev__seqcopy"
+              :title="t('seq_copy_title')"
+              @click="copySeq"
+            >
+              ⧉
+            </button></span
+          >
           <span v-if="data.nav_scope === 'issue' && data.nav_issue_id" class="ts t3 ev__navscope"
             >{{ t('nav_same_issue', { id: data.nav_issue_id }) }}</span
           >
@@ -397,6 +412,8 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+// Issue #3812：会话感知轮询器（401 停机 / 连续失败降频 / 会话事件订阅）
+import { createSessionPoller } from '../lib/pollGuard.js'
 
 const G = globalThis
 
@@ -418,6 +435,13 @@ function tc(key) {
         : key === 'confirm'
           ? '确认'
           : key
+}
+// Issue #3812：会话失效横幅文案复用看板已有词条（tasks.board.*，zh/en 双包齐备），
+// 不新增语言包键、也不在视图里硬编码中文字面量（中文棘轮只减不增）。
+function tb(key, params) {
+  const full = 'tasks.board.' + key
+  const v = G.I18N.t(full, params)
+  return v && v !== full ? v : key
 }
 const DEFAULTS = {
   back_to_requirement: '返回需求详情',
@@ -471,6 +495,16 @@ const DEFAULTS = {
   log_title_realtime: '实时运行日志',
   log_title_inline: '事件日志',
   log_count_suffix: ' 条',
+  seq_copy_title: '复制事件序号',
+  seq_copied: '已复制事件序号 #{seq}',
+  seq_copy_failed: '复制失败',
+  fail_phase: '失败阶段',
+  fail_type: '异常类型',
+  fail_engine: '执行引擎',
+  fail_legacy_hint: '该事件为历史事件，未记录结构化失败原因；可查看下方处理记录与日志排查。',
+  fail_actions: '建议操作',
+  btn_fail_retry: '重试',
+  btn_contact_human: '联系人工',
   log_copy: '复制',
   log_copy_title: '复制日志',
   log_copied: '已复制',
@@ -704,9 +738,22 @@ const statusText = computed(() => {
   return html
 })
 const failExpanded = ref(false)
+function parseFailureInfo(raw) {
+  if (!raw) return null
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw)
+      return parsed && typeof parsed === 'object' ? parsed : null
+    } catch (e) {
+      return null
+    }
+  }
+  return typeof raw === 'object' ? raw : null
+}
 const failReasonText = computed(() => {
   const d = data.value
   if (d.status !== 'failed') return ''
+  const fi = parseFailureInfo(d.failure_info)
   // Issue #494：result 为空/不足时补 task.errors 归因（超时等失败此前零归因）
   const txt = (d.result || '').toString().trim()
   const errs = ((d.task && d.task.task_errors) || [])
@@ -716,29 +763,45 @@ const failReasonText = computed(() => {
   if (txt) parts.push(txt)
   if (errs.length && errs.join('\n') !== txt) parts.push(errs.join('\n'))
   const full = parts.join('\n')
-  if (!full)
-    return (
-      '<div style="margin-top:6px;font-size:11px;color:var(--t3,#86868b)">' +
-      esc(t('no_fail_reason')) +
-      '</div>'
-    )
-  // 长文本折叠：默认 200 字，展开/收起走事件委托
+  const message = (fi && fi.message) || full
+  // Issue #3433：结构化原因优先；历史事件缺字段降级提示，不报错
+  const boxStyle =
+    'margin-top:6px;background:color-mix(in srgb, var(--r) 8%, transparent);border:1px solid color-mix(in srgb, var(--r) 18%, transparent);border-radius:10px;padding:8px 12px;font-size:12px;color:var(--r);line-height:1.6'
+  const row = (label, value) =>
+    '<div><b>' + esc(label) + '：</b><span style="white-space:pre-wrap">' + esc(value) + '</span></div>'
+  let html = '<div class="ev-fail-box" style="' + boxStyle + '">'
   const LIMIT = 200
-  const short = full.length > LIMIT ? full.slice(0, LIMIT) + '…' : full
-  const expandable = full.length > LIMIT
-  const shown = expandable && failExpanded.value ? full : short
-  let html =
-    '<div class="ev-fail-box" style="margin-top:6px;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:10px;padding:8px 12px;font-size:12px;color:#d32f2f;line-height:1.6"><b>' +
-    esc(t('fail_reason')) +
-    '：</b><span style="white-space:pre-wrap">' +
-    esc(shown) +
-    '</span>'
-  if (expandable) {
-    html +=
-      ' <a href="javascript:void(0)" data-ev-act="failtoggle" style="color:var(--a);white-space:nowrap">' +
-      esc(t(failExpanded.value ? 'fail_collapse' : 'fail_expand')) +
-      '</a>'
+  if (message) {
+    const expandable = message.length > LIMIT
+    const shown = expandable && failExpanded.value ? message : message.slice(0, LIMIT) + (expandable ? '…' : '')
+    html += row(t('fail_reason'), shown)
+    if (expandable) {
+      html +=
+        ' <a href="javascript:void(0)" data-ev-act="failtoggle" style="color:var(--a);white-space:nowrap">' +
+        esc(t(failExpanded.value ? 'fail_collapse' : 'fail_expand')) +
+        '</a>'
+    }
   }
+  if (fi) {
+    const phase = fi.phase_label || fi.phase
+    if (phase) html += row(t('fail_phase'), phase)
+    if (fi.error_type) html += row(t('fail_type'), fi.error_type)
+    const engine = [fi.runtime, fi.agent].filter(Boolean).join(' / ')
+    if (engine) html += row(t('fail_engine'), engine)
+  } else {
+    html +=
+      '<div style="margin-top:4px;color:var(--t3,#86868b);font-size:11px">' +
+      esc(t('fail_legacy_hint')) +
+      '</div>'
+  }
+  html +=
+    '<div style="margin-top:8px"><b>' +
+    esc(t('fail_actions')) +
+    '：</b> <button class="bt bt-o bt-s" data-ev-act="failretry">' +
+    esc(t('btn_fail_retry')) +
+    '</button> <button class="bt bt-o bt-s" style="margin-left:4px" data-ev-act="failfeedback">' +
+    esc(t('btn_contact_human')) +
+    '</button></div>'
   html += '</div>'
   return html
 })
@@ -856,6 +919,8 @@ function onInfoClick(ev) {
   else if (act === 'tasklog') openTaskLog(data.value.task.task_id, 'seq#' + data.value.seq)
   else if (act === 'inlinelog') openInlineLog(data.value.seq, 'seq#' + data.value.seq)
   else if (act === 'failtoggle') failExpanded.value = !failExpanded.value // Issue #494：失败原因展开/收起
+  else if (act === 'failretry') ((redispatch.open = true), (redispatch.seq = data.value.seq))
+  else if (act === 'failfeedback') openFeedback()
 }
 // ── 折叠区块 ──
 const openSections = reactive({ ctxInfo: true, promptBody: false })
@@ -1243,8 +1308,10 @@ function deleteKnowledge(scope) {
     })
 }
 
-// ── 轮询（Issue #342：非终态 5s 局部更新，指纹防抖）──
-let pollTimer = null
+// ── 轮询（Issue #342：非终态 5s 局部更新，指纹防抖；
+//    Issue #3812：会话失效即停机，杜绝登录页已切换但后台仍每 5s 打 401）──
+const EVENT_POLL_INTERVAL_MS = 5000
+const EVENT_POLL_DEGRADE_MS = 15000
 let pollSeq = 0
 let pollBusy = false
 let lastFp = ''
@@ -1266,6 +1333,67 @@ function fingerprint(d) {
     (d.agent_logs || []).length,
   ])
 }
+// Issue #3812：会话失效态（横幅 + 重新登录入口），与 IssuesView #3734 同构
+const sessionExpired = ref(false)
+// Issue #3812：停机收口——所有常驻定时器 + 在途流一并收敛（幂等）
+function markSessionExpired() {
+  stopPoll()
+  tlStatusPoller.stop()
+  if (tlAborter) {
+    tlAborter.abort()
+    tlAborter = null
+  }
+  sessionExpired.value = true
+}
+// Issue #3812：登录恢复后仅回启「仍在看着的」详情/日志（隐藏视图不复活，避免后台打点）
+function resumeAfterSessionRestored() {
+  if (!sessionExpired.value) return
+  sessionExpired.value = false
+  if (G.window._currentView === 'event' && data.value && data.value.seq) startPoll(data.value)
+  if (taskLog.open && !taskLog.inline && taskLog.taskId) {
+    tlStatusPoller.start()
+    if (!tlAborter) taskLogStream()
+  }
+}
+function relogin() {
+  if (G.app && G.app.showLogin) G.app.showLogin()
+}
+function pollTick() {
+  if (!pollSeq || pollBusy) return
+  if (G.window._currentView !== 'event') {
+    stopPoll()
+    return
+  }
+  pollBusy = true
+  G.API.get('/events/detail/' + pollSeq)
+    .then(function (d2) {
+      pollBusy = false
+      detailPoller.noteSuccess()
+      if (G.window._currentView !== 'event' || pollSeq !== d2.seq) return
+      if (d2.status === 'completed' || d2.status === 'failed' || d2.status === 'cancelled') {
+        stopPoll()
+        data.value = d2
+        return
+      }
+      const fp = fingerprint(d2)
+      if (fp === lastFp) return
+      lastFp = fp
+      data.value = d2
+    })
+    .catch(function (e) {
+      pollBusy = false
+      // Issue #3812：旧实现此处静默吞错（401 也继续 5s 打点）；现在 401 立即停机并
+      // 亮横幅，非 401 连续 3 次降频 15s，任一次成功即复位常规节奏。
+      detailPoller.noteError(e)
+    })
+}
+const detailPoller = createSessionPoller({
+  intervalMs: EVENT_POLL_INTERVAL_MS,
+  degradeIntervalMs: EVENT_POLL_DEGRADE_MS,
+  tick: pollTick,
+  onSessionExpired: markSessionExpired,
+  onSessionRestored: resumeAfterSessionRestored,
+})
 function startPoll(d) {
   const st = (d && d.status) || ''
   if (st === 'completed' || st === 'failed' || st === 'cancelled') {
@@ -1277,40 +1405,17 @@ function startPoll(d) {
     stopPoll()
     return
   }
-  if (pollTimer && pollSeq === seq) return
+  if (sessionExpired.value) {
+    stopPoll()
+    return
+  }
+  if (detailPoller.isRunning() && pollSeq === seq) return
   stopPoll()
   pollSeq = seq
-  pollTimer = setInterval(function () {
-    if (pollBusy) return
-    if (G.window._currentView !== 'event') {
-      stopPoll()
-      return
-    }
-    pollBusy = true
-    G.API.get('/events/detail/' + pollSeq)
-      .then(function (d2) {
-        pollBusy = false
-        if (G.window._currentView !== 'event' || pollSeq !== d2.seq) return
-        if (d2.status === 'completed' || d2.status === 'failed' || d2.status === 'cancelled') {
-          stopPoll()
-          data.value = d2
-          return
-        }
-        const fp = fingerprint(d2)
-        if (fp === lastFp) return
-        lastFp = fp
-        data.value = d2
-      })
-      .catch(function () {
-        pollBusy = false
-      })
-  }, 5000)
+  detailPoller.start()
 }
 function stopPoll() {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
+  detailPoller.stop()
   pollSeq = 0
 }
 G.window._stopEventPoll = stopPoll
@@ -1491,7 +1596,9 @@ const taskLog = reactive({
 const killBtnVisible = ref(false)
 let tlAborter = null
 let tlWaitTimer = null
-let tlStatusTimer = null
+// Issue #3812：任务日志弹窗状态轮询（5s）——401 即停机，非 401 连续 3 次降频 15s
+const TL_POLL_INTERVAL_MS = 5000
+const TL_POLL_DEGRADE_MS = 15000
 function tlStatus(text, color) {
   taskLog.statusHtml = '<span style="color:' + (color || 'var(--t3)') + '">' + esc(text) + '</span>'
 }
@@ -1655,7 +1762,7 @@ function openTaskLogModal(taskId, title) {
     })
   taskLogStream()
   tlCheckTaskStatus()
-  tlStatusTimer = setInterval(tlCheckTaskStatus, 5000)
+  tlStatusPoller.start()
 }
 function openTaskLog(taskId, title) {
   openTaskLogModal(taskId, title)
@@ -1669,7 +1776,12 @@ async function taskLogStream() {
     signal: ac.signal,
   })
     .then(function (resp) {
-      if (!resp.ok) throw new Error('HTTP ' + resp.status)
+      if (!resp.ok) {
+        // Issue #3812：状态码挂到 error 上，供 catch 区分 401（停机）与网络抖动（重连）
+        const httpErr = new Error('HTTP ' + resp.status)
+        httpErr.status = resp.status
+        throw httpErr
+      }
       tlStatus(t('status_connected'), 'var(--g, #2ecc71)')
       taskLog.hasMsg = false
       const reader = resp.body.getReader()
@@ -1717,6 +1829,13 @@ async function taskLogStream() {
     .catch(function (err) {
       if (err && err.name === 'AbortError') return
       tlStatus(t('status_disconnected'), 'var(--r, #e74c3c)')
+      // Issue #3812：日志流是裸 fetch（不走 api.js 401 链路），旧实现在 token 已失效时
+      // 每 2s 重连一次 = 又一条静默 401 循环。401 → 判失效停机，不再重连；网络抖动仍重连。
+      if (err && (err.status === 401 || err.status === '401')) {
+        markSessionExpired()
+        return
+      }
+      if (sessionExpired.value) return
       setTimeout(function () {
         if (taskLog.open && !taskLog.inline) taskLogStream()
       }, 2000)
@@ -1726,13 +1845,22 @@ function tlCheckTaskStatus() {
   if (!taskLog.taskId || taskLog.inline) return
   G.API.get('/runtime/tasks/' + encodeURIComponent(taskLog.taskId) + '/status')
     .then(function (d) {
+      tlStatusPoller.noteSuccess()
       if (!d || !d.status) return
       killBtnVisible.value = d.status === 'running' || d.status === 'dispatched'
     })
-    .catch(function () {
-      /* ignore：与老代码同款静默降级 */
+    .catch(function (e) {
+      // Issue #3812：旧实现同款静默降级，但 401 现在会停机（不再每 5s 白打点）
+      tlStatusPoller.noteError(e)
     })
 }
+const tlStatusPoller = createSessionPoller({
+  intervalMs: TL_POLL_INTERVAL_MS,
+  degradeIntervalMs: TL_POLL_DEGRADE_MS,
+  tick: tlCheckTaskStatus,
+  onSessionExpired: markSessionExpired,
+  onSessionRestored: resumeAfterSessionRestored,
+})
 function terminateCurrentTask() {
   if (!taskLog.taskId) return
   G.API.post('/runtime/tasks/' + encodeURIComponent(taskLog.taskId) + '/cancel')
@@ -1743,6 +1871,32 @@ function terminateCurrentTask() {
     .catch(function (e) {
       G.app.showToast(t('terminate_failed', { msg: e.message || e }))
     })
+}
+function copySeq() {
+  const seq = data.value && data.value.seq
+  if (!seq) return
+  const text = '#' + seq
+  const ok = function () {
+    G.app.showToast(t('seq_copied', { seq: seq }))
+  }
+  const fail = function () {
+    G.app.showToast(t('seq_copy_failed'))
+  }
+  if (G.window.navigator.clipboard && G.window.navigator.clipboard.writeText) {
+    G.window.navigator.clipboard.writeText(text).then(ok, fail)
+  } else {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    document.body.appendChild(ta)
+    ta.select()
+    try {
+      document.execCommand('copy')
+      ok()
+    } catch (e) {
+      fail()
+    }
+    ta.remove()
+  }
 }
 function copyTaskLog() {
   const el = document.querySelector('.ev__tl-body')
@@ -1871,10 +2025,7 @@ function closeTaskLog() {
     clearTimeout(tlWaitTimer)
     tlWaitTimer = null
   }
-  if (tlStatusTimer) {
-    clearInterval(tlStatusTimer)
-    tlStatusTimer = null
-  }
+  tlStatusPoller.stop()
   killBtnVisible.value = false
   tlFs.value = false
 }
@@ -1897,12 +2048,20 @@ function onFsKeydown(e) {
 onBeforeUnmount(function () {
   stopPoll()
   closeTaskLog()
+  detailPoller.dispose()
+  tlStatusPoller.dispose()
+  G.window.removeEventListener('grape:session-expired', markSessionExpired)
+  G.window.removeEventListener('grape:session-restored', resumeAfterSessionRestored)
   document.removeEventListener('keydown', onFsKeydown)
   if (convStreamAbort) convStreamAbort.abort()
 })
 
 onMounted(function () {
   document.addEventListener('keydown', onFsKeydown)
+  // Issue #3812：api.js 401 清 token 后广播；本页收到即停机 + 亮横幅（幂等），
+  // 重新登录（失效→恢复跳变）后仅回启仍处于打开态的详情/日志。
+  G.window.addEventListener('grape:session-expired', markSessionExpired)
+  G.window.addEventListener('grape:session-restored', resumeAfterSessionRestored)
   if (data.value.seq) {
     lastFp = fingerprint(data.value)
     loadConversation()
@@ -1914,6 +2073,21 @@ onMounted(function () {
 <style scoped>
 .ev {
   min-height: 100%;
+}
+/* Issue #3812：会话失效横幅（与看板 #3734 的 isk-session-banner 同款视觉，文档流内，
+   不遮挡详情内容；按钮复用存量 bt bt-p bt-s） */
+.ev-session-banner {
+  position: relative;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--c-issue) 14%, transparent);
+  color: var(--c-issue);
+  font-size: 12px;
 }
 .ev__back {
   margin-bottom: 12px;
@@ -1943,6 +2117,16 @@ onMounted(function () {
 .ev__seq {
   font-size: 12px;
   font-weight: 600;
+}
+.ev__seqcopy {
+  margin-left: 4px;
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--a);
+  background: transparent;
+  border: 1px solid var(--b);
+  border-radius: 4px;
+  cursor: pointer;
 }
 .ev__feedback {
   margin-left: auto;

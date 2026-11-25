@@ -38,7 +38,7 @@ bash <deploy-root>/deploy/deploy3db.sh
   算出进程启动时刻，早于本次部署起点（容差 5s）就报错并 `exit 1`：
 
 ```
-[3db] ERROR: worker pid=1234 启动于 21:07:37，早于本次部署起点 21:09:02 —— 进程没被重启，仍在跑旧代码
+[3db] ERROR: worker pid=1234 启动于 <t-1m30s>，早于本次部署起点 <t0> —— 进程没被重启，仍在跑旧代码
 [3db] FAIL: 有进程未随本次部署重启（见上），代码未生效
 ```
 
@@ -79,11 +79,56 @@ drop-in 见 `deploy/systemd/grape-service-3db-env.conf`。
 + drop-in Environment=GRAPE_3DB_ENV=<tenant-env-file>
 ```
 
+### 3.1 worker 托管路径（内存上限与预 bind，Issue #4203）
+
+生产 worker 的启动链路有 **两条**，两条都必须带同一套内存/重启参数，否则同一单在不同
+机器上表现不同（有/无 MemoryMax、有/无预 bind）：
+
+| 路径 | ExecStart | 内存/重启参数来源 |
+|------|-----------|------------------|
+| `grape@worker.service`（`scripts/install-grape-systemd.sh` 托管） | `grape-systemd-run.sh worker` → `scripts/start-worker.py`（预 bind） | drop-in `/etc/systemd/system/grape@worker.service.d/30-worker-oom.conf`（仓库源文件 `deploy/systemd/grape-worker-oom.conf`，安装脚本自动装） |
+| `grape-worker-server.service`（静态单元） | `scripts/start-worker.py`（预 bind） | 单元内联 `MemoryAccounting/MemoryHigh=6G/MemoryMax=8G`、`RestartSec=1/RestartSteps=5/RestartMaxDelaySec=30` |
+
+确认本机走哪条、参数是否生效：
+
+```bash
+systemctl cat grape@worker.service | head -20   # ExecStart 是否 grape-systemd-run.sh
+systemctl show grape@worker -p MemoryAccounting,MemoryHigh,MemoryMax,RestartUSec,RestartSteps,RestartMaxDelaySec
+journalctl -u grape@worker -n 50 | grep '\[memory-limit\]'   # 启动自检打印的生效限额
+# 期望 MemoryMax=8589934592（8G）+ "[memory-limit] process=worker cgroup limit=..."
+# 出现 "cgroup limit=unbounded" = drop-in 没装上，或限额挂在 v1 控制器
+# process 标签与端口必须等于部署角色事实源（脚本按角色导出 GRAPE_PROCESS_ROLE /
+# GRAPE_WORKER_PORT；出现在 .env 里的旧端口会让脚本 exit 6，而不是监听 A 注册 B）
+tr '\0' '\n' < /proc/$(systemctl show -p MainPID --value grape@worker)/environ \
+  | grep -E '^GRAPE_PROCESS_ROLE=|^GRAPE_WORKER_PORT=|^GRAPE_UVICORN_WORKERS='
+# 期望 worker / 38083 / 1
+```
+
+- 只跑 `systemctl show grape-worker-server` 不够：该静态单元可能根本没在运行。
+- `MemoryMax` 是 16G 主机的保守默认；SRE 拿到 004 的 `dmesg` victim 行（total-vm/rss）
+  后按宿主机覆盖 drop-in 或单元，并把实测值回写本节。
+- 两条路径的 ExecStart 都是「脚本路径」启动 `scripts/start-worker.py`（非 `python -m`），
+  此时 `-m` 把 cwd 加进 sys.path 的隐式行为不存在——app（`src.api.*`）可导入靠
+  launcher 顶层的仓库根 sys.path 自举（Issue #4203 SRE 复核 Critical：缺自举时
+  uvicorn config.load 阶段 ModuleNotFoundError，worker 反复 status=1/FAILURE）。
+  因此 **worker 启动不依赖 PYTHONPATH**：现场若有以 `Environment=PYTHONPATH=`
+  临时救急的 drop-in（如 `/etc/systemd/system/grape@worker.service.d/40-pythonpath.conf`），
+  在含 sys.path 自举的版本部署后**必须删除并 `systemctl daemon-reload`**——留着它会把
+  「自举被改坏」的回归掩盖成生产能跑、CI/新机器必炸。核查命令：
+
+  ```bash
+  systemctl cat grape@worker | grep -i PYTHONPATH   # 期望：无输出（SRE drop-in 已移除）
+  systemctl restart grape@worker && sleep 3 \
+    && curl -sf http://127.0.0.1:38083/api/ping     # 期望 {"ok":true,...}（无 PYTHONPATH 也能起）
+  ```
+
 ## 4. 部署后自检
 
 ```bash
-# 1) worker 连的是不是 stage 三库
-PID=$(pgrep -f "uvicorn src.api.grape_worker_server" | head -1)
+# 1) worker 连的是不是 stage 三库（#4203 起 worker 由 start-worker.py 预 bind 启动，
+#    uvicorn 不再是命令行可见的进程名——先取 systemd MainPID，再兜底 pgrep）
+PID=$(systemctl show -p MainPID --value grape@worker 2>/dev/null)
+[ -n "$PID" ] && [ "$PID" != "0" ] || PID=$(pgrep -f "start-worker.py|uvicorn src.api.grape_worker_server" | head -1)
 tr '\0' '\n' < /proc/$PID/environ | grep -E "^DEVOPS_DB_HOST=|^DEVOPS_DB_PORT=|^DEVOPS_DB_NAME=|^GRAPE_DOMAIN_LIB="
 # 期望：<lan-ip-b> / 3307 / <runtime-db> / 1
 

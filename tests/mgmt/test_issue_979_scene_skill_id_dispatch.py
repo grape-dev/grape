@@ -173,11 +173,13 @@ class TestLegacySceneCompat:
             nodes = [{"id": "n1", "tag": "issue", "skill": sname, "enabled": True}]
             # 直接写库：模拟 Issue #3914 E 之前落库的「只存名字」存量场景
             with db_lock:
-                db.cursor().execute(
+                _cur = db.cursor()
+                _cur.execute(
                     "INSERT INTO devops_pipeline_scene "
                     "(scene_id, name, description, repo_key, nodes_json, is_active, created_by, created_at, updated_at) "
                     "VALUES (?,?,?,?,?,1,?,?,?)",
                     (scene_id, scene_id, "", rk, json.dumps(nodes), "", "now", "now"))
+                assert _cur.rowcount == 1
                 db.commit()
             # 节点无 skill_id → 0（老场景）
             assert event_pipeline.resolve_scene_node_skill_id(rk, "issue", scene_id=scene_id) == 0

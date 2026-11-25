@@ -73,6 +73,8 @@ CONTRACT_METHODS: dict[str, tuple[str, ...]] = {
 PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
     "mgmt": (
         "fetch_rows", "fetch_one", "get_repo_field", "set_repo_fields",
+        # Issue #3759：仓库级 VCS 存在性熔断台账（runtime 读写孤儿仓库卡状态）
+        "get_repo_vcs_health", "set_repo_vcs_health",
         "ensure_repo_row", "get_repo_org_id", "list_user_ids_by_open_id",
         "get_feishu_open_id", "list_all_user_ids", "list_baseline_knowledge_files",
         "list_knowledge_obs_keys", "get_autopilot_task_brief", "mark_default_featured",
@@ -143,7 +145,7 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "ensure_baseline_knowledge_ref_any", "ensure_gsb_registry_schema",
         "ensure_outbound_ledger_table", "ensure_repo_row_any",
         "ensure_user_mapping_schema", "exec_any", "external_user_id",
-        "external_user_id_by_login", "feedback_apply_statuses", "feedback_claim_row",
+        "external_user_id_by_login", "feedback_apply_statuses", "feedback_bump_convert_fail", "feedback_claim_row",
         "feedback_external_sync_page", "feedback_internal_sync_page",
         "feedback_list_claims", "feedback_mark_converted",
         "feedback_mark_converted_from_claim", "feedback_mark_status_if_live",

@@ -1,5 +1,5 @@
 """Event Store — 事件记录与查询（shared events table）"""
-import json, re, threading, asyncio, random, time
+import json, re, threading, asyncio, random, time, contextlib, os
 from contextlib import nullcontext as _nullcontext, contextmanager as _contextmanager
 from datetime import datetime
 from src.kernel.owner_db import db_pair
@@ -12,6 +12,11 @@ from src.kernel.time_utils import normalize_event_time
 from src.kernel.event_payload_view import payload_view_from_json
 from src.kernel.a2a_context import a2a_event_context_key
 from src.kernel.context_digest import build_digest, render_compact
+from src.domains.runtime.agents.failure_info import (
+    finalize_failure_info,
+    failure_info_json,
+    parse_failure_info,
+)
 
 _EVENTS_COLUMNS_CACHE = None
 
@@ -94,6 +99,51 @@ def _extract_entity_type_from_text(text: str) -> str:
     return ""
 
 
+# ===== Issue #4339：payload 字节守卫（写入口）======
+# events.payload 已升 MEDIUMTEXT（上限 16,777,215 字节），同表 agent_logs/result 同理。
+# 此前列是 TEXT(65,535)：超长 issue/PR 事件 payload 在 MySQL 非严格 sql_mode 下被
+# **静默截断**成半截 JSON（生产 seq 107279/107291 均恰好 65,535 字节且 JSON_VALID=0），
+# payload_view_from_json 解析失败后整份 payload 视图降级为空 —— 静默数据丢失。
+# 这里在 INSERT 之前按后端上限显式判定：超限 ERROR + 拒绝写入（返回 0，走既有失败/
+# 幂等分支），**绝不写截断值**；>1MB 打 WARNING 观察 payload 增长趋势。
+_MEDIUMTEXT_MAX_BYTES = 16_777_215
+_PAYLOAD_WARN_BYTES = 1_048_576
+
+
+def payload_size_exceeded(payload_bytes: int) -> bool:
+    """payload 字节数是否超过 MEDIUMTEXT 上限（纯判定，无副作用、不打日志）。
+
+    Issue #4339 R1：events 有两个写入口（本模块 `_insert_event_row` 与
+    `event_pipeline` 去重快路径的裸 INSERT），两处都必须调同一份判定；缺一处
+    就有超限 payload 被 MySQL 非严格 `sql_mode` 静默截断。
+    """
+    return payload_bytes > _MEDIUMTEXT_MAX_BYTES
+
+
+def payload_size_guard(payload_bytes: int, event_type: str, repo_key: str,
+                       issue_id: str) -> bool:
+    """payload 字节数守卫：超 MEDIUMTEXT 上限 → ERROR 并拒绝写入（返回 False）。
+
+    告警前缀固定为 `event payload too large` / `event payload large`，可与
+    `event payload view: parse failed`（截断坏行的现象告警）分别 grep。
+    拒绝写入而非截断：截断产生不可恢复的坏行，代价远高于「本次事件写失败」。
+
+    调用方约定（Issue #4339 R2）：返回 False 时必须 fail-closed —— 不写事件行、
+    不派发任务，落 `event_skipped`（reason=`event_payload_rejected`）留痕。
+    """
+    if payload_size_exceeded(payload_bytes):
+        log.error(
+            f"event payload too large, INSERT rejected (never truncated): "
+            f"bytes={payload_bytes} limit={_MEDIUMTEXT_MAX_BYTES} "
+            f"event_type={event_type} repo={repo_key} issue={issue_id}")
+        return False
+    if payload_bytes > _PAYLOAD_WARN_BYTES:
+        log.warning(
+            f"event payload large: bytes={payload_bytes} "
+            f"event_type={event_type} repo={repo_key} issue={issue_id}")
+    return True
+
+
 def _insert_event_row(c, repo_key: str, event_type: str, title: str, issue_id: str,
                       agent_type: str, source: str, actor: str, summary: str,
                       payload: dict, status: str, result: str, scene_id: str,
@@ -107,6 +157,10 @@ def _insert_event_row(c, repo_key: str, event_type: str, title: str, issue_id: s
     from src.domains.mgmt.public import get_org_id_by_repo_key
     _org_id = get_org_id_by_repo_key(repo_key)
     _payload_json = json.dumps(payload or {})
+    # Issue #4339：超 MEDIUMTEXT 上限直接拒绝（返回 0 = 既有写入失败语义），绝不截断落库。
+    if not payload_size_guard(len(_payload_json.encode("utf-8")),
+                              event_type, repo_key, issue_id):
+        return 0
     if idempotency_key:
         c.execute(
             "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type, org_id, idempotency_key, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -598,6 +652,51 @@ def _utc_now_str(offset_seconds: int = 0) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def append_terminal_suppressed_event(repo_key: str, *, event_type: str, title: str,
+                                     issue_id: str, source: str, actor: str, summary: str,
+                                     payload: dict, scene_id: str = "",
+                                     entity_type: str = "", comment_id: str = "") -> int:
+    """Issue #4170：交付终态后 ``issue_comment`` 的「仅记录、不派发」落库。
+
+    终态（承载 PR merged + Issue 仓库态 closed）后的新评论不再派发下游 Agent，
+    但仍写一行 ``events``（status='skipped'，payload 带 ``_terminal_suppressed``）
+    保留审计轨迹，事件列表/详情可查；同时补 event_skipped 审计。
+    保留评论 id 幂等键，重复投递不落重复行。
+
+    返回 seq：>0 新写入；<0 幂等命中已存在（abs 为已存在 seq）；0 写入失败。
+    """
+    _payload = dict(payload or {})
+    _payload["_terminal_suppressed"] = {
+        "suppressed": True,
+        "reason": "terminal_delivery_suppressed",
+        "comment_id": str(comment_id or ""),
+        "issue_id": str(issue_id or ""),
+    }
+    _summary = summary or f"@{actor or 'someone'} 评论了 Issue {issue_id or '?'}（交付终态，仅记录不派发）"
+    _seq = append_event(
+        repo_key, event_type, title=title, issue_id=issue_id, agent_type="",
+        source=source, actor=actor, summary=_summary, payload=_payload,
+        status="skipped", result="terminal_delivery_suppressed",
+        scene_id=scene_id, entity_type=entity_type,
+        idempotency_key=(f"comment:{comment_id}" if comment_id else ""))
+    if _seq > 0:
+        append_skipped_event(
+            repo_key, event_type, "terminal_delivery_suppressed",
+            detail=(f"comment_id={comment_id or '?'} issue={issue_id or '?'}"),
+            issue_id=issue_id or "")
+    elif _seq == 0:
+        # events 行写入失败：至少落 event_skipped 审计，避免静默丢失终态评论迹
+        log.warning(f"append_terminal_suppressed_event: events row failed, "
+                    f"fallback to event_skipped (repo={repo_key}, issue={issue_id}, "
+                    f"comment={comment_id or '?'})")
+        append_skipped_event(
+            repo_key, event_type, "terminal_delivery_suppressed",
+            detail=(f"events_insert_failed comment_id={comment_id or '?'} "
+                    f"issue={issue_id or '?'}"),
+            issue_id=issue_id or "")
+    return _seq
+
+
 def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: str = "",
                          issue_id: str = ""):
     """写入被跳过/无产出的事件审计记录到 event_skipped 表
@@ -615,6 +714,225 @@ def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: st
             log.warning(f"Event skipped FAILED: {e}")
 
 
+def merge_event_payload(seq: int, extra: dict) -> bool:
+    """Issue #3790：合并事件 payload 字段（读-改-写短事务），供派发门禁回填结构化来源。
+
+    派发门禁（_scene_pool_gate → get_scene_pool_engine_ids）在事件 INSERT 之后才解析出
+    `pool_engine_source`，需要把 scene_missing 等来源回填到事件 payload，事件中心才能
+    按该字段筛选/区分「场景未注册」与「引擎离线」。旧行 payload 非法 JSON 时以新值重建。
+
+    返回 True=已写入或已是目标值；False=事件不存在/写入失败（不抛，派发不因此失败）。
+    """
+    if not seq or not isinstance(extra, dict) or not extra:
+        return False
+    with db_lock:
+        c = db.cursor()
+        try:
+            row = c.execute("SELECT payload FROM events WHERE seq=?", (int(seq),)).fetchone()
+            if not row:
+                return False
+            current = {}
+            if row[0]:
+                try:
+                    current = json.loads(row[0])
+                except Exception:
+                    current = {}
+            if not isinstance(current, dict):
+                current = {}
+            if all(current.get(k) == v for k, v in extra.items()):
+                return True
+            current.update(extra)
+            c.execute("UPDATE events SET payload=? WHERE seq=?",
+                      (json.dumps(current, ensure_ascii=False), int(seq)))
+            db.commit()
+            return True
+        except Exception as e:
+            log.warning(f"merge_event_payload failed seq={seq}: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return False
+# ====== Issue #3444：评论→Issue 事件内容去重 ======
+# 背景：同一评论重复落库时评论 id 不同（两个评论 id，已脱敏），既有
+# `comment:<id>` 幂等键无法判重，两个 issue 处理事件并行派发。
+# 现按「repo + issue + event_type + 评论内容哈希 + 邻近时间窗」判重：
+# 首个事件照常派发，后到事件落 status='skipped' 留痕（summary 带源评论
+# id / 原事件 seq），并写 event_skipped(duplicate_comment_content)。
+COMMENT_DEDUP_DEFAULT_WINDOW_SECONDS = 1.0
+def _env_int(name: str, default: int) -> int:
+    """可选整数环境变量：缺省/非法返回默认值并显式告警（不静默吞）。"""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning(f"invalid {name} {raw!r}, fallback to {default}")
+        return default
+
+
+# 判重扫描上限：量级估算（近 1 秒窗口内的评论事件远小于该值），无 spec 数值来源，
+# 按 L2 登记为待测量项，可用 GRAPE_COMMENT_DEDUP_SCAN_LIMIT 覆盖。
+COMMENT_DEDUP_SCAN_LIMIT = _env_int("GRAPE_COMMENT_DEDUP_SCAN_LIMIT", 200)
+DUPLICATE_COMMENT_CONTENT_REASON = "duplicate_comment_content"
+# Issue #2508 review: named bounds for the content fingerprint, each with a
+# reason, instead of bare numbers inside the hash expression.
+# digest length: 16 hex chars = 64 bits, same width as the request fingerprint;
+# collisions are negligible for the (repo, issue, node) scope.
+# 定义上移（Issue #3444 review）：comment_content_fingerprint 在本文件更早处使用，
+# 避免跨 130 行的前置引用。
+CONTENT_KEY_DIGEST_CHARS = 16
+
+
+def comment_dedup_window_seconds() -> float:
+    """判重时间窗（秒）。默认 1 秒（同秒重复）；<=0 关闭内容去重。
+
+    `GRAPE_COMMENT_DEDUP_WINDOW_SECONDS` 可参数化窗口，非法值回落默认。
+    """
+    import os as _os
+    raw = _os.environ.get("GRAPE_COMMENT_DEDUP_WINDOW_SECONDS", "")
+    if raw not in (None, ""):
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError) as e:
+            log.debug(f"comment dedup window parse failed ({raw!r}): {e}")
+    return COMMENT_DEDUP_DEFAULT_WINDOW_SECONDS
+
+
+def comment_dedup_now() -> float:
+    """判重时钟（epoch 秒）。独立函数便于测试替换时间源。"""
+    import time as _time
+    return _time.time()
+
+
+def comment_content_fingerprint(note: str) -> str:
+    """评论内容指纹：空白归一后 SHA1 摘要（16 hex），内容相同即同指纹。
+
+    空/纯空白评论归一为空串后同样产生稳定指纹，使 `_dedup` 无条件写入 payload，
+    后续同内容空评论也能按内容判重（Spec「新建事件 payload 写入 `_dedup`」）。
+    """
+    import hashlib as _hashlib
+    text = str(note or "").strip()
+    return _hashlib.sha1(text.encode("utf-8")).hexdigest()[:CONTENT_KEY_DIGEST_CHARS]
+
+
+def _comment_dedup_meta(payload) -> dict:
+    """从事件 payload 读取 `_dedup` 指纹字典（缺失/非法返回空 dict）。"""
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload or "{}")
+        except Exception:
+            return {}
+    if not isinstance(payload, dict):
+        return {}
+    meta = payload.get("_dedup")
+    return meta if isinstance(meta, dict) else {}
+
+
+def find_recent_duplicate_comment(repo_key: str, issue_id: str, event_type: str,
+                                  content_hash: str, window_seconds: float | None = None,
+                                  comment_id: str = "") -> dict:
+    """查找同 Issue 同内容且落在时间窗内的评论事件，返回命中依据（无则空 dict）。
+
+    返回 `{seq, comment_id, ts}`：`seq` 为原事件 seq，`comment_id` 为源评论 id。
+    仅比较非 `skipped`/`deduped` 的真实处理事件，避免把留痕行当作原事件。
+
+    `comment_id` 非空时按「评论 id 优先」返回：若窗口内已有同评论 id 的事件
+    （无论内容），返回带 `same_id=True` 的命中，供调用方走既有
+    `duplicate_comment_delivery` 语义；否则才按内容哈希返回原事件，避免同 id
+    重投但内容恰与另一评论 id 的原事件相同时被误判为内容去重。
+    """
+    if not repo_key or not issue_id or not content_hash:
+        return {}
+    window = comment_dedup_window_seconds() if window_seconds is None else float(window_seconds)
+    if window <= 0:
+        return {}
+    now = comment_dedup_now()
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, payload FROM events WHERE repo_key=? AND issue_id=? "
+                "AND event_type=? AND status NOT IN ('skipped','deduped') "
+                "ORDER BY seq DESC LIMIT ?",
+                (repo_key, issue_id, event_type, COMMENT_DEDUP_SCAN_LIMIT))
+            rows = c.fetchall() or []
+    except Exception as e:
+        log.warning(f"find_recent_duplicate_comment failed: {e}")
+        return {}
+    first_hit = None
+    for seq, raw in rows:
+        meta = _comment_dedup_meta(raw)
+        hit_id = str(meta.get("comment_id") or "")
+        if comment_id and hit_id == str(comment_id):
+            # 同评论 id 已存在（无论内容）：优先返回，交由 id 幂等语义处理。
+            return {"seq": int(seq), "comment_id": hit_id, "ts": 0.0, "same_id": True}
+        if str(meta.get("content_hash") or "") != content_hash:
+            continue
+        try:
+            ts = float(meta.get("ts"))
+        except (TypeError, ValueError) as e:
+            log.debug(f"comment dedup timestamp parse failed: {e}")
+            continue
+        if abs(now - ts) > window:
+            continue
+        if first_hit is None:
+            first_hit = {"seq": int(seq), "comment_id": hit_id, "ts": ts}
+    return first_hit or {}
+
+
+def append_comment_dedup_event(repo_key: str, *, event_type: str, title: str, issue_id: str,
+                               source: str, agent_type: str, actor: str, dedup: dict,
+                               scene_id: str = "", entity_type: str = "") -> int:
+    """写入被内容判重短路的后到评论事件（status='skipped'）并留痕。
+
+    `dedup` 为去重依据（`dedup_of_seq` / `source_comment_id` / `comment_id` /
+    `content_hash` / `window_seconds` / `ts`）：summary 显式携带源评论 id 与原事件
+    seq 供事件详情直接审计，payload 仅保存 `_dedup` 依据，不复制完整 webhook 体。
+    """
+    source_comment_id = str(dedup.get("source_comment_id") or "")
+    duplicate_comment_id = str(dedup.get("comment_id") or "")
+    content_hash = str(dedup.get("content_hash") or "")
+    dedup_of_seq = int(dedup.get("dedup_of_seq") or 0)
+    evidence = (f"重复评论已去重（源评论 id={source_comment_id or '?'}, "
+                f"原事件 seq={dedup_of_seq}）")
+    payload = {
+        "_dedup": {
+            "deduped": True,
+            "reason": DUPLICATE_COMMENT_CONTENT_REASON,
+            "content_hash": content_hash,
+            "comment_id": duplicate_comment_id,
+            "source_comment_id": source_comment_id,
+            "dedup_of_seq": dedup_of_seq,
+            "window_seconds": float(dedup.get("window_seconds") or 0),
+            "ts": float(dedup.get("ts") or comment_dedup_now()),
+        }
+    }
+    _seq = 0
+    with db_lock:
+        try:
+            c = db.cursor()
+            _seq = _insert_event_row(
+                c, repo_key, event_type, title, issue_id, agent_type, source, actor,
+                evidence, payload, "skipped", DUPLICATE_COMMENT_CONTENT_REASON, scene_id,
+                entity_type, "", "")
+            db.commit()
+        except Exception as e:
+            log.warning(f"append_comment_dedup_event failed: {e}")
+            with contextlib.suppress(Exception):
+                db.rollback()
+            return 0
+    append_skipped_event(
+        repo_key, event_type, DUPLICATE_COMMENT_CONTENT_REASON,
+        detail=(f"comment_id={duplicate_comment_id or '?'} "
+                f"dedup_of_seq={dedup_of_seq} "
+                f"source_comment_id={source_comment_id or '?'} "
+                f"content_hash={content_hash}"),
+        issue_id=issue_id)
+    return _seq
+
+
 # ====== Issue #2508：终态 a2a 事件投递去重 ======
 def _non_replayable_task_statuses() -> tuple:
     """不可重放的任务终态：以 ``service.TASK_TERMINAL_STATUSES`` 为单源，
@@ -627,10 +945,9 @@ def _non_replayable_task_statuses() -> tuple:
 # reason, instead of bare numbers inside the hash expression.
 # - context prefix: the A2A payload caps context at 500 chars; 400 keeps the
 #   leading, differentiating part while leaving room for pr_number.
-# - digest length: 16 hex chars = 64 bits, same width as the request
-#   fingerprint; collisions are negligible for the (repo, issue, node) scope.
+# - digest length: CONTENT_KEY_DIGEST_CHARS, defined near the #3444 dedup
+#   section above (comment_content_fingerprint uses it earlier in this file).
 CONTENT_CONTEXT_MAX_CHARS = 400
-CONTENT_KEY_DIGEST_CHARS = 16
 
 
 def _content_key(payload: dict) -> str:
@@ -1188,7 +1505,8 @@ def _notify_pipeline_failure(repo_key: str, issue_id: str, agent_type: str, seq:
         log.warning(f"Pipeline failure notify failed seq={seq}: {e}")
 
 
-def update_event_status(seq: int, status: str, result: str = "", exit_code: int = None):
+def update_event_status(seq: int, status: str, result: str = "", exit_code: int = None,
+                        failure_info: dict = None):
     """更新事件状态（含终态保护）。
 
     幂等保护：已终态（completed/failed/cancelled）的事件不允许被其他终态覆盖。
@@ -1204,6 +1522,8 @@ def update_event_status(seq: int, status: str, result: str = "", exit_code: int 
     - 目标 status=failed 且当前 result 为空时，回填 fallback reason + exit_code + completed_at；
     - 调用方显式传 result 时优先使用（不覆盖已存在的非空 result/exit_code/completed_at）。
     - failed 之外的状态（completed/cancelled/running/dispatched）不受影响，保持原语义。
+    Issue #3433：failed 终态写结构化 failure_info（异常类型/失败阶段/报错摘要/runtime/agent）；
+    调用方未提供时按 result/exit_code 自动兜底，历史裸调用同样获得可读归因。
     """
     _TERMINAL = ("completed", "failed", "cancelled")
     _FALLBACK_REASON = "[E-FAIL-NODIAG] 事件置 failed 但未携带诊断信息（update_event_status 裸调用，见 #476）"
@@ -1239,8 +1559,10 @@ def update_event_status(seq: int, status: str, result: str = "", exit_code: int 
                                  f"(terminal state protection, bare flip)")
                     return
             if status == "failed":
-                c.execute("SELECT result, exit_code, completed_at, agent_type, repo_key, issue_id "
-                          "FROM events WHERE seq=?", (seq,))
+                _has_runtime = _events_column_exists(c, "runtime")
+                _runtime_expr = "runtime" if _has_runtime else "''"
+                c.execute("SELECT result, exit_code, completed_at, agent_type, repo_key, issue_id, "
+                          + _runtime_expr + " FROM events WHERE seq=?", (seq,))
                 cur = c.fetchone()
                 _need_fallback = not (cur and cur[0])
                 _reason = result or (
@@ -1251,16 +1573,29 @@ def update_event_status(seq: int, status: str, result: str = "", exit_code: int 
                 _agent_type = (cur[3] or "") if cur else ""
                 _repo_key = (cur[4] or "") if cur else ""
                 _issue_id = (cur[5] or "") if cur else ""
+                _runtime = (cur[6] or "") if cur else ""
+                # Issue #3433：failed 终态写结构化失败原因（未提供时按 result/exit_code 兜底）
+                _failure_sql = ""
+                _failure_param = ()
+                if _events_column_exists(c, "failure_info"):
+                    _failure_value = finalize_failure_info(
+                        failure_info, result=_reason, exit_code=_exit,
+                        agent=_agent_type, runtime=_runtime)
+                    _failure_sql = ", failure_info=?"
+                    _failure_param = (failure_info_json(_failure_value),)
                 # Issue #2432：失败终态落库失败节点名（执行失败/超时/重试耗尽统一走此入口）
                 if _events_column_exists(c, "failed_node"):
                     c.execute(
                         "UPDATE events SET status=?, result=?, exit_code=?, completed_at=?, "
-                        "failed_node=CASE WHEN ?<>'' THEN ? ELSE failed_node END WHERE seq=?",
-                        (status, _reason, _exit, _completed, _agent_type, _agent_type, seq))
+                        "failed_node=CASE WHEN ?<>'' THEN ? ELSE failed_node END"
+                        + _failure_sql + " WHERE seq=?",
+                        (status, _reason, _exit, _completed, _agent_type, _agent_type)
+                        + _failure_param + (seq,))
                 else:
                     c.execute(
-                        "UPDATE events SET status=?, result=?, exit_code=?, completed_at=? WHERE seq=?",
-                        (status, _reason, _exit, _completed, seq))
+                        "UPDATE events SET status=?, result=?, exit_code=?, completed_at=?"
+                        + _failure_sql + " WHERE seq=?",
+                        (status, _reason, _exit, _completed) + _failure_param + (seq,))
                 if _need_fallback:
                     log.warning(f"Event {seq}: bare failed update, backfilled diagnostic result (#476)")
                 _notify_repo, _notify_issue, _notify_agent = _repo_key, _issue_id, _agent_type
@@ -1478,6 +1813,7 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
                           duration: float = None, agent_logs: list = None,
                           completed_at: str = "", result: str = "",
                           structured_output: dict = None,
+                          failure_info: dict = None,
                           revive_from_timeout_failed: bool = False,
                           allow_from_takeover: bool = False,
                           task_id: str = ""):
@@ -1506,12 +1842,14 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
     Issue #1503：终态写入 result 为空时兜底赋「状态默认摘要（含 exit_code）」
     （终态⇔result 非空不变量，消除 seq=55067 类 exit_code=1 但 result 空的静默失败）；
     调用方显式传入非空 result 仍优先使用。与 completed_at 兜底同层收口。
+    Issue #3433：status=failed 时落结构化 failure_info（异常类型/失败阶段/报错摘要/
+    runtime/agent）；调用方未提供时按 result/exit_code 自动兜底。成功/取消不写该字段。
     """
     if not completed_at:
         from datetime import datetime, timezone as _tz
         completed_at = datetime.now(_tz.utc).isoformat()
     _is_terminal = status in ("completed", "failed", "cancelled")
-    _agent_type = _repo_key = _issue_id = ""
+    _agent_type = _repo_key = _issue_id = _runtime = ""
     _terminal_written = False
     # Issue #3927 审查修订：
     # - R1：终态保护统一按事件维度 t_ev:<seq>（所有终态写者共用一把锁）；
@@ -1526,7 +1864,15 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
                     try:
                         c = db.cursor()
                         # 检查当前状态：已终态的事件不允许被其他终态覆盖
-                        c.execute("SELECT status, agent_type, repo_key, issue_id FROM events WHERE seq=?", (seq,))
+                        if status == "failed":
+                            # Issue #3433：失败原因需带 runtime；老库缺列时降级为空串
+                            _runtime_expr = ("runtime" if _events_column_exists(c, "runtime")
+                                             else "''")
+                            c.execute("SELECT status, agent_type, repo_key, issue_id, "
+                                      + _runtime_expr + " FROM events WHERE seq=?", (seq,))
+                        else:
+                            c.execute("SELECT status, agent_type, repo_key, issue_id "
+                                      "FROM events WHERE seq=?", (seq,))
                         row = c.fetchone()
                         # 接管态保护：事件一旦被标记 takeover（接手的是人，不是 worker），
                         # worker 侧的迟到 complete/fail 一律不得改写；只有接管服务自己
@@ -1563,6 +1909,9 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
                             else:
                                 log.info(f"Event {seq}: failed -> completed via timeout revive "
                                          f"(Issue #1071 narrow gate)")
+                        # Issue #3433：显式结构化原因里的 message 优先于 #1503 机器摘要（仅空 result 时）
+                        _result_was_empty = not (result or "").strip()
+                        _raw_failure_info = parse_failure_info(failure_info)
                         # 放在终态保护之后：被 skip 的覆盖写入不产生兜底。
                         if _is_terminal and not (result or "").strip():
                             _ec = exit_code if exit_code is not None else "?"
@@ -1576,6 +1925,21 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
                             _agent_type = str(row[1] or "")
                             _repo_key = str(row[2] or "")
                             _issue_id = str(row[3] or "")
+                            _runtime = str(row[4] or "") if len(row) > 4 else ""
+                        # Issue #3433：失败终态结构化原因（成功/取消不写，保持既有归档结构）
+                        _failure_sql = ""
+                        _failure_param = ()
+                        if status == "failed":
+                            _failure_value = finalize_failure_info(
+                                failure_info, result=result, exit_code=exit_code,
+                                agent=_agent_type, runtime=_runtime)
+                            if _result_was_empty and _raw_failure_info.get("message"):
+                                result = (f"[{_failure_value['error_type']}/"
+                                          f"{_failure_value['phase_label']}] "
+                                          f"{_failure_value['message']}")[:500]
+                            if _events_column_exists(c, "failure_info"):
+                                _failure_sql = ", failure_info=?"
+                                _failure_param = (failure_info_json(_failure_value),)
                         # Issue #2432：失败终态落库失败节点名（执行失败/超时/重试耗尽统一在终态收口）
                         _set_failed_node = status == "failed" and "failed_node" in cols and _agent_type
                         _failed_sql = "" if not _set_failed_node else ", failed_node=?"
@@ -1583,9 +1947,9 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
                         # 终态 UPDATE：锁内短写
                         c.execute(
                             "UPDATE events SET status=?, exit_code=?, duration=?, completed_at=?, "
-                            "result=?" + _failed_sql + " WHERE seq=?",
+                            "result=?" + _failed_sql + _failure_sql + " WHERE seq=?",
                             (status, exit_code, duration, completed_at, result)
-                            + _failed_param + (seq,))
+                            + _failed_param + _failure_param + (seq,))
                         db.commit()
                         _terminal_written = True
                         # Issue #3927 审查 R2：agent_logs/structured_output 在 event_lock
@@ -1701,14 +2065,48 @@ def get_event_count(repo_key: str, status: str = "") -> int:
             return 0
 
 
-def get_events_grouped_by_issue(repo_key: str) -> dict[str, list[dict]]:
-    """按 issue_id 聚类事件，返回 {issue_id: [events]}"""
+def _entity_type_where(entity_type: str, params: list) -> str:
+    """实体维度 WHERE 片段（Issue #3375），空串 = 不过滤（既有行为）。
+
+    历史行 entity_type 为空（列 DEFAULT ''）时按 event_type 反推实体：
+    PR/MR 事件视为 pull_request，其余视为 issue——避免历史 PR 评审行被
+    `entity_type=issue` 过滤放行、混入 Issue prompt 摘要。
+    """
+    if not entity_type:
+        return ""
+    if entity_type in ("issue", "pull_request"):
+        from src.domains.runtime.vcs.event_types import ALL_PR_EVENTS
+        _pr_types = sorted(ALL_PR_EVENTS)
+        _ph = ",".join("?" for _ in _pr_types)
+        params.extend(_pr_types)
+        if entity_type == "issue":
+            return (" AND (entity_type='issue' OR (COALESCE(entity_type,'')=''"
+                    f" AND event_type NOT IN ({_ph})))")
+        return (" AND (entity_type='pull_request' OR (COALESCE(entity_type,'')=''"
+                f" AND event_type IN ({_ph})))")
+    params.append(entity_type)
+    return " AND entity_type=?"
+
+
+def get_events_grouped_by_issue(repo_key: str, entity_type: str = "") -> dict[str, list[dict]]:
+    """按 issue_id 聚类事件，返回 {issue_id: [events]}。
+
+    entity_type（Issue #3375）：可选实体维度过滤——
+      - ""（默认）：不过滤，兼容既有调用方（行为不变）；
+      - "issue"：只取 issue 实体事件（历史空 entity_type 行按 event_type 反推，
+        PR/MR 事件不算 issue）；
+      - "pull_request"：只取 pull_request 实体事件（含历史空 entity_type 的 PR 行）。
+    用于 PR 类事件的上下文注入隔离，避免其他 PR 的评审结论混入。
+    """
+    _where = "repo_key=? AND issue_id != ''"
+    _params: list = [repo_key]
+    _where += _entity_type_where(entity_type, _params)
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
-                (repo_key,)
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at FROM events WHERE {_where} ORDER BY seq ASC",
+                _params
             )
             rows = c.fetchall()
         except Exception:
@@ -1742,21 +2140,30 @@ def _is_org_scoped_repo(repo_key: str) -> bool:
         return False
 
 
-def get_issue_summary(repo_key: str, max_issues: int = 10, exclude_issue: str = "") -> str:
+def get_issue_summary(repo_key: str, max_issues: int = 10, exclude_issue: str = "",
+                      entity_type: str = "") -> str:
     """按 Issue 聚类生成事件摘要文本，用于 Prompt 注入。
 
     组织级仓库（managed_repos.org_id 非空）使用结构化任务记忆；
     普通仓库保持既有 events.result 摘要逻辑，不受组织上下文改动影响。
+
+    exclude_issue：排除当前 Issue（issue-219 方向 A——当前 Issue 不应出现在自己的 pipeline 摘要中）。
+    比较时两侧均忽略 '#' 前缀，兼容 events.issue_id 存 "#5" 或 "5" 两种格式。
+
+    entity_type（Issue #3375）：实体维度过滤，透传 get_events_grouped_by_issue/
+    _get_latest_result。默认空串 = 既有行为不变（Issue 事件调用无需改动）。
     """
     if _is_org_scoped_repo(repo_key):
-        return _get_org_issue_summary(repo_key, max_issues, exclude_issue)
-    return _get_legacy_issue_summary(repo_key, max_issues, exclude_issue)
+        return _get_org_issue_summary(repo_key, max_issues, exclude_issue,
+                                      entity_type=entity_type)
+    return _get_legacy_issue_summary(repo_key, max_issues, exclude_issue,
+                                     entity_type=entity_type)
 
 
 def _get_legacy_issue_summary(repo_key: str, max_issues: int = 10,
-                              exclude_issue: str = "") -> str:
+                              exclude_issue: str = "", entity_type: str = "") -> str:
     """原有仓库级摘要：事件流 + events.result 最新摘要（保持原行为）。"""
-    grouped = get_events_grouped_by_issue(repo_key)
+    grouped = get_events_grouped_by_issue(repo_key, entity_type=entity_type)
     if not grouped:
         return ""
 
@@ -1779,7 +2186,7 @@ def _get_legacy_issue_summary(repo_key: str, max_issues: int = 10,
         lines.append(f"  {iid} {title} — {' → '.join(agent_flow)}")
 
         # 注入最新已完成事件的 result 摘要（关键结论，如"部署完成 EIP=xxx"）
-        last_result = _get_latest_result(repo_key, iid)
+        last_result = _get_latest_result(repo_key, iid, entity_type=entity_type)
         if last_result:
             snippet = last_result[:300].replace("\n", " ").strip()
             if len(last_result) > 300:
@@ -1789,7 +2196,8 @@ def _get_legacy_issue_summary(repo_key: str, max_issues: int = 10,
     return "Issue Pipeline:\n" + "\n".join(lines)
 
 
-def _get_org_issue_summary(repo_key: str, max_issues: int = 10, exclude_issue: str = "") -> str:
+def _get_org_issue_summary(repo_key: str, max_issues: int = 10, exclude_issue: str = "",
+                           entity_type: str = "") -> str:
     """组织级：按 Issue 聚类，优先消费结构化任务记忆（仅组织关联仓库调用）。
 
     每条 Issue 包含：事件流（agent:type✓）+ 最新已完成事件的 result 摘要（截断 300 字符），
@@ -1797,8 +2205,11 @@ def _get_org_issue_summary(repo_key: str, max_issues: int = 10, exclude_issue: s
 
     exclude_issue：排除当前 Issue（issue-219 方向 A——当前 Issue 不应出现在自己的 pipeline 摘要中）。
     比较时两侧均忽略 '#' 前缀，兼容 events.issue_id 存 "#5" 或 "5" 两种格式。
+
+    entity_type（Issue #3375）：实体维度过滤，透传 get_events_grouped_by_issue/
+    _get_latest_result。默认空串 = 既有行为不变（Issue 事件调用无需改动）。
     """
-    grouped = get_events_grouped_by_issue(repo_key)
+    grouped = get_events_grouped_by_issue(repo_key, entity_type=entity_type)
     if not grouped:
         return ""
 
@@ -1855,11 +2266,11 @@ def _get_org_issue_summary(repo_key: str, max_issues: int = 10, exclude_issue: s
             if artifacts:
                 lines.append(f"    产物: {'；'.join(artifacts)[:240]}")
             if not compact and not verification and not artifacts:
-                last_result = _get_latest_result(repo_key, iid)
+                last_result = _get_latest_result(repo_key, iid, entity_type=entity_type)
                 if last_result:
                     lines.append(f"    最新结论: {last_result[:300].strip()}…")
         else:
-            last_result = _get_latest_result(repo_key, iid)
+            last_result = _get_latest_result(repo_key, iid, entity_type=entity_type)
             if last_result:
                 snippet = last_result[:300].replace("\n", " ").strip()
                 if len(last_result) > 300:
@@ -2032,16 +2443,196 @@ def get_latest_task_digest(repo_key: str, issue_id: str = "",
     return _task_row_to_memory(row) if row else {}
 
 
-def _get_latest_result(repo_key: str, issue_id: str) -> str:
-    """获取某 Issue 下最新已完成事件的 result 字段（截断 500 字符）"""
+def _get_latest_result(repo_key: str, issue_id: str, entity_type: str = "") -> str:
+    """获取某 Issue 下最新已完成事件的 result 字段（截断 500 字符）。
+
+    entity_type（Issue #3375）：与 get_events_grouped_by_issue 同口径过滤
+    （历史空 entity_type 行按 event_type 反推实体）。
+    """
+    _where = "repo_key=? AND issue_id=? AND status='completed' AND result IS NOT NULL AND result != ''"
+    _params: list = [repo_key, issue_id]
+    _where += _entity_type_where(entity_type, _params)
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT result FROM events WHERE repo_key=? AND issue_id=? AND status='completed' AND result IS NOT NULL AND result != '' ORDER BY seq DESC LIMIT 1",
-                (repo_key, issue_id)
+                f"SELECT result FROM events WHERE {_where} ORDER BY seq DESC LIMIT 1",
+                _params
             )
             row = c.fetchone()
             return (row[0] or "")[:500] if row else ""
         except Exception:
             return ""
+
+
+
+
+# ====== Issue #4088：评论派发层幂等守卫（event_seq + comment_id）======
+
+# 幂等命中原因（result/skipped 出参 + event_skipped 留痕共用同一措辞）
+COMMENT_DISPATCH_IDEMPOTENT_REASON = "duplicate_comment_dispatch"
+# 重试窗口默认 3600s：分钟级抖动重试/重放集中窗口内同一评论对同一 Agent 只
+# 送达一次；env GRAPE_COMMENT_DISPATCH_GUARD_WINDOW_SECONDS 可参数化，<=0 关闭
+COMMENT_DISPATCH_GUARD_DEFAULT_WINDOW_SECONDS = 3600.0
+
+
+def comment_dispatch_guard_window_seconds() -> float:
+    """派发守卫重试窗口（秒）。默认 3600；<=0 关闭守卫（旁路放行）。"""
+    import os as _os
+    raw = _os.environ.get("GRAPE_COMMENT_DISPATCH_GUARD_WINDOW_SECONDS", "")
+    if raw not in (None, ""):
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            log.warning("grape_t_comment_dispatch_guard: invalid GRAPE_COMMENT_DISPATCH_GUARD_WINDOW_SECONDS=%r, "
+                        "falling back to %ss", raw, COMMENT_DISPATCH_GUARD_DEFAULT_WINDOW_SECONDS)
+    return COMMENT_DISPATCH_GUARD_DEFAULT_WINDOW_SECONDS
+
+
+def claim_comment_dispatch_guard(repo_key: str, agent_type: str, comment_id: str,
+                                  event_seq: int = 0) -> bool:
+    """派发前原子抢占 (repo, agent, comment_id) 幂等守卫；True=抢占成功可派发。
+
+    同一 db_lock 临界区内先清理本键的过期行（窗口外旧守卫不阻断新派发），再
+    INSERT OR IGNORE 抢占——跨线程/跨进程并发同键仅一次成功（PK 唯一约束）。
+    fail-open：窗口关闭（<=0）或键不全（无 cid/agent）时放行，保持既有行为。
+    """
+    window = comment_dispatch_guard_window_seconds()
+    if window <= 0 or not (repo_key and agent_type and comment_id):
+        return True
+    try:
+        _cutoff = _utc_now_str(-int(window))
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "DELETE FROM grape_t_comment_dispatch_guard WHERE repo_key=? AND agent_type=? "
+                "AND comment_id=? AND created_at < ?",
+                (repo_key, agent_type, comment_id, _cutoff))
+            c.execute(
+                "INSERT OR IGNORE INTO grape_t_comment_dispatch_guard "
+                "(repo_key, agent_type, comment_id, event_seq, task_id, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (repo_key, agent_type, comment_id, int(event_seq or 0), "", _utc_now_str()))
+            ok = c.rowcount == 1
+            db.commit()
+        return ok
+    except Exception as e:
+        # 守卫故障不阻断派发主链路（fail-open），异常留日志供排障
+        log.warning(f"claim_comment_dispatch_guard failed ({repo_key}/{agent_type}/"
+                    f"{comment_id}): {e}")
+        return True
+
+
+def find_comment_dispatch_guard_hit(repo_key: str, agent_type: str,
+                                    comment_id: str) -> dict:
+    """窗口内命中已有派发守卫 → 返回 {event_seq, task_id, created_at}；否则 {}。"""
+    window = comment_dispatch_guard_window_seconds()
+    if window <= 0 or not (repo_key and agent_type and comment_id):
+        return {}
+    try:
+        _cutoff = _utc_now_str(-int(window))
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT event_seq, task_id, created_at FROM grape_t_comment_dispatch_guard "
+                "WHERE repo_key=? AND agent_type=? AND comment_id=?",
+                (repo_key, agent_type, comment_id))
+            row = c.fetchone()
+        if not row or (row[2] or "") < _cutoff:
+            return {}
+        return {"event_seq": int(row[0] or 0), "task_id": row[1] or "",
+                "created_at": row[2] or ""}
+    except Exception as e:
+        log.warning(f"find_comment_dispatch_guard_hit failed ({repo_key}/{agent_type}/"
+                    f"{comment_id}): {e}")
+        return {}
+
+
+def comment_dispatch_guard_allows_redispatch(repo_key: str, agent_type: str,
+                                             comment_id: str, seq: int) -> dict:
+    """重派侧判定：同 seq（本事件自身恢复）放行；跨 seq 命中拒绝并回显命中 seq。
+
+    返回 {"allowed": bool, "hit_seq": int}——跨 seq 命中意味着同一评论已有
+    首派事件（hit_seq），重派当前事件会重复送达同一 Agent，应改派 hit_seq。
+    """
+    hit = find_comment_dispatch_guard_hit(repo_key, agent_type, comment_id)
+    if not hit:
+        return {"allowed": True, "hit_seq": 0}
+    hit_seq = int(hit.get("event_seq") or 0)
+    if hit_seq == int(seq or 0):
+        return {"allowed": True, "hit_seq": hit_seq}
+    return {"allowed": False, "hit_seq": hit_seq}
+
+
+def mark_comment_dispatch_skipped(seq: int, note: str) -> bool:
+    """派发幂等命中短路：事件行标 skipped + 落 result 依据（终态不覆盖）。
+
+    与 ``update_event_status`` 的差异：skipped 非终态走裸 UPDATE 会丢 result，
+    这里 status/result 一次写入，且对已终态/已 skipped 的行幂等跳过。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE events SET status='skipped', result=? WHERE seq=? "
+                "AND status NOT IN ('completed','failed','cancelled','skipped','takeover')",
+                (note, seq))
+            ok = c.rowcount == 1
+            db.commit()
+        return ok
+    except Exception as e:
+        log.warning(f"mark_comment_dispatch_skipped failed seq={seq}: {e}")
+        return False
+
+
+def release_comment_dispatch_guard_by_seq(seq: int) -> int:
+    """接管跳过等「未真正派发」路径：按首派事件 seq 释放派发守卫。
+
+    与终态释放不同：成功派发/终态后守卫必须保留（窗口内去重），因此本 helper
+    只供「事件未派发」的接管跳过路径调用，避免残留守卫在窗口内吞掉重投。
+    """
+    if int(seq or 0) <= 0:
+        return 0
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM grape_t_comment_dispatch_guard WHERE event_seq=?",
+                      (int(seq),))
+            _n = c.rowcount
+            db.commit()
+        return _n
+    except Exception as e:
+        log.warning(f"release_comment_dispatch_guard_by_seq failed seq={seq}: {e}")
+        return 0
+
+
+def purge_stale_comment_dispatch_guards() -> int:
+    """TTL 兜底清理派发守卫过期行（窗口外允许重新派发）。
+
+    与 ``purge_stale_event_guards`` 同口径：跳过有运行中 task 的守卫——
+    窗口 3600s 可能短于长任务时长，误清理后重投会再建任务段，与「命中不新建
+    任务段」目标冲突。
+    """
+    window = comment_dispatch_guard_window_seconds()
+    if window <= 0:
+        return 0
+    try:
+        _cutoff = _utc_now_str(-int(window))
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "DELETE FROM grape_t_comment_dispatch_guard WHERE created_at < ? "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM agent_tasks t "
+                "  WHERE t.status IN ('dispatched','running') "
+                "  AND t.event_seq = grape_t_comment_dispatch_guard.event_seq"
+                ")",
+                (_cutoff,))
+            _n = c.rowcount
+            db.commit()
+        return _n
+    except Exception as e:
+        log.warning(f"purge_stale_comment_dispatch_guards failed: {e}")
+        return 0
+
+

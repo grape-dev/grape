@@ -1209,6 +1209,22 @@ def render_takeover_prompt(*, repo: str, issue_number: str, agent_type: str, ski
     return "\n".join(lines)
 
 
+def _derive_task_cwd(repo_key: str, agent_type: str, task: dict) -> str:
+    """任务缺 cwd 时按平台同一规则推导（Issue #3375：含 PR 维度隔离键）。
+
+    env_extra 可能是 dict 或 JSON 字符串（任务行快照），统一走 pr_scope 解析。
+    推导失败仅告警，返回空串（保持旧行为，不阻断接管）。
+    """
+    try:
+        from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
+        from src.kernel.pr_scope import pr_number_from_env_extra
+        _pr = pr_number_from_env_extra(task.get("env_extra"))
+        return get_agent_workdir(repo_key, agent_type, task.get("issue_id") or "", _pr)
+    except Exception as e:
+        log.warning(f"takeover: derive cwd failed: {e}")
+        return ""
+
+
 def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: int,
                  user: dict, platform_meta: dict | None = None,
                  cancel_ok: bool = True, cancel_error: str = "",
@@ -1227,11 +1243,7 @@ def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: i
         warnings.append("remote_may_still_run")
 
     if not (task.get("cwd") or "").strip():
-        try:
-            from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
-            task["cwd"] = get_agent_workdir(repo_key, agent_type, task.get("issue_id") or "")
-        except Exception as e:
-            log.warning(f"takeover: derive cwd failed: {e}")
+        task["cwd"] = _derive_task_cwd(repo_key, agent_type, task)
 
     issue = _issue_row(repo_key, issue_number)
     scene_id = (issue.get("scene_id") or "").strip()
@@ -1260,7 +1272,9 @@ def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: i
     env: dict[str, Any] = {}
     try:
         from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
-        env = decrypt_env_extra(task.get("env_extra")) or {}  # enc:v1（#2423）
+        # #3770：带行 id → 存量明文行在该读点也能就地自愈（不只计数）
+        env = decrypt_env_extra(task.get("env_extra"),
+                                task_id=str(task.get("id") or "")) or {}  # enc:v1（#2423）
     except Exception:
         env = {}
     try:
@@ -1973,35 +1987,19 @@ def _a2a_dispatch_base(runtime_id: int = 0, exclude: set[str] | None = None) -> 
       ``runtime_id>0`` 同样交由 ``_a2a_internal_base`` 区分本机 worker（回环基址，
       扫描重选）与真远程 worker（仅校验回连基址、best-effort）。
     ``exclude`` 用于 405 后排除坏基址重选。
+
+    Issue #4345：候选编排已下沉 ``src.api.a2a_dispatch.resolve_a2a_dispatch_target``，
+    与人工「重派」共用同一解析器（单向依赖，避免两份实现再次漂移）；本函数保留为
+    返回 ``base`` 的兼容入口，探测原语（``_probe_dispatchable`` /
+    ``_a2a_internal_base`` / 进程级缓存）仍是本模块唯一实现。
     """
-    global _A2A_DISPATCH_BASE_CACHE
-    excluded = {(b or "").rstrip("/") for b in (exclude or set())}
     try:
-        from src.kernel.prompt_builder import (A2A_TRUSTED_BASE_SOURCES,
-                                               resolve_a2a_base_with_source)
-        base, source = resolve_a2a_base_with_source(int(runtime_id or 0))
-        base = (base or "").strip().rstrip("/")
-        if base and base not in excluded and source in A2A_TRUSTED_BASE_SOURCES:
-            return base
-        if int(runtime_id or 0) > 0:
-            # 远程 worker：server_url 回连基址在 _a2a_internal_base 内校验
-            return _a2a_internal_base(int(runtime_id or 0), exclude=excluded)
-        cached = (_A2A_DISPATCH_BASE_CACHE or "").rstrip("/")
-        if cached and cached not in excluded:
-            # 已双重校验过的基址优先于不可信任的回退，避免每次 finish 重复探活+405 warning
-            return cached
-        if base and base not in excluded:
-            ok, detail = _probe_dispatchable(base)
-            if ok:
-                _A2A_DISPATCH_BASE_CACHE = base
-                log.info(f"takeover: a2a dispatch base = {base} ({source}; {detail})")
-                return base
-            log.warning(f"takeover: skip a2a dispatch candidate {base} "
-                        f"(source={source}; {detail})")
-            excluded.add(base)
-    except Exception as _e:  # noqa: BLE001 — 解析失败必须回退，不能阻断派发
-        log.debug(f"takeover: resolve_a2a_base_with_source skipped: {_e}")
-    return _a2a_internal_base(int(runtime_id or 0), exclude=excluded)
+        from src.api.a2a_dispatch import resolve_a2a_dispatch_target
+        return resolve_a2a_dispatch_target(int(runtime_id or 0),
+                                           exclude=exclude)["base"]
+    except Exception as _e:  # noqa: BLE001 — 共享解析器异常仍须回退本机候选
+        log.debug(f"takeover: shared a2a resolver unavailable: {_e}")
+        return _a2a_internal_base(int(runtime_id or 0), exclude=exclude)
 
 
 def _dispatch_next(*, repo_key: str, issue_number: str, next_agent: str, context: str,

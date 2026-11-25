@@ -115,6 +115,16 @@ const API = (() => {
       }
     } catch (e) {}
   }
+  // Issue #3812: 会话恢复广播——只在「失效 → 恢复」跳变时补播一次（普通成功响应不
+  // 广播，避免每个请求一次事件）。事件详情页 / Autopilot 日志弹窗据此在被踢后重新
+  // 登录且自身仍处于打开态时回启轮询。
+  function _notifySessionRestored() {
+    try {
+      if (typeof window !== 'undefined' && typeof CustomEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('grape:session-restored'));
+      }
+    } catch (e) {}
+  }
 
   // ── Issue #3569: reauth 按平台跳转 + 防整页重载循环 ──
   // 旧实现收到 401 reauth_required 一律跳 /auth/login/gitcode：GitHub 令牌失效被送去 GitCode
@@ -490,6 +500,10 @@ const API = (() => {
             e.status = 401;
             e.detail = detail;
             e.error_code = detail.error_code || '';
+            // Issue #3812: 「无 token 直接抛错」分支此前只 throw、不发失效信号，导致
+            // 看板已切登录页后事件详情/日志弹窗的定时器还在每 2~5s 打点。补上显式登出
+            // 信号（去重后只播一次），让各视图统一短路停止轮询。
+            if (!localStorage.getItem('token')) _notifySessionExpired();
             throw e;
           }
           // Session 401 — JWT expired, attempt refresh
@@ -537,7 +551,11 @@ const API = (() => {
       });
     }
     // Issue #3734: 会话恢复（任一成功响应）→ 复位失效广播去重标记
-    _sessionExpiredNotified = false;
+    // Issue #3812: 只在「已播过失效」的跳变上补播一次恢复事件，供高频视图回启轮询。
+    if (_sessionExpiredNotified) {
+      _sessionExpiredNotified = false;
+      _notifySessionRestored();
+    }
     // Issue #63: 响应是 HTML（如 nginx 502 页面或登录页重定向）时，不报 "Unexpected token"
     var ct = r.headers.get('content-type') || '';
     if (ct.indexOf('text/html') !== -1) {

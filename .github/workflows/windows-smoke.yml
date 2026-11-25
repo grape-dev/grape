@@ -173,6 +173,13 @@ jobs:
         run: python -m pytest tests/runtime/test_atomcode_runtime.py -v
       - name: Frontend autopilot uid source-assertion tests (issue #1011)
         run: node tests/js/test_issue_1011_autopilot_uid.js
+      - name: Ledger dedupe + upstream timeout regression tests (issue #3349)
+        # Issue #3349 QA 审查：新增 tests/test_issue_3349_dedup_offload.py（台账查重/
+        # 有界探针/线程卸载/504 幂等/静态守卫）此前未被流水线执行，回归无门禁兜底；
+        # 此处接入 CI（仿 issue #1613 先例）。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/test_issue_3349_dedup_offload.py -v
       - name: Destructive DDL guard + Issue #536 migration safety tests
         # Issue #536 QA-Impt：CI 显式接入 DDL 卡点与新增用例；base 显式传目标分支
         # （GitCode 注入 CI_MERGE_REQUEST_TARGET_BRANCH_NAME，GitHub 用 PR base），
@@ -370,12 +377,25 @@ jobs:
         # test_issue_3826_count_no_fallback.py —— 三库拓扑缺 GRAPE_DSN_RUNTIME 时不得回落
         # mgmt 主库（DomainUnavailable）、COUNT 失败日志必须自带 route/target_db/pid/host，
         # 另含「代理只认 route_of」拓扑棘轮与全仓 COUNT 站点审计守门。旧实现的自有回落分支
-        # 是生产仍刷 `Table 'grape_prod_mgmt.issue' doesn't exist` 的代码侧根因，回退即复发。
+        # 是生产仍刷 `Table 'grape_mgmt.issue' doesn't exist` 的代码侧根因，回退即复发。
         env:
           GITCODE_API_TOKEN: test_token
         run: |
           python -m pytest tests/runtime/test_issue_3771_mine_count_domain.py \
             tests/runtime/test_issue_3826_count_no_fallback.py -v
+      - name: Model config alert + prefix/fallback validation tests (issue #3822)
+        # Issue #3822 轨 C：新增 4 个用例文件此前未接入 linux-backend 门禁（先例
+        # #1613/#2133/#3758/#3771）。锁定：①首次 Model not found(count=1) 不计入配置故障
+        # 告警、仅 escalated 计；②未声明 provider 前缀时 default/probe 用裸 id；
+        # ③hermes fallback（含旧键标量）纳入校验；④24h 告警指标与种子规则。回退会让
+        # 单次抖动再次触发 critical、带前缀模型名探活 404 误判 unhealthy。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/test_issue_3822_engine_model_prefix.py \
+            tests/test_issue_3822_hermes_fallback.py \
+            tests/runtime/test_issue_3822_model_config_alert.py \
+            tests/insight/test_issue_3822_obs_model_config_alert.py -v
       - name: Deploy gateway upstream guard (issue #3764)
         # Issue #3764 QA 复审（Required）：网关 /api/runtime* 上游端口守卫此前只存在于
         # scripts/，未接任何自动路径；现网残留 8181 只能靠人工发现。本步骤把四套
@@ -390,6 +410,17 @@ jobs:
           python3 scripts/verify_nginx_upstream.py --nginx-conf deploy/nginx-grape.conf \
             --ports mgmt=38080,event=38081,worker=38082,insight=38083
           python -m pytest tests/test_deploy_preflight_upstream.py tests/api/test_deploy_preflight.py -v
+      - name: Autopilot executions runtime-domain migration tests (issue #3763)
+        # Issue #3763 QA 审查修复（Required）：runtime 域 autopilot_executions 补建迁移
+        # 与缺表 fail-fast 用例此前未接入 linux-backend 门禁（先例 #1613/#2133/#2245/
+        # #3167/#3490/#3699/#3758/#3771），本 PR 修复的正是 MySQL 分库才复现的 1146，未门禁时
+        # 回归只能靠人工；同时接入迁移域归属守卫，防止登记域与 table_ownership 漂移。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3763_autopilot_exec_table.py \
+            tests/api/test_issue_3763_autopilot_exec_domain.py \
+            tests/api/test_migration_domains_match_ownership.py -v
       - name: Startup port-binding order regression tests (issue #3848)
         # Issue #3848 QA 审查修复（Required）：新增用例 test_issue_3848_startup_order.py
         # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758/#3771）。
@@ -421,6 +452,16 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_4082_runtime_id_guard.py -v
+      - name: Autopilot not-dispatchable state regression tests (issue #3733)
+        # Issue #3733 QA 复审（Optional）：空指令状态化的三组 pytest 与任务页 node 用例
+        # 此前未接入 linux-backend 门禁（该 workflow 只跑显式列举的用例集；先例
+        # #1613/#1982/#2133/#2245/#3167/#3490 均由 QA 要求补齐）。补列静默盖章、
+        # 读侧状态归一化、迁移幂等与任务页模板分叉的回退只能靠人工 pytest/node。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_autopilot_empty_instruction_guard.py tests/kernel/test_issue3733_autopilot_dispatch_state_migration.py tests/mgmt/test_issue3733_autopilot_dispatch_state_route.py -v
+          node tests/js/test_issue_3733_autopilot_not_dispatchable.js
       - name: VcsApiClient log redaction regression tests (issue #3737)
         # Issue #3737 QA 审查修复（Required）：新增用例 test_vcs_api_client_log_redaction.py
         # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758/#3771/#3848/#4065）。
@@ -475,6 +516,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends nginx
           nginx -v
           python -m pytest tests/contracts/test_issue_3847_gateway_graceful.py -v
+
       - name: Branch guard runtime resolution tests (issue #3579)
         # Issue #3579 QA 复审（工作流审查·变更验证 Required）：pre-push 守卫钩子的
         # 运行时解释器/模块解析用例此前未接入 CI 门禁（先例 #1613/#1982/#2133/#2245
@@ -495,14 +537,83 @@ jobs:
             tests/runtime/test_issue_993_branch_guard.py -v \
             --deselect tests/runtime/test_issue_993_branch_guard.py::test_agent_linked_push_path_uses_guard \
             --deselect tests/runtime/test_issue_993_branch_guard.py::test_direct_linked_push_path_uses_guard
+      - name: Engine backend capability + claim gate + failover regression tests (issue #3928)
+        # Issue #3928 QA 复审修复（Required R5）：新增 5 个 test_issue_3928_*.py 与改写后的
+        # test_claim_executor_guard.py 此前未接入 linux-backend 门禁（先例 #2133/#2245/
+        # #3167/#3490/#3699/#3758/#3771/#3848 均由 QA 要求补齐）。缺 CLI 准入、degraded
+        # 冷却/半开、派发-认领同尺、重派熔断与跨引擎告警的实现漂移只能靠人工 pytest 发现。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_3928_*.py tests/runtime/test_claim_executor_guard.py -v
+      - name: "Skill sync distributed-lock contract tests (issue #3742)"
+        # Issue #3742 QA 审查修复（Required）：新增用例 test_issue_3742_lock_contract.py
+        # 此前未接入 linux-backend 门禁（先例 #1613/#2133/#2245/#3167/#3490/#3699 均由
+        # QA 要求补齐）。契约用例覆盖 acquired 消费 / strict 模式 / TTL 单点派生 /
+        # 续期失败中止 OBS，并回归受影响的 skill sync 调度幂等用例。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3742_lock_contract.py -v
+          python -m pytest tests/runtime/test_skill_sync_scheduler_idempotent.py -v
+      - name: Migration registry uniqueness gate tests (issue #3846)
+        # Issue #3846：register_migration 注册表同一 version 重复登记即失败，
+        # 撞号迁移必须带 post_check 才能进 reconcile（无 post_check 仅 ERROR 永久跳过）。
+        # 注册表唯一性门禁此前只有 AST 静态守卫（test_migration_track_guard），
+        # 看不见 **dict 展开登记的域迁移；本步补运行时注册表唯一性 + 探针自证，
+        # 先例同 #3771/#3758/#3699。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/api/test_issue_3846_cloud_sandboxes_migration.py -v
+      - name: Domain-aware mgmt ORM session routing tests (issue #3732)
+        # Issue #3732 QA 审查修复（Required）：新增用例 test_issue_3732_domain_session.py
+        # 此前未接入 linux-backend 门禁（先例 #1613/#1982/#2133/#2245/#3167/#3490 均由 QA
+        # 要求补齐）。域感知 engine/session 工厂、strict 失败通道、启动域表归属自检都是
+        # 结构性改动，实现漂移时无门禁会静默通过——此前只能靠人工 pytest。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/kernel/test_issue_3732_domain_session.py -v
+
+      - name: "Scene category slug gate + alias/aggregation regression tests (issue #3796)"
+        # Issue #3796：分类收敛（#3202/#3648）后 scenes/*/scene.json 旧 slug 由
+        # kernel LEGACY_CATEGORY_ALIASES 过渡；「字典无此 slug 且无别名」的新坏 slug
+        # 由 CI 门禁（脚本）+ 回归用例拦截（先例 #2133/#2245/#3490：未接门禁只能
+        # 靠人工 pytest）。scenes/ 缺失时脚本降级退出 0（grape-skills 下发目录）。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python3 scripts/check_category_slugs.py
+          python -m pytest tests/kernel/test_issue_3796_category_aliases.py \
+            tests/runtime/test_issue_3796_scene_sync_category.py \
+            tests/scripts/test_check_category_slugs.py \
+            tests/api/test_issue_3796_category_slug_startup.py \
+            tests/mgmt/test_issue_3796_scene_category_backfill.py -v
 
       - name: "Event guard TTL purge + event_seq/status index regressions (issue #3794)"
-        # Issue #3794: batched purge (200/round, 1205/1213 retry, keyset window) and the
-        # registered (event_seq,status) index migration were not wired into this gate.
-        # migration_track_guard runs too: this change adds a legacy-DDL freeze guard.
+        # Issue #3794 QA 审查修复（Required）：新增用例 test_issue_3794_guard_purge.py
+        # （分批清理 / §33 复核 / 1205+1213 重试 / keyset 头阻塞）与组合索引注册式迁移
+        # 用例 test_issue_3794_event_seq_status_index.py 此前未接入 linux-backend 门禁
+        # （先例 #2133/#2245/#3167/#3490/#3699/#3758 均由 QA 要求补齐）；本 job 逐文件
+        # 列举、无全量 pytest 兜底，守卫自愈与索引落点回退只能靠人工发现。
+        # migration_track_guard 一并跑：本次新增「老轨索引 DDL 冻结」守卫。
         env:
           GITCODE_API_TOKEN: test_token
         run: |
           python -m pytest tests/runtime/test_issue_3794_guard_purge.py \
             tests/api/test_issue_3794_event_seq_status_index.py \
             tests/api/test_migration_track_guard.py -v
+      - name: Env_extra plaintext heal + write-side regression tests (issue #3770)
+        # Issue #3770 QA 审查修复（Required）：新增用例 test_issue_3770_env_extra_plaintext.py
+        # 此前未接入 linux-backend 门禁（先例 #1790/#3699/#3758 均要求同 PR 补 step），
+        # 明文行自愈/写入侧收口/迁移失败保留策略回退只能靠人工 pytest，CI 绿≠用例执行。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/test_issue_3770_env_extra_plaintext.py -v
+
+      - name: "Sweeper own-DSN dialect layer + restart grace window regressions (issue #4303)"
+        # Issue #4303：三库拓扑下 per-seq 回收的游标方言层回归（裸 pymysql 游标绕过
+        # ?→%s 翻译 → TypeError → 整段回落 bulk 一刀切判 failed）+ 重启恢复窗口护栏 +
+        # per-seq 逐条降级。本 job 逐文件列举、无全量 pytest 兜底（先例 #2133/#2245/
+        # #3490/#3699/#3758/#3794 均由 QA 要求补齐），未接线的用例 CI 永不执行。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_4303_sweep_own_dsn.py -v

@@ -533,3 +533,69 @@ class TestCompatDB:
         db.executescript("CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);")
         # 两条语句各执行一次（每次经 translate/execute）
         assert db._raw_cursor.call_count == 2
+
+
+# ====== Issue #3772：Cursor 迭代 / 上下文协议（双后端一致性） ======
+
+
+class TestCompatCursorIteration:
+    """sqlite3.Cursor 可直接迭代；MySQL 兼容层必须同语义（Issue #3772）。"""
+
+    def _cursor(self, raw_rows):
+        raw = MagicMock()
+        # 正常 SELECT 路径走 _pycur：fetchone 逐行返回，末尾 None 结束迭代。
+        raw.fetchone.side_effect = list(raw_rows) + [None]
+        raw.fetchall.return_value = []
+        db = mc.MySQLCompatDB(host="h")
+        db._raw_cursor = MagicMock(return_value=raw)
+        return db, raw
+
+    def test_list_cursor_matches_sqlite_baseline(self):
+        import sqlite3
+
+        sconn = sqlite3.connect(":memory:")
+        try:
+            expected = list(sconn.execute("SELECT 1"))
+        finally:
+            sconn.close()
+        assert expected == [(1,)]
+
+        db, _raw = self._cursor([(1,)])
+        cur = db.cursor()
+        assert list(cur.execute("SELECT 1")) == expected
+
+    def test_for_loop_equals_fetchall_on_both_backends(self):
+        import sqlite3
+
+        sconn = sqlite3.connect(":memory:")
+        try:
+            expected = list(sconn.execute("SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3"))
+        finally:
+            sconn.close()
+
+        db, _raw = self._cursor([(1,), (2,), (3,)])
+        cur = db.cursor()
+        cur.execute("SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3")
+        assert [row for row in cur] == expected
+
+    def test_iteration_works_on_prefetched_rows_path(self):
+        """PRAGMA 分支走 _rows 预取路径，迭代协议也要一致。"""
+        raw = MagicMock()
+        raw.fetchall.return_value = [
+            (0, "id", "int", 1, None, 1),
+            (1, "name", "text", 1, None, 0),
+        ]
+        db = mc.MySQLCompatDB(host="h")
+        db._raw_cursor = MagicMock(return_value=raw)
+        cur = db.cursor()
+        cur.execute("PRAGMA table_info(users)")
+        assert [row[1] for row in cur] == ["id", "name"]
+
+    def test_context_manager_returns_self_and_closes(self):
+        db, raw = self._cursor([(1,)])
+        cur = db.cursor()
+        with cur as ctx:
+            assert ctx is cur
+            ctx.execute("SELECT 1")
+        raw.close.assert_called_once()
+        assert cur._pycur is None

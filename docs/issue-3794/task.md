@@ -1,7 +1,7 @@
 # Tasks: Issue #3794
 
 - [x] T1 新增测试 `tests/runtime/test_issue_3794_guard_purge.py`（红：分批清理/§33/1205 重试用例在旧实现下失败或不成立）
-- [x] T2 组合索引 `idx_agent_tasks_event_seq_status(event_seq, status)`（**注册式迁移** `202611240003`，runtime 域；初版误落老轨，QA #1981 C1 修正）
+- [x] T2 组合索引 `idx_agent_tasks_event_seq_status(event_seq, status)`（**注册式迁移** `202611240009`，runtime 域；初版误落老轨，QA #1981 C1 修正）
 - [x] T3 重写 `purge_stale_event_guards`：两段短事务按 seq 分批（200×50）、DELETE 内 NOT EXISTS 复核、1205 短退避重试一次、失败日志带 `seqs_n`/`seqs_range`、DELETE 前压 3s 行锁上限并在退出时还原、候选 SELECT 后提交丢弃快照
 - [x] T4 指标 `grape_event_guard_purged_total{result}` + `purged=N` 日志（口径：`ok` 按删除行数、`failed` 每条失败计 1）
 - [x] T5 跑既有相关测试（test_event_active_guard.py、test_takeover_event_guard.py、test_issue_372_claim_marker_guard.py）回归
@@ -26,7 +26,7 @@
 
 | 项 | 状态 | 证据 |
 |---|---|---|
-| 守卫自愈（分批 + keyset + §33 复核） | ✅ | `tests/runtime/test_issue_3794_guard_purge.py` 11 例通过 |
-| 组合索引存量库生效 | ✅ | 迁移 `202611240003` 登记 + `tests/api/test_issue_3794_event_seq_status_index.py` 4 例 |
+| 守卫自愈（分批 + keyset + §33 复核） | ✅ | `tests/runtime/test_issue_3794_guard_purge.py` 18 例通过 |
+| 组合索引存量库生效 | ✅ | 迁移 `202611240009` 登记 + `tests/api/test_issue_3794_event_seq_status_index.py` 5 例 |
 | 老轨不再新增补索引 | ✅ | `test_migration_track_guard.py::test_legacy_index_ddl_is_frozen` |
 | CI 门禁 | ✅ | `.github/workflows/windows-smoke.yml` linux-backend 新增 pytest 步骤 |

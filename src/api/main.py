@@ -28,6 +28,58 @@ from src.domains.mgmt.routes import patrol
 
 bot_manager = None
 
+
+def _startup_category_slug_check(scenes_dir: str | None = None):
+    """Issue #3796：启动期校验 scenes/*/scene.json 分类 slug。
+
+    scenes/ 由 grape-skills 仓库随 ZIP 下发，部署根缺目录属正常 → 降级跳过
+    （1 条 INFO）。存在「字典无此 slug 且无别名」的 scene.json 时：
+    - 默认 1 条聚合 WARNING（scene→slug 明细），不阻断启动；
+    - CATEGORY_SLUG_STRICT=1 时 fail-fast（SystemExit 2），把配置错误拦在启动。
+
+    校验口径优先用运行时字典快照（DB `category_dict_active_map("scene")`，与同步解析
+    同一数据源），取不到（DB 未就绪/异常/空表）才回落种子口径
+    （`CATEGORY_DICT_SEED`，纯数据）——PR #1982 审查 Optional：两侧口径不同会让
+    「DB 停用/缺行」的 slug 在启动校验放行却在同步里恒未命中。
+    """
+    from src.kernel.config import log
+    from src.kernel.category import validate_local_scenes_categories
+
+    if scenes_dir is None:
+        # 仓库根探测复用 runtime 同步层的同一 helper（PR #1982 审查 Nit：不重复实现）
+        from src.domains.runtime.storage.scene_sync import _repo_root
+        scenes_dir = os.path.join(_repo_root(__file__), "scenes")
+
+    if not os.path.isdir(scenes_dir):
+        log.info("[CONFIG] scenes/ not shipped locally, scene category slug check skipped (Issue #3796)")
+        return
+
+    dict_map = None
+    dict_source = "seed"
+    try:
+        from src.domains.mgmt import public as _mgmt_public
+        dict_map = _mgmt_public.category_dict_active_map("scene") or None
+        if dict_map:
+            dict_source = "runtime-db"
+    except Exception as dict_err:  # noqa: BLE001
+        log.info(f"[CONFIG] runtime category dict unavailable ({dict_err}), "
+                 f"scene category slug check falls back to seed dict")
+
+    unknown = validate_local_scenes_categories(scenes_dir, dict_map=dict_map)
+    if not unknown:
+        log.info(f"[CONFIG] scene category slugs validated OK "
+                 f"(dict={dict_source}, Issue #3796)")
+        return
+    detail = "; ".join(f"{scene}: {', '.join(slugs)}" for scene, slugs in sorted(unknown.items()))
+    if os.environ.get("CATEGORY_SLUG_STRICT") == "1":
+        log.error(f"[CONFIG] scene category slugs unresolved (CATEGORY_SLUG_STRICT=1): {detail} "
+                  f"— validated against {dict_source} dict; unset CATEGORY_SLUG_STRICT, "
+                  f"migrate scene.json to converged slugs, or add a LEGACY_CATEGORY_ALIASES alias")
+        raise SystemExit(2)
+    log.warning(f"[CONFIG] scene category slugs unresolved "
+                f"(dict={dict_source}; aliased or migrate scenes/*/scene.json, Issue #3796): {detail}")
+
+
 def _startup_security_check():
     """启动安全门禁（fail-closed）。
 
@@ -327,6 +379,11 @@ def _start_obs_sample_task():
                     if _npc:
                         log.info(f"Plugin call logs cleaned: {_npc} rows")
                         _obs_loops.beat("plugin_audit_cleanup")
+                # Issue #3750：webhook 验签拒绝事实留存（14 天，模块内小时级限流）
+                from src.domains.insight.observability import webhook_rejects as _obs_rejects
+                _nrc = await asyncio.to_thread(_obs_rejects.maybe_cleanup)
+                if _nrc:
+                    log.info(f"Observability webhook rejects cleaned: {_nrc} rows")
                 _obs_loops.beat("obs_sample")
             except Exception as e:
                 _obs_loops.fail("obs_sample", e)
@@ -357,8 +414,12 @@ def _start_active_user_tracker_task():
                     _purge_i = 0
                     from src.kernel.auth_sdk.auth_token import purge_expired_session_tokens
                     await asyncio.to_thread(purge_expired_session_tokens)
-                    from src.api.event_store import purge_stale_event_guards
+                    from src.api.event_store import (
+                        purge_stale_comment_dispatch_guards,
+                        purge_stale_event_guards,
+                    )
                     await asyncio.to_thread(purge_stale_event_guards)
+                    await asyncio.to_thread(purge_stale_comment_dispatch_guards)
             except Exception as e:
                 log.warning(f"Session token purge failed: {e}")
 
@@ -392,6 +453,12 @@ async def lifespan(app: FastAPI):
     except Exception as _relay_selfcheck_err:
         log.warning(f"[trace-relay] startup selfcheck skipped: {_relay_selfcheck_err}")
 
+    # Issue #3796：启动期场景分类 slug 校验（缺 scenes/ 降级跳过；strict fail-fast；
+    # 校验器自身异常不阻断启动）
+    try:
+        _startup_category_slug_check()
+    except Exception as _cat_err:
+        log.warning(f"scene category slug startup check skipped (non-fatal): {_cat_err}")
 
     # 四组进程任务启动器（设计 §5.1~5.4）。单进程并集模式：
     # - 僵尸事件回收/悬空任务回收/表维护由下方合并 sweep_loop + 组合表维护负责
@@ -553,16 +620,24 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(600)  # 10 min after startup (avoid migration race)
             while True:
                 try:
-                    async with run_with_distributed_lock("table_maintenance", ttl=3600):
-                        from src.domains.runtime.engine.table_maintenance import (
-                            cleanup_old_agent_tasks_fields,
-                            delete_old_agent_tasks,
-                        )
-                        cleanup_old_agent_tasks_fields()
-                        delete_old_agent_tasks()
-                    async with run_with_distributed_lock("table_maintenance_messages", ttl=3600):
-                        from src.domains.runtime.engine.table_maintenance import cleanup_old_task_messages
-                        cleanup_old_task_messages()
+                    async with run_with_distributed_lock("table_maintenance", ttl=3600) as acquired:
+                        if acquired:
+                            from src.domains.runtime.engine.table_maintenance import (
+                                cleanup_old_agent_tasks_fields,
+                                delete_old_agent_tasks,
+                            )
+                            cleanup_old_agent_tasks_fields()
+                            delete_old_agent_tasks()
+                        else:
+                            log.debug("table maintenance: lock held by another worker, "
+                                      "skipping agent_tasks cleanup")
+                    async with run_with_distributed_lock("table_maintenance_messages", ttl=3600) as acquired:
+                        if acquired:
+                            from src.domains.runtime.engine.table_maintenance import cleanup_old_task_messages
+                            cleanup_old_task_messages()
+                        else:
+                            log.debug("table maintenance: lock held by another worker, "
+                                      "skipping task_messages cleanup")
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -655,6 +730,15 @@ app.include_router(plugins_router)
 app.include_router(plugins_agent_router)  # Issue #1090 C2/D1-a：Agent 侧协商端点
 app.include_router(plugin_market_router)  # Issue #1079：上传/上架前 L0 强校验门禁
 
+# Issue #4081 结构性约束（必须保持）：`plugins_agent_router` 末位注册了一条命名空间兜底
+# `/api/plugins/agent/{rest:path}`（未登记路径/方法 → 501 NOT_IMPLEMENTED）。它只保证在
+# **本文件内**是最后一条，无法约束跨文件 include 顺序——任何在本行之后 include 的
+# router 若再定义 `/api/plugins/agent/*`，会先被兜底匹配返 501，而能力位仍报
+# available=true（端点被吞 + 能力位说谎）。新增该前缀路由请 include 在 plugins_agent
+# 之前，或合并进 `src/domains/mgmt/routes/plugins_agent.py`。
+# 看护：tests/mgmt/test_issue_4081_plugin_agent_contract.py::
+# TestNamespaceRegistrationOrder（断言命名空间内所有已登记 pair 的下标都早于兜底）。
+
 app.include_router(skills.router)
 
 app.include_router(search.router)
@@ -714,6 +798,7 @@ app.include_router(observability.router)
 
 app.include_router(patrol.router)
 
+# ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 from src.api.openapi import custom_openapi
 
 app.openapi = lambda: custom_openapi(app)
@@ -754,9 +839,6 @@ from src.api.middleware import install_request_middleware
 # /api/ping（Issue #596 P1：随 health_endpoints 安装，含 /health /healthz /readyz /health/realtime）
 from src.api.health_endpoints import install_health_endpoints
 
-# ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
-from src.api.openapi import custom_openapi
-
 # ===== Issue #596 P1：静态资源 + SPA 路由抽至 src/api/spa.py（A 进程复用）=====
 from src.api.spa import install_spa_routes
 
@@ -769,13 +851,17 @@ from src.api.exception_handlers import install_exception_handlers
 
 # ===== 三层健康检查（Issue #596 P1：抽至 src/api/health_endpoints.py）=====
 # /health /healthz /readyz /health/realtime /api/ping 已在上方 install_health_endpoints(app) 处注册。
-@app.get("/metrics")
-async def metrics():
-    """Prometheus 指标端点已禁用——无外部 Prometheus 消费，且无认证暴露 API 路由结构有安全风险。
-    如需启用，配置 METRICS_ADDR 并添加认证后取消下方注释。
-    """
-    from fastapi.responses import JSONResponse
-    return JSONResponse({"error": "metrics endpoint disabled"}, status_code=404)
+# Issue #3757：`server_common.attach_health(readiness=True)` 已注册 /metrics；这里再注册
+# 一份会同时污染 app.routes 与 schema 生成（Duplicate Operation ID metrics_metrics_get）。
+# 保留 stub 作为唯一兜底：仅在未被装配时注册（此前它是被先注册者完全遮蔽的死代码）。
+if not server_common.has_route(app, "/metrics"):
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus 指标端点已禁用——无外部 Prometheus 消费，且无认证暴露 API 路由结构有安全风险。
+        如需启用，配置 METRICS_ADDR 并添加认证后取消下方注释。
+        """
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "metrics endpoint disabled"}, status_code=404)
 
 def _check_and_sync_templates() -> bool:
     """检查 project-templates.json + examples/ 是否存在，缺失则自动从 grape-template 仓库拉取。

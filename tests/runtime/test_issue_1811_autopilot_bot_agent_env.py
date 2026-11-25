@@ -38,8 +38,10 @@ def _patch_autopilot_deps(monkeypatch, tmp_path, mode, *, bot="grape_bot",
     monkeypatch.setattr("src.api.event_pipeline.get_agent_display_name",
                         lambda _at: display_name)
     if bot is not None:
-        monkeypatch.setattr("src.api.event_pipeline._resolve_bot_username",
-                            lambda _rk: bot)
+        monkeypatch.setattr("src.api.event_pipeline._resolve_bot_username_info",
+                            lambda _rk: (bot, "global"))
+    monkeypatch.setattr("src.api.event_pipeline._validate_bot_username",
+                        lambda _rk, _u: (True, "ok"))
     monkeypatch.setattr("src.api.event_pipeline._materialize_direct_workdir",
                         lambda *a, **k: "prompt")
     monkeypatch.setattr("src.kernel.prompt_builder.resolve_task_server_env",
@@ -126,8 +128,8 @@ def test_global_bot_fallback_when_repo_level_missing(monkeypatch, tmp_path):
     import src.domains.mgmt.user.db as udb
     from src.kernel.session_manager import db, db_lock
 
-    monkeypatch.setattr(udb, "get_global_bot_usernames", lambda: ["global_bot", "other"])
-    monkeypatch.setattr(udb, "get_global_github_bot_username", lambda: "gh_bot")
+    monkeypatch.setattr(udb, "get_global_bot_usernames_for",
+                        lambda _p: ["global_bot", "other"])
     with db_lock:
         db.cursor().execute("DELETE FROM managed_repos WHERE repo_key=?", (REPO_KEY,))
         db.commit()

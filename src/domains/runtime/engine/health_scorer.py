@@ -474,6 +474,20 @@ def _local_probe_streak(runtime_id: int) -> int:
         return 0
 
 
+def _session_fields(runtime_id: int) -> dict:
+    """Issue #4346：session 层指标（失败计数/熔断态/provider 校验）透出。
+
+    独立于既有任务层 `ENGINE_OFFLINE` 计分：session 熔断只影响调度候选与观测，
+    不改写 `health_score` / `is_healthy` 语义。异常 → 空 dict（fail-open）。
+    """
+    try:
+        from src.domains.runtime.engine import session_guard
+        return session_guard.session_state(runtime_id)
+    except Exception as e:  # noqa: BLE001 - 观测字段缺失不得阻断健康分主链路
+        log.debug(f"health_scorer: session state unavailable for runtime={runtime_id}: {e}")
+        return {}
+
+
 def _compute_and_persist(runtime_id: int) -> dict:
     """计算健康分并持久化到 DB + 更新内存缓存。返回健康度数据 dict。
 
@@ -528,6 +542,7 @@ def _compute_and_persist(runtime_id: int) -> dict:
         "updated_at": _utcnow().isoformat(),
     }
     data.update(_derive_health_flag(data))
+    data.update(_session_fields(runtime_id))
     # 内存缓存
     with _cache_lock:
         _cache[runtime_id] = {
@@ -581,13 +596,16 @@ def _persist_score(data: dict):
 
 # ===== 公共接口 =====
 
-def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
+def get_health_score(runtime_id: int, force_refresh: bool = False,
+                     allow_compute: bool = True) -> dict | None:
     """获取单个引擎的健康度数据。
 
     Issue-P2: 读路径改为读 runtime_health_scores 表（表即缓存）——
     双主天然一致，写路径（任务终态触发 / 5min 定时扫描）负责现算落表。
     force_refresh=True 仍强制现算（管理端详情查询用）。
     表中无记录（全新引擎 / 服务刚迁移）→ 现算一条落表。
+    allow_compute=False：只读查询路径（如 GET engine-status）——无档时返回 None，
+    不触发 _compute_and_persist 的现算落表副作用（Issue #3508 复审）。
     返回 dict：{runtime_id, health_score, total_tasks, failed_tasks,
                completed_tasks, consecutive_failures, failure_rate,
                last_status, heartbeat_alive, window_days, updated_at}
@@ -624,10 +642,14 @@ def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
                     "last_failure_at": row[10] or "",
                 }
                 data.update(_derive_health_flag(data))
+                data.update(_session_fields(runtime_id))
                 return data
         except Exception as e:
             log.warning(f"health_scorer: read_score failed for runtime={runtime_id}: {e}")
         # 无记录/旧档列缺失 → 落到现算路径
+    if not allow_compute:
+        # Issue #3508 复审：GET 查询路径禁止现算落表（避免健康查询写入脏行）
+        return None
     return _compute_and_persist(runtime_id)
 
 
@@ -766,6 +788,7 @@ def _empty_score(runtime_id: int) -> dict:
         "updated_at": _utcnow().isoformat(),
     }
     data.update(_derive_health_flag(data))
+    data.update(_session_fields(runtime_id))
     return data
 
 
@@ -775,6 +798,13 @@ def record_task_completion(runtime_id: int, status: str):
     Issue #85: 改为即时模式——任务完成时立刻重新计算健康分并写入
     runtime_health_scores 表，增强健康度分析的及时性。
     不改变广播/分发语义——仅在任务终态后异步刷新。
+
+    Issue #4346（复审 R1）：session 熔断/半开的收口**不在这里**。它必须覆盖全部终态
+    （取消 / exit!=0 业务失败 / 超时判死），而本函数只拿得到「是 completed 就复位」这
+    一半语义；收口点已统一到 `service.update_task_status` 终态事务内的
+    `session_guard.note_claim_outcome(c, runtime_id, status)`（方案 §4 的
+    note_claim_outcome 落点）。这里只做健康分重算，避免两处口径再分叉。
+    ``status`` 保留形参仅供调用方兼容（健康分只看终态事实，不再据此改 session 状态）。
     """
     if runtime_id:
         try:

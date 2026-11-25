@@ -659,6 +659,24 @@ class MySQLCompatCursor:
         self.lastrowid = None
         self.description = None
 
+    # sqlite3.Cursor 可直接迭代（`for row in cursor` / `list(cursor)`）；兼容层
+    # 缺这两个协议会退化为 TypeError（Issue #3772：no_progress 扫描恒失败）。
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        row = self.fetchone()
+        if row is None:
+            raise StopIteration
+        return row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
     def execute(self, sql: str, params=None):
         # 分 Schema 灰度（Issue #699 Phase 2）：表名语法位置的注册表表名映射为
         # grape_mgmt./grape_runtime./grape_insight. 限定名（GRAPE_SCHEMA_MODE 未启用时直通）。

@@ -111,7 +111,9 @@ EXEMPT_FILES: dict = {
     # _pflag 卡优先解析（S40-S42，2026-11-13 代理能力位上翻）：两处均为
     # 卡读取异常回退 default/模块开关=存量语义（组1 同族 fail-open）。
     # 注：同键两行会被 dict 字面量后定义覆盖，计数合并为 2。
-    ('api/git_repo_api.py', 'except Exception:'): 2,
+    # 2026-11-25：+1 为 issues/{n} 404/403 前写熔断台账（PR #2157 合入基线带入，
+    # 台账失败不得改变 404/403 契约），故合并为 3。
+    ('api/git_repo_api.py', 'except Exception:'): 3,
     # 方言/host 卡查询回退（映射表为数据非分支）
     ('domains/mgmt/user/repo_manager.py', 'except Exception:'): 3,
     # webhook_path/平台名单/bot_username 卡回退
@@ -202,10 +204,8 @@ EXEMPT_FILES: dict = {
     # 理由：#2134/#1982 bootstrap 改造——子进程终止链（kill/socket close/wait/
     # stdin flush）收尾尽力而为 + 引擎 bin 路径探测候选循环逐个试错（探不到
     # 换下一个候选，探测语义本体）。
-    ('domains/runtime/engine/branch_guard.py', 'except Exception:'): 2,
-    # 理由：#2028/#2041 fail-open 族——守卫自检异常一律 fail-open（stderr 告警
-    # + exit 0，真实违规由 hook_main 显式阻断）/ hook 幂等检查与租约释放尽力而为。
-    ('domains/runtime/engine/recovery.py', 'except Exception:'): 1,
+    # 2026-11-25（PR #2157）：recovery.py 原登记 1 处已在本分支重构时改成
+    # `except Exception: has_detach = False`（显式赋值非静默），豁免行随之删除。
     # 理由：#2133 引擎自动恢复链——恢复步骢单项失败不阻断整体恢复循环
     # （循环内 continue，失败已 log.warning 留痕）。
     ('domains/runtime/engine/worktree_guard.py', 'except Exception:'): 2,
@@ -352,6 +352,41 @@ EXEMPT_FILES: dict = {
     # 回落语义），pass 即降级本身。──
     ('kernel/bulk_read.py', 'except Exception:'): 3,
     ('kernel/bulk_read.py', 'except RuntimeError:'): 1,
+
+    # ── domains/runtime/engine/metrics_collect.py（arch-weekly-11 合入带入的新文件，2026-11-24 登记）──
+    # 理由：worker 指标采集的 psutil 填充 + Windows ctypes / 性能计数器兜底段逐句容错——
+    # 取不到某项（坏环境/缺字段/权限不足）就回退空指标继续，心跳绝不能因采集失败挂掉；
+    # 12 处均为同一族的「探测语义本体」，无业务分支可被吞掉。
+    ('domains/runtime/engine/metrics_collect.py', 'except Exception:'): 12,
+
+    # ── PR #2157 分支带入的迁移/探测类新文件（arch-weekly-11 合入前登记，2026-11-25）──
+    # 理由：都是「探测/清理语义本体」——失败即走降级分支，没有业务分支被吞掉；
+    # 每处都在调用点另有显式留痕（log / 计数器 / 返回值），pass 只是收尾。
+    # repo_vcs_health_columns：迁移末游标 close 的 best-effort 收尾（关不掉不影响 DDL 结论）。
+    ('domains/mgmt/migrations/repo_vcs_health_columns.py', 'except Exception:'): 1,
+    # cascade_converge_metrics：Prometheus 计数器 inc（无 collector/版本差异时 inc 失败无害，
+    # 收敛结论本身照常返回，属计量旁路）。
+    ('kernel/cascade_converge_metrics.py', 'except Exception:'): 2,
+    # task_activity：把 tool 入参归一成 JSON 键时遇到不可序列化对象 → 放弃归一（工具活动照常记录）。
+    ('domains/runtime/engine/task_activity.py', 'except Exception:'): 1,
+    # issue_poll_breaker：lib 快通道不可用即回落进程内实现（后面紧跟 fallback 分支）。
+    ('domains/runtime/vcs/issue_poll_breaker.py', 'except Exception:'): 1,
+
+    # ── 合并 arch-weekly-11 基线（2026-11-25）后两分支各加一处的存量文件 ──
+    # 理由同上一组：均为旁路/收尾，异常语义不影响主路径结论。
+    # mgmt/public：租约到期时间按多种历史格式逐个 strptime 试，本格式不匹配就 continue 下一格式。
+    ('domains/mgmt/public/__init__.py', 'except ValueError:'): 1,
+    # event_store：终态收敛后 WAL checkpoint 尽力而为（锁已释放，失败只影响落盘时机）。
+    ('domains/runtime/event_store.py', 'except Exception:'): 1,
+
+    # ── domains/runtime/engine/stale_uid.py（Issue #4349 带入的新文件，2026-11-25 登记）──
+    # 理由：stale uid 上报链的「探测/计量旁路」——三处均不影响主返回（first_in_window）。
+    # runtime_ids 归一：坏 runtime_id（非 int）跳过，只收正整数（探测语义本体）。
+    ('domains/runtime/engine/stale_uid.py', 'except (TypeError, ValueError):'): 1,
+    # Prometheus 计数器 inc：_stale_uid_total / _heartbeat_lost_total 在无 collector
+    # 或版本差异时 inc 失败无害，计数上报属可观测性旁路（fail-open 铁律），
+    # 主流程照常返回 first_in_window。
+    ('domains/runtime/engine/stale_uid.py', 'except Exception:'): 2,
 }
 
 

@@ -143,6 +143,12 @@ export DB_POOL_MAX_CACHED="$_pool_cache"
 # 不写 .env（避免影响 restart-four-process.sh 等其它启动方式）。
 export METRICS_ADDR="127.0.0.1:${mport}"
 export GRAPE_SERVICE_NAME="${role}"
+# Issue #4203（QA 复审 Optional）：进程角色必须绑定到部署角色。grape@ 路径此前不导出
+# GRAPE_PROCESS_ROLE，worker app 的 setdefault 会把它定成 "runtime"（域别名），
+# 于是启动自检日志与 grape_process_memory_* 的 process 标签变成 process=runtime，
+# 与静态单元（GRAPE_PROCESS_ROLE=worker）、runbook §3.1 和告警 {{ $labels.process }} 不一致。
+# 四个角色在 _ROLE_DOMAIN / openapi_merge.ENTRY_MODULES / db_setup 中均有对应项。
+export GRAPE_PROCESS_ROLE="$role"
 # 旧埋点路径（insight/observability/tracing.py）只在这条变量**显式设置**时启用。
 # 原来这里补了 127.0.0.1:4317 的默认值，等于把"没配"变成"配了"：新路径
 # （src/kernel/otel.py，认 OTEL_EXPORTER_OTLP_ENDPOINT）因此永远不生效，而本机
@@ -158,4 +164,24 @@ export PYTHONUNBUFFERED=1
 
 # exec：让 uvicorn 成为 systemd 的直接子进程（Type=simple 的 PID 1 级信号管理）。
 # 不加 --workers：workers=1 时 uvicorn 在进程内直接跑 Server，SIGTERM 处理最干净。
+#
+# Issue #4203（PR #2092 复审 Critical）：生产 worker 的实际启动路径是
+#   grape@worker.service → 本脚本 → uvicorn
+# 预 bind launcher 若只落在静态单元 grape-worker-server.service 上，走 grape@ 的机器
+# 拿不到「先监听再 lifespan」（OOM SIGKILL 后仍要等 uvicorn bind 才恢复接连接）。
+# 因此 worker 角色在这里切到 scripts/start-worker.py；其它角色保持原 exec 语义。
+if [ "$role" = "worker" ]; then
+    # 端口以角色映射（$port）为唯一事实源：GRAPE_GSB_BASE_URL 按 $port 注册，若 .env /
+    # EnvironmentFile 里的旧值（如 #3764 前的 38082）生效，worker 会监听 A 端口却按 B
+    # 端口注册 → 网关 502。不一致直接 fail-fast，把来源打出来。
+    if [ -n "${GRAPE_WORKER_PORT:-}" ] && [ "${GRAPE_WORKER_PORT}" != "$port" ]; then
+        echo "GRAPE_WORKER_PORT=$GRAPE_WORKER_PORT 与本角色端口事实源 $port 不一致（来源：环境变量/EnvironmentFile）" >&2
+        exit 6
+    fi
+    export GRAPE_WORKER_PORT="$port"
+    export GRAPE_HOST="${GRAPE_HOST:-0.0.0.0}"
+    # 生产既有语义是单进程（原命令无 --workers），保持 1；需要多 worker 由环境显式指定
+    export GRAPE_UVICORN_WORKERS="${GRAPE_UVICORN_WORKERS:-1}"
+    exec "$PY" "$REPO_ROOT/scripts/start-worker.py"
+fi
 exec "$PY" -m uvicorn "${module}:app" --host 0.0.0.0 --port "$port" --log-level info

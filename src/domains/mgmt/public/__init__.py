@@ -17,6 +17,15 @@ from datetime import datetime, timezone
 from src.kernel.config import log
 from src.kernel.issue_ident import native_issue_number  # Issue #3055
 
+# Issue #3733：autopilot 任务派发状态口径（常量/原因文案单一事实源，runtime 调度器由此取）
+from src.domains.mgmt.autopilot_state import (  # noqa: F401
+    AUTOPILOT_EMPTY_INSTRUCTION_REASON,
+    AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+    AUTOPILOT_STATE_OK,
+    dispatch_reason,
+    reason_for_state,
+)
+
 from typing import Any
 
 from src.kernel import db_registry
@@ -62,6 +71,9 @@ _TABLES: dict[str, set[str]] = {
         "host_status", "scene_recommend_config", "org_id", "host_user_id", "webhook_secret",
         "bot_token_status", "host_vcs_username", "host_step", "host_error", "host_updated_at",
         "bot_gitcode_token", "gitcode_webhook_token", "bot_github_token", "github_webhook_token",
+        # Issue #3759：仓库级 VCS 存在性熔断台账
+        "vcs_status", "vcs_missing_since", "vcs_last_error_code", "vcs_last_error_at",
+        "vcs_probe_result", "vcs_probe_at", "vcs_next_probe_at", "vcs_fail_count",
     },
     "organization": {"id", "is_personal", "org_scene_id"},
     "devops_pipeline_scene": {
@@ -86,6 +98,8 @@ _TABLES: dict[str, set[str]] = {
         "issue_number", "max_retry", "enabled", "last_run_at", "next_run_at", "created_at",
         "updated_at", "created_by", "agent_type", "instruction", "skill_name",
         "engine_runtime_ids", "custom_fields", "work_branch",
+        # Issue #3733：不可派发状态三列（状态/原因/时间，库内为跨进程权威）
+        "dispatch_state", "dispatch_state_reason", "dispatch_state_at",
     },
     "grape_accounts": {
         "id", "username", "email", "email_source", "password_hash", "nickname",
@@ -189,6 +203,70 @@ def set_repo_fields(repo_key: str, fields: dict[str, Any]) -> int:
         c.execute(f"UPDATE managed_repos SET {sets} WHERE repo_key=%s",
                   tuple(fields[c] for c in cols) + (repo_key,))
         return int(c.rowcount or 0)
+
+
+# ---------- Issue #3759：仓库级 VCS 存在性熔断台账 ----------
+#
+# 「上游 VCS 已不存在」的孤儿仓库卡（如 huaweicloud-mate/repository-requests）
+# 没有任何承载事实的字段：每次巡检都逐 issue 打上游、逐条打 404 WARNING，
+# 永不收敛。事实源放仓库卡（managed_repos 归 mgmt 域），runtime 进程经本 lib
+# 读写；进程内只做短 TTL 缓存，重启不丢、多副本一致。
+_VCS_HEALTH_COLUMNS: tuple[str, ...] = (
+    "vcs_status",          # ''=未判定 / ok=仓库在上游存在 / vcs_missing=上游已不存在
+    "vcs_missing_since",   # 首次判定 vcs_missing 的时间（ISO8601 UTC）
+    "vcs_last_error_code", # 最近一次永久失败的上游状态码（'404'/'403'/'401'）
+    "vcs_last_error_at",   # 最近一次永久失败时间
+    "vcs_probe_result",    # 最近一次仓库级存在性探测结论：exists/missing/unknown
+    "vcs_probe_at",        # 最近一次探测时间
+    "vcs_next_probe_at",   # 退避后的下一次探测时间（熔断期间不早于此刻放行）
+    "vcs_fail_count",      # 连续永久失败计数（决定退避档位）
+)
+_VCS_HEALTH_INT_COLUMNS = {"vcs_fail_count"}
+
+
+def get_repo_vcs_health(repo_key: str) -> dict:
+    """读取仓库 VCS 存在性台账；无卡/无值返回空 dict（调用方 fail-open）。"""
+    row = fetch_one("managed_repos", list(_VCS_HEALTH_COLUMNS), "repo_key=%s", (repo_key,))
+    if not row:
+        return {}
+    return dict(zip(_VCS_HEALTH_COLUMNS, row))
+
+
+def set_repo_vcs_health(repo_key: str, fields: dict[str, Any]) -> int:
+    """更新仓库 VCS 存在性台账，返回变更行数（幂等：同值 0 行）。
+
+    只允许 `_VCS_HEALTH_COLUMNS` 内的列；仓库卡不存在时返回 0（不新建卡）。
+    拓扑：本域有自有 DSN（三库）走 lib 连接；单库/测试拓扑回退进程主库
+    （与 `fetch_rows` 同款 G-2 口径，否则 sqlite 单实例下熔断状态无处落）。
+    """
+    unknown = [k for k in fields if k not in _VCS_HEALTH_COLUMNS]
+    if unknown:
+        raise ValueError(f"column(s) {unknown} not writable through mgmt lib")
+    cols = [k for k in fields if k in _VCS_HEALTH_COLUMNS]
+    if not cols:
+        return 0
+    sets = ", ".join(f"{c}=%s" for c in cols)
+    sql = f"UPDATE managed_repos SET {sets} WHERE repo_key=%s"
+    params = tuple(fields[c] for c in cols) + (repo_key,)
+    if db_registry.uses_own_dsn("mgmt"):
+        with db_registry.cursor("mgmt") as c:
+            c.execute(sql, params)
+            return int(c.rowcount or 0)
+    from src.kernel import session_manager
+    from src.kernel.session_manager import _is_mysql_backend, db_lock
+
+    with db_lock:
+        c = session_manager.db.cursor()
+        try:
+            c.execute(sql if _is_mysql_backend() else sql.replace("%s", "?"), params)
+            changed = int(c.rowcount or 0)
+            session_manager.db.commit()
+            return changed
+        finally:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def ensure_repo_row(repo_key: str, repo_owner: str, repo_name: str, full_name: str = "") -> int:
@@ -383,6 +461,38 @@ _SCENE_FIELD_ALIASES: dict[str, str] = {
     "tags_str": "tags",
 }
 _SCENE_REQUIRED = ("name", "source", "scope")
+
+#: 分类列（Issue #3796）：内容 hash 未变时仍需比对的回填列
+_SCENE_CATEGORY_COLS = ("cat_l1_id", "cat_l2_id", "category_id")
+
+
+def _scene_category_backfill_cols(payload: dict[str, Any], old_category_id: int,
+                                  old_l1: int, old_l2: int) -> list[str]:
+    """内容未变（content_hash 相同）时仍需落库的分类列（Issue #3796）。
+
+    同步侧解析出的分类目标可能因 legacy 别名 / 字典收敛而与库内旧值不同；hash 幂等层
+    若直接 skipped，存量行分类就永不停更（PR #1982 审查 Required）。这里只挑出
+    「目标明确且与库内不同」的分类列，由调用方执行一次窄 UPDATE（不碰内容列）。
+
+    未命中语义不变（Skill/场景同一契约，Issue #2761）：分类列缺席或目标为 0 一律视为
+    「保留库内旧值」；`cat_l1_id` 沿用 `sync_category_target`（一级变更且来源未给二级时
+    重置旧二级），并在 payload 上就地写回收敛后的目标，供 UPDATE 取用。
+    """
+    changed: list[str] = []
+    if "cat_l1_id" in payload:
+        from src.kernel.category import sync_category_target  # noqa: PLC0415
+        l1, l2 = sync_category_target(payload.get("cat_l1_id"), payload.get("cat_l2_id"),
+                                      old_l1, old_l2)
+        payload["cat_l1_id"], payload["cat_l2_id"] = l1, l2
+        if int(l1 or 0) != int(old_l1 or 0):
+            changed.append("cat_l1_id")
+        if int(l2 or 0) != int(old_l2 or 0):
+            changed.append("cat_l2_id")
+    new_category_id = int(payload.get("category_id") or 0)
+    if new_category_id and new_category_id != int(old_category_id or 0):
+        changed.append("category_id")
+    # 列序固定（_SCENE_CATEGORY_COLS）：UPDATE 的 SET/参数顺序不随分支顺序漂移
+    return [col for col in _SCENE_CATEGORY_COLS if col in changed]
 
 
 def _scene_where(scene_id: str | None, row_id: int | None, repo_key: str | None):
@@ -625,21 +735,31 @@ def upsert_scene_content(name: str, payload: dict[str, Any], source: str = "offi
                          scope: str = "official", repo_key: str = "", source_user_id: str = "") -> dict[str, Any]:
     """写入场景内容（只写内容列，**绝不触碰 is_active / is_featured**）。
 
-    返回 {"action": inserted|updated|skipped, "id": ..., "changed": n}。
-    幂等：payload 的 content_hash 与库内一致时直接 skipped。
+    返回 {"action": inserted|updated|skipped|backfilled, "id": ..., "changed": n}。
+    幂等：payload 的 content_hash 与库内一致时不写内容列；但分类目标与库内不同时
+    执行一次窄 UPDATE（只动分类列）并返回 backfilled（Issue #3796）。
     """
     # 历史键名（market_desc / tags_str）先映射成列名，否则这两列会被静默丢掉
     payload = {_SCENE_FIELD_ALIASES.get(k, k): v for k, v in (payload or {}).items()}
     cols = [c for c in _SCENE_CONTENT_COLS if c in payload]
     with db_registry.cursor("mgmt") as cur:
-        cur.execute("SELECT id, content_hash, tags, cat_l1_id, cat_l2_id FROM scene_market "
-                    "WHERE name=%s AND source=%s LIMIT 1", (name, source))
+        cur.execute("SELECT id, content_hash, tags, cat_l1_id, cat_l2_id, category_id "
+                    "FROM scene_market WHERE name=%s AND source=%s LIMIT 1", (name, source))
         row = cur.fetchone()
         if row:
             sid, old_hash, old_tags = row[0], (row[1] or ""), (row[2] or "")
             old_l1, old_l2 = (row[3] if len(row) > 3 else 0), (row[4] if len(row) > 4 else 0)
+            old_cat = row[5] if len(row) > 5 else 0
             if payload.get("content_hash") and payload.get("content_hash") == old_hash:
-                return {"action": "skipped", "id": sid, "changed": 0}
+                # Issue #3796：内容未变不等于分类可停更——只回填分类列，不动内容列
+                backfill = _scene_category_backfill_cols(payload, old_cat, old_l1, old_l2)
+                if not backfill:
+                    return {"action": "skipped", "id": sid, "changed": 0}
+                sets = ", ".join(f"{col}=%s" for col in backfill)
+                cur.execute(f"UPDATE scene_market SET {sets}, updated_at=NOW() WHERE id=%s",
+                            tuple(payload[col] for col in backfill) + (sid,))
+                return {"action": "backfilled", "id": sid, "changed": int(cur.rowcount or 0),
+                        "backfilled": backfill}
             if not cols:
                 return {"action": "skipped", "id": sid, "changed": 0}
             if "tags" in payload:
@@ -991,14 +1111,18 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # 巡检任务调度（runtime/engine/scheduler.py；任意拓扑）
            "autopilot_subscribers_any", "list_enabled_autopilot_tasks_any",
            "autopilot_task_row_any", "autopilot_task_last_run_any",
-           "set_autopilot_run_info_any",
+           "set_autopilot_run_info_any", "set_autopilot_dispatch_state_any",
+           # Issue #3733：不可派发状态口径（常量 / 原因文案，runtime 调度器与 mgmt 路由共用）
+           "AUTOPILOT_STATE_OK", "AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION",
+           "AUTOPILOT_STATE_BLOCKED_PAYLOAD", "AUTOPILOT_STATE_BLOCKED_PAYLOAD_REPEAT",
+           "AUTOPILOT_EMPTY_INSTRUCTION_REASON", "reason_for_state", "dispatch_reason",
            # 反馈状态联动（api/feedback_status.py；任意拓扑）
            "feedback_external_sync_page", "feedback_mark_status_if_live",
            "feedback_internal_sync_page", "feedback_apply_statuses",
            # 反馈 → Issue 转换（api/feedback_issue_converter.py；任意拓扑）
            "feedback_pending_conversions", "feedback_mark_converted",
            "feedback_claim_row", "feedback_release_claim", "feedback_list_claims",
-           "feedback_mark_converted_from_claim",
+           "feedback_mark_converted_from_claim", "feedback_bump_convert_fail",
            # 场景计数（api/session_store.py 首次托管判定；任意拓扑）
            "count_active_scenes_any",
            # 登录白名单判定（kernel/config.py；任意拓扑）
@@ -1987,6 +2111,13 @@ _ANY_QUERIES: dict[str, str] = {
     "scene_id_active_by_repo_scene": (
         "SELECT scene_id FROM devops_pipeline_scene "
         "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1"),
+    # 跨流水线交办刷新 Issue 场景时回填归属人（uid=0 冲掉旧归属人的事故）
+    "scene_created_by_by_repo": (
+        "SELECT created_by FROM devops_pipeline_scene "
+        "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1"),
+    "scene_created_by_generic": (
+        "SELECT created_by FROM devops_pipeline_scene "
+        "WHERE scene_id=? AND is_active=1 LIMIT 1"),
     "scene_deploy_url_set": (
         "UPDATE devops_pipeline_scene SET deploy_url=? "
         "WHERE scene_id=? AND repo_key=? AND is_active=1"),
@@ -2169,13 +2300,22 @@ _ANY_QUERIES: dict[str, str] = {
     "autopilot_tasks_enabled_full": (
         "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
         "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids, "
-        "consecutive_failures, last_error_code, offline_since, backoff_until, circuit_paused "
+        "consecutive_failures, last_error_code, offline_since, backoff_until, circuit_paused, "
+        # Issue #3733：状态三列**追加在末尾**——原有 r[0..12] 下标解包保持不变
+        "dispatch_state, dispatch_state_reason, dispatch_state_at "
         "FROM autopilot_tasks WHERE enabled=1"),
     "autopilot_task_full_row": (
         "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
         "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids, "
-        "consecutive_failures, last_error_code, offline_since, backoff_until, circuit_paused "
+        "consecutive_failures, last_error_code, offline_since, backoff_until, circuit_paused, "
+        "dispatch_state, dispatch_state_reason, dispatch_state_at "
         "FROM autopilot_tasks WHERE id=?"),
+    # Issue #3733：状态写入（幂等）。`AND dispatch_state<>?` 让「状态未变更」返回 0 行——
+    # 并发多副本同时发现同一空指令任务时，只有一处 UPDATE 命中，日志只在那一处留痕；
+    # 重启/重复写入也不会刷新 dispatch_state_at（该列是状态进入时刻）。
+    "autopilot_dispatch_state_set": (
+        "UPDATE autopilot_tasks SET dispatch_state=?, dispatch_state_reason=?, "
+        "dispatch_state_at=?, updated_at=? WHERE id=? AND dispatch_state<>?"),
     "autopilot_task_last_run": "SELECT last_run_at FROM autopilot_tasks WHERE id=?",
     "autopilot_run_info_set": (
         "UPDATE autopilot_tasks SET last_run_at=?, next_run_at=?, updated_at=? WHERE id=?"),
@@ -2348,19 +2488,22 @@ _ANY_QUERIES: dict[str, str] = {
     # ── 反馈 → Issue 转换（api/feedback_issue_converter.py；user_feedback 归 mgmt）──
     # 原实现在 api 进程主库直发（`_fetch_pending` 读 + 组内逐行回写）：三库拓扑下
     # api 进程库没有 user_feedback（视图 0 → 1146），待转换队列恒空、转换器整体停摆。
-    # 列序（15 列）/ 谓词 / ORDER BY / LIMIT 逐字照抄；只用 `?` 占位符。
+    # 列序（16 列，末列为 Issue #3731 的连续失败轮次）/ 谓词 / ORDER BY / LIMIT
+    # 逐字照抄；只用 `?` 占位符。
     # 入选口径照抄：未转换（issue_url='')、未软删，且 source='agent' 或
     # source='user' 且带仓库上下文（repo_key 非空，Issue #673）—— 不额外加过滤。
     "feedback_pending_rows": (
         "SELECT id, repo_key, task_id, agent_type, skill_name, skill_scope, "
         "title, description, fail_summary, event_seq, issue_id, issue_number, feedback_kind, "
-        "source, username "
+        "source, username, convert_fail_count "
         "FROM user_feedback WHERE issue_url='' AND is_deleted=0 "
         "AND (source='agent' OR (source='user' AND COALESCE(repo_key,'')!='')) "
         "ORDER BY id LIMIT ?"),
     # 回写守卫 `issue_url=''` 逐字保留：已转换行不被二次覆盖（重放 / 并发安全）。
+    # Issue #3731：建单成功即清零连败计数（同一条语句，避免多一次往返）。
     "feedback_mark_converted": (
-        "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=? "
+        "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=?, "
+        "convert_fail_count=0 "
         "WHERE id=? AND issue_url=''"),
     # 占位（claim）：把空 issue_url 改成本次 worker 的占位值，单条条件 UPDATE 即领走该行。
     # 多进程 / 多机（共享同一库）下只有一个能 rowcount=1，这就是跨进程去重的那道闸。
@@ -2374,9 +2517,18 @@ _ANY_QUERIES: dict[str, str] = {
     "feedback_list_claims": (
         "SELECT id, issue_url FROM user_feedback WHERE issue_url LIKE ?"),
     # 回写时同时接受「空」与「本次占位」：占位挡着自己回写会让建出来的单永远记不上。
+    # Issue #3731：与 feedback_mark_converted 同步清零连败计数。
     "feedback_mark_converted_from_claim": (
-        "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=? "
+        "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=?, "
+        "convert_fail_count=0 "
         "WHERE id=? AND (issue_url='' OR issue_url LIKE ?)"),
+    # Issue #3731：累计一次转换失败轮次（路由解析 / 无 token / 建单失败统一口径），
+    # 达阈值由调用方升级 ERROR；成功后由上面两条回写语句清零。
+    "feedback_bump_convert_fail": (
+        "UPDATE user_feedback SET convert_fail_count=COALESCE(convert_fail_count,0)+1 "
+        "WHERE id=?"),
+    "feedback_convert_fail_count": (
+        "SELECT convert_fail_count FROM user_feedback WHERE id=?"),
     # ── 登录白名单（kernel/config.py 的登录判定；login_whitelist 归 mgmt）────────
     # 原实现在 kernel 里用进程主库游标直发：三库拓扑下进程库没有 login_whitelist
     # （无视图 → 1146），被 `_is_login_whitelist_enabled` / `is_user_allowed` 的
@@ -2839,6 +2991,23 @@ def set_autopilot_run_info_any(task_id, last_run_at: str, next_run_at: str) -> i
     """回写 last_run_at / next_run_at / updated_at（updated_at 与原实现一致 = last_run_at）。"""
     return exec_any("autopilot_run_info_set",
                     (last_run_at, next_run_at, last_run_at, int(task_id)))
+
+
+def set_autopilot_dispatch_state_any(task_id, state: str, reason: str = "") -> int:
+    """写任务的不可派发状态（状态 + 原因 + 进入时间），返回变更行数。
+
+    Issue #3733：**返回值就是「状态是否真的变更」**——语句带 `AND dispatch_state<>?`
+    谓词，库内已是目标状态时返回 0 行：
+
+    - 并发多副本同时扫描到同一空指令任务时，只有一处 UPDATE 命中 → 只有那一处留痕，
+      日志量不随副本数、tick 频率增长；
+    - 调用方据此决定是否打 WARNING，跨重启也以库内状态为权威（进程内记忆只做节流）。
+
+    `state` 取 `autopilot_state` 中的常量（`''` = 恢复正常可派发）。
+    """
+    _now = datetime.now(timezone.utc).isoformat()
+    return exec_any("autopilot_dispatch_state_set",
+                    (state or "", reason or "", _now, _now, int(task_id), state or ""))
 
 
 def set_autopilot_failure_state_any(task_id, consecutive_failures, last_error_code,
@@ -3830,6 +3999,25 @@ def scene_id_exists_any(scene_id: str, repo_key: str) -> str:
     return str(row[0] or "") if row else ""
 
 
+def scene_created_by_any(scene_id: str, repo_key: str = "") -> str:
+    """场景创建者（平台账号名）——交办刷新 Issue 场景时回填归属人用。
+
+    优先本仓库行，其次 repo_key='' 的通用行；只认在用场景（is_active=1）。
+    无行/空值返回空串（调用方据此保持 Issue 原归属人不变，不要写 0）。
+    """
+    if not scene_id:
+        return ""
+    for _key, _params in (("scene_created_by_by_repo", (scene_id, repo_key or "")),
+                          ("scene_created_by_generic", (scene_id,))):
+        try:
+            row = read_one_any(_key, _params)
+        except Exception:
+            row = None
+        if row and row[0]:
+            return str(row[0])
+    return ""
+
+
 def scene_active_flags_any(scene_id: str, repo_key: str) -> list[Any]:
     """该场景行（含 repo_key='' 的通用行）的 is_active 列表；无行返回空列表。"""
     return list(read_all_any("scene_active_flags", (scene_id, repo_key or "")))
@@ -3981,7 +4169,7 @@ def replace_scene_skill_ref_any(scene_id: int, refs: list[dict[str, Any]]) -> di
 def upsert_scene_content_any(name: str, fields: dict[str, Any], source: str = "official") -> dict[str, Any]:
     """按 content_hash 幂等的场景内容写入（任意拓扑，可移植方言）。
 
-    返回 {"action": inserted|updated|skipped, "id": int|0, "old_version": str|None}。
+    返回 {"action": inserted|updated|skipped|backfilled, "id": int|0, "old_version": str|None}。
     只写内容列：**绝不触碰** is_featured / like_count / source_user_id；UPDATE 时
     保留库内既有 is_active（admin 设置不被同步覆盖），INSERT 时按原实现落
     is_featured=0 / like_count=0 / source_user_id=0 / is_active=1。
@@ -3990,15 +4178,25 @@ def upsert_scene_content_any(name: str, fields: dict[str, Any], source: str = "o
     content_hash = payload.get("content_hash") or ""
     cols = [c for c in _SCENE_CONTENT_COLS if c in payload]
     with _any_tx() as c:
-        c.execute("SELECT id, version, content_hash, is_active, tags, cat_l1_id, cat_l2_id "
-                  "FROM scene_market WHERE name=? AND source=? LIMIT 1", (name, source))
+        c.execute("SELECT id, version, content_hash, is_active, tags, cat_l1_id, cat_l2_id, "
+                  "category_id FROM scene_market WHERE name=? AND source=? LIMIT 1", (name, source))
         row = c.fetchone()
         if row:
             sid, old_version, old_hash, preserved_active, old_tags = (
                 int(row[0]), row[1], (row[2] or ""), row[3], (row[4] or ""))
             old_l1, old_l2 = (row[5] if len(row) > 5 else 0), (row[6] if len(row) > 6 else 0)
+            old_cat = row[7] if len(row) > 7 else 0
             if old_hash == content_hash:
-                return {"action": "skipped", "id": sid, "old_version": old_version}
+                # Issue #3796：内容未变不等于分类可停更——只回填分类列，不动内容列
+                backfill = _scene_category_backfill_cols(payload, old_cat, old_l1, old_l2)
+                if not backfill:
+                    return {"action": "skipped", "id": sid, "old_version": old_version}
+                sets = ", ".join(f"{col}=?" for col in backfill)
+                c.execute(f"UPDATE scene_market SET {sets}, updated_at=datetime('now') "
+                          f"WHERE id=?", tuple(payload[col] for col in backfill) + (sid,))
+                return {"action": "backfilled", "id": sid, "old_version": old_version,
+                        "backfilled": backfill,
+                        "changed": int(getattr(c, "rowcount", 0) or 0)}
             if not cols:
                 return {"action": "skipped", "id": sid, "old_version": old_version}
             if "tags" in payload:
@@ -5806,6 +6004,22 @@ def feedback_mark_converted_from_claim(items: list[tuple], prefix: str) -> int:
             done += int(getattr(c, "rowcount", 0) or 0)
     return done
 
+
+def feedback_bump_convert_fail(fid) -> int:
+    """累计一次「反馈 → Issue」转换失败轮次，返回累计值（Issue #3731）。
+
+    失败原因（路由解析崩溃 / 无 bot token / 建单 400）都不该只留一条每 tick 的
+    WARNING：计数落 `user_feedback.convert_fail_count`（跨 worker 共享库可见，
+    admin 可查），调用方按阈值把日志升级为 ERROR。成功后由
+    `feedback_mark_converted[_from_claim]` 在同一条 UPDATE 里清零。
+    同事务「先自增再读回」，多 worker 并发时各自拿到自增后的值，不会互相覆盖。
+    """
+    with _any_tx() as c:
+        c.execute(_any_sql("feedback_bump_convert_fail"), (fid,))
+        c.execute(_any_sql("feedback_convert_fail_count"), (fid,))
+        row = c.fetchone()
+    return int(row[0] or 0) if row else 0
+
 # ── 跨域异常类再导出（2026-11-18）──────────────────────────────────────────
 # runtime 的 VCS providers（gitcode/gitee/gitlab/card_module）在调用上游 API 失败时
 # 要抛/捕获与 mgmt repo_manager 同一套异常类型，调用方才能统一处理。此前直接
@@ -6122,6 +6336,20 @@ def get_host_user_id(repo_key: str):
     from src.domains.mgmt.user.db import get_host_user_id as _impl
 
     return _impl(repo_key)
+
+
+def credential_workflows_write(user_id: str, provider: str):
+    """该用户在某 VCS provider 上的 workflow 写能力（True/False/None=未知）。"""
+    from src.domains.mgmt.user.repo_manager import credential_workflows_write as _impl
+
+    return _impl(user_id, provider)
+
+
+def github_token_scopes(token: str):
+    """探测 GitHub token 的 OAuth scope 集合（None 表示未知）。"""
+    from src.domains.mgmt.user.repo_manager import get_github_token_scopes as _impl
+
+    return _impl(token)
 
 
 def resolve_skill_dispatch(skill_name: str, skill_id: int = 0, repo_key: str = "",

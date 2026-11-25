@@ -23,7 +23,7 @@
     "auth_url": "授权页地址（必填）。Grape 会拼 client_id / redirect_uri / response_type=code / state / scope（PKCE 开启时再加 code_challenge & S256）",
     "token_url": "换 token 端点（必填）。POST form: grant_type=authorization_code & code & client_id & client_secret & redirect_uri",
     "user_url": "取用户信息端点（必填）。支持 {access_token} 占位：出现时把 token 拼进 URL 查询参数且不发 Authorization 头（华为 GOpen 就属于这种）",
-    "scope": "授权范围。Gitee 必须取官方合法集（无 emails），只取 user_info；GitHub 取 read:user user:email + repo + workflow + admin:repo_hook（推 .github/workflows、管 webhook 必需，2026-11-25 负责人拍板加回，Issue #4301）；华为用 openid。登录令牌与凭据域 PAT 并存（2026-11-14 口径：PAT 缺席时回落登录令牌），scope 不足时仓库操作返回 SCOPE_INSUFFICIENT",
+    "scope": "授权范围。Gitee 必须取官方合法集（无 emails），只取 user_info；GitHub 取 read:user user:email + repo + workflow + admin:repo_hook（推 .github/workflows、管 webhook 必需，2026-11-25 负责人拍板，Issue #4301/#3386）；华为用 openid。登录令牌与凭据域 PAT 并存（2026-11-14 口径：PAT 优先、PAT 缺席回落登录令牌），scope 不足时仓库操作返回 SCOPE_INSUFFICIENT",
     "id_field": "从 userinfo 响应里取唯一 ID 的字段名（GitHub/GitCode/Gitee=id；华为=openID；OIDC 默认 sub）",
     "login_field": "从 userinfo 响应里取登录名的字段名（登录白名单与身份绑定按它比对；华为无登录名→用 openID）",
     "name_field": "展示昵称字段（Gitee/GitHub=name，GitCode=nickname，华为=nickName）",
@@ -70,7 +70,7 @@
     "client_secret": ""
   },
   "github": {
-    "_note": "scope = 身份（read:user user:email）+ 仓库读写 repo + workflow + admin:repo_hook —— workflow 缺失会让含 .github/workflows 的 push 被 GitHub 拒绝（Issue #4301），admin:repo_hook 用于 webhook 管理。刻意不含 offline_access：它只影响 refresh_token 签发（把登录令牌变成长期令牌），对仓库写/推工作流无增益。GitHub 记住授权：scope 不变则静默跳回、不弹授权页；scope 升级会重新弹 → 本次升级需全体 GitHub 用户重新授权一次。/user 默认不返回邮箱，由渠道卡 emails_endpoint 能力位补抓 /user/emails。",
+    "_note": "scope = 身份（read:user user:email）+ 仓库读写 repo + workflow + admin:repo_hook —— workflow 缺失会让含 .github/workflows 的 push 被 GitHub 拒绝（Issue #4301 / #3386）；admin:repo_hook 用于 webhook 管理。刻意不含 offline_access：它只影响 refresh_token 签发（把登录令牌变成长期令牌），对仓库写无增益。仓库写也可走凭据域 PAT（创建时勾 repo + workflow）。GitHub 记住授权：scope 不变则静默跳回、不弹授权页；scope 升级会重新弹 → 本次升级需全体 GitHub 用户重新授权一次。/user 默认不返回邮箱，由渠道卡 emails_endpoint 能力位补抓 /user/emails。",
     "name": "GitHub",
     "type": "oauth2",
     "auth_url": "https://github.com/login/oauth/authorize",
@@ -91,7 +91,7 @@
     "client_secret": ""
   },
   "gitee": {
-    "_note": "scope 必须落在 Gitee 官方合法集内（user_info / projects / pull_requests / issues / notes / keys / hook / groups / gists / enterprises）——没有 emails。Gitee 跳过授权页的判据是「请求 scope 与用户上次授权勾选范围一致」，所以 scope 必须稳定。登录应用只取 user_info（Gitee 登录应用不申请仓库权限，仓库写走凭据域 PAT；不回落语义见 _fields.scope）；Gitee authorize 不认 PKCE，pkce_enabled 必须 false。",
+    "_note": "scope 必须落在 Gitee 官方合法集内（user_info / projects / pull_requests / issues / notes / keys / hook / groups / gists / enterprises）——没有 emails。Gitee 跳过授权页的判据是「请求 scope 与用户上次授权勾选范围一致」，所以 scope 必须稳定。登录应用只取 user_info（D108-B：登录令牌不回落仓库操作，仓库读写走 PAT）；Gitee authorize 不认 PKCE，pkce_enabled 必须 false。",
     "name": "Gitee",
     "type": "oauth2",
     "auth_url": "https://gitee.com/oauth/authorize",

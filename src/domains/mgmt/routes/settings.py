@@ -338,15 +338,6 @@ _PLACEHOLDER_VALUES = {
     "AK-demo-access-key-xxxx", "SK-demo-secret-key-xxxx", "ghp_devopsbot_xxxxxxxxxxxxxxxxxxxx",
 }
 
-# Issue #4301：PAT 绑定期 workflow 权限提示（不阻断保存，仅前端可见告警）。
-_WF_MISSING_WARNING = (
-    "GitHub Token 缺少 workflow 权限：涉及 .github/workflows 的自动化任务将被推送拒绝，"
-    "请重新生成令牌并在 PAT 中勾选 workflow 后重新绑定。")
-_WF_FINEGRAINED_WARNING = (
-    "GitHub Token 未返回 scope 响应头（通常为细粒度 PAT），无法自动校验 workflow 权限；"
-    "请确认 Contents / Pull requests / Issues / Workflows 均为 Read and write，"
-    "否则涉及 .github/workflows 的推送会被拒绝。")
-
 def _is_placeholder(value: str) -> bool:
     v = (value or "").strip()
     if not v:
@@ -357,13 +348,63 @@ def _is_placeholder(value: str) -> bool:
         return True
     return "xxxx" in v.lower()
 
+
+# Issue #3386：GitHub workflow scope 探测结果接入绑定响应。
+# - 已知有 workflow → 显式落 ``workflows_write=True``（D105-18 凭据能力位），
+#   模板初始化不再删 .github/workflows；
+# - 已知缺失 → 返回 ``missing_scopes`` + ``scope_warnings``，前端提示重新授权；
+# - 未知（fine-grained PAT / App token / 代理无 X-OAuth-Scopes）→ 不落能力位、不阻断，
+#   只给提示（Spec：未知不误判阻断）。
+_GITHUB_WORKFLOW_SCOPE = "workflow"
+
+# 「未探测」哨兵：与「探测到未知（None）」区分——调用方已复用校验响应头时
+# 不再兜底打第二次 GET /user（Issue #3386 复审：去掉重复上游请求）。
+_SCOPES_UNPROBED = object()
+
+
+def _github_scopes_from_headers(headers) -> "set[str] | None":
+    """从 token 校验响应头解析 X-OAuth-Scopes（异常按未知处理，不阻断）。"""
+    try:
+        from src.domains.mgmt.user.repo_manager import parse_x_oauth_scopes
+        return parse_x_oauth_scopes(headers)
+    except Exception:
+        return None
+
+
+def _apply_github_scope_probe(token: str, pat_cfg: dict,
+                              scopes=_SCOPES_UNPROBED) -> tuple[list[str] | None, str | None]:
+    """探测 GitHub PAT scope 并更新凭据配置；返回 (缺失 scope 列表, 告警文案)。
+
+    scopes：调用方直接传入「复用 token 校验响应（GET /user）解析出的 scope 集合」，
+    ``None``=校验响应未带 X-OAuth-Scopes（未知，不再二次探测）；缺省哨兵时兜底自探测。
+    """
+    if scopes is _SCOPES_UNPROBED:
+        try:
+            from src.domains.mgmt.user.repo_manager import get_github_token_scopes
+            scopes = get_github_token_scopes(token)
+        except Exception as e:
+            log.warning(f"GitHub scope probe failed: {e}")
+            scopes = None
+    if scopes is None:
+        return None, ("github: 无法读取 Token 的 X-OAuth-Scopes（fine-grained token / "
+                      "App token / 代理可能不返回该头），本次未校验 workflow 权限")
+    has_workflow = _GITHUB_WORKFLOW_SCOPE in scopes
+    pat_cfg["workflows_write"] = has_workflow
+    if has_workflow:
+        return None, None
+    return [_GITHUB_WORKFLOW_SCOPE], (
+        "github: Token 缺少 workflow 权限，涉及 .github/workflows 的推送会被 GitHub 拒绝；"
+        "请重新创建 PAT 并勾选 workflow（及 repo）权限后重新绑定"
+    )
+
+
 @router.put("/credentials", operation_id="settings_credentials_update", summary="Update third-party credentials", description="Updates third-party credentials; placeholder/demo values are rejected. Sending an empty string explicitly clears the field; omitting a field leaves it unchanged.")
 def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_session_token)):
     # D32: 写入 user_credentials 表，不写 user_accounts
     explicit = body.model_dump(exclude_unset=True)
-
-    # Issue #4301：绑定期 workflow 权限预检告警（统一在末尾并入 scope_warnings）。
-    _wf_warnings: list[str] = []
+    # Issue #3386：绑定期能力探测结果（先初始化，供 GitHub 专用/泛型两条路径累加）
+    _scope_warnings: list[str] = []
+    _missing_scopes: dict[str, list[str]] = {}
 
     # Issue #4254（第二阶段，负责人拍板 2026-11-24）：凭据配置只对内测白名单用户开放。
     # 判据与 /api/auth/beta-eligibility 同源（login_whitelist 命中即放行，无绑定 =
@@ -416,24 +457,16 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                     # 身份行（external_identities）只由 OAuth 首登或设置页 OAuth
                     # 绑定产生，因此这里不再有 409 / 转移票据分支。
                     from src.domains.mgmt.user.db import set_credential as _sc
-
-                    # Issue #4301（PR#2135 复审 R-1，D102-P 两路语义等价）：经典
-                    # PAT 的 scope 响应头随 /user 请求一并拿到，经与泛型入口共用
-                    # 的同一解析器落 workflows_write；细粒度 PAT 无该头 = 未知不落
-                    # 键，并同样回传细粒度 PAT 权限清单提示——不再与 platform_tokens
-                    # 泛型入口分叉（无内联第二份 scope 解析实现）。
-                    from src.domains.mgmt.user.repo_manager import (
-                        workflows_write_from_scopes,
-                    )
+                    # Issue #3386：绑定期探测 workflow scope（不阻断，只记录能力位/预警）
+                    # —— 校验 GET /user 的响应头直接复用，不再重复打一次 /user
                     _gh_cfg = {"token": _gh_tok, "login": gh_login}
-                    _gh_scopes = _resp.headers.get("X-OAuth-Scopes")
-                    if _gh_scopes is not None:
-                        _gh_wf = workflows_write_from_scopes(_gh_scopes)
-                        _gh_cfg["workflows_write"] = _gh_wf
-                        if not _gh_wf:
-                            _wf_warnings.append(_WF_MISSING_WARNING)
-                    else:
-                        _wf_warnings.append(_WF_FINEGRAINED_WARNING)
+                    _miss, _warn = _apply_github_scope_probe(
+                        _gh_tok, _gh_cfg,
+                        scopes=_github_scopes_from_headers(_resp.headers))
+                    if _miss:
+                        _missing_scopes["github"] = _miss
+                    if _warn:
+                        _scope_warnings.append(_warn)
                     # 写失败必须 loud：静默 False 会留下「前端看到成功、凭据没落库」
                     if not _sc(user["id"], "github", _gh_cfg, kind="pat"):
                         raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
@@ -576,18 +609,19 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                 try:
                     from src.domains.mgmt.vcs import create_provider
                     _provider = create_provider(_p)
-                    # Issue #4301（PR#2135 复审 R-2）：verify_token 与 workflow 预检
-                    # 共用同一次 /user 网络往返（verify_token_scopes 顺带取
-                    # x-oauth-scopes 响应头），不再串行第二次 GET /user——
-                    # 30s + 15s 叠加会超出前端 PUT 绑定预算。非该接口形态的
-                    # provider（无 verify_token_scopes）回退纯 verify_token，
-                    # scope 头取不到 = 未知态。
-                    _verify_scopes = getattr(_provider, "verify_token_scopes", None)
-                    if callable(_verify_scopes):
-                        _info, _wf_scopes = _verify_scopes(_tok)
+                except HTTPException:
+                    raise
+                except Exception as _ve:
+                    raise HTTPException(status_code=502, detail={
+                        "code": 502, "message": f"{_p} token 验证失败: {_ve}"})
+                # Issue #3386：github 校验时同步取响应头（X-OAuth-Scopes 复用，
+                # 免得 scope 探测再打一次 /user）；其余平台不取头。
+                _verify_headers = None
+                try:
+                    if _p == "github" and hasattr(_provider, "verify_token_with_headers"):
+                        _info, _verify_headers = _provider.verify_token_with_headers(_tok)
                     else:
                         _info = _provider.verify_token(_tok)
-                        _wf_scopes = None
                 except HTTPException:
                     raise
                 except Exception as _ve:
@@ -601,10 +635,6 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                         "message": f"{_p} token 校验失败（无用户信息），请检查 token 有效性"})
                 _ext_id = _info_id
                 _ext_login = _info_login
-                from src.domains.mgmt.user.repo_manager import (
-                    workflows_probe_supported,
-                    workflows_write_from_scopes,
-                )
                 # A 批对象模型（2026-11-13 用户裁定）：PAT = 仓库执行凭据，不是
                 # 身份绑定。external_identities 只由 OAuth 首登或设置页 OAuth
                 # 绑定产生；这里不再建/改身份行，于是不会出现「身份留在 A 账号、
@@ -621,22 +651,15 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                     _pat_cfg["expires_at"] = str(_exp_meta["expires_at"])
                 if _wf_declared:
                     _pat_cfg["workflows_write"] = _wf_write  # 显式 False 也落库（三态）
-                    if (not _wf_write) and workflows_probe_supported(_p):
-                        _wf_warnings.append(_WF_MISSING_WARNING)
-                else:
-                    # Issue #4301（PR#2135 复审 R-1/R-2）：绑定期预检 x-oauth-scopes，
-                    # 把 workflow 能力落到 workflows_write。scope 头来自上面
-                    # verify_token 的同一次 /user 响应（无第二次网络请求）；经与
-                    # 专用 github_token 入口共用的同一解析器（workflows_write_from_scopes）
-                    # 解析三态：True/False 落键，缺失头（细粒度 PAT）= 未知不落键。
-                    if workflows_probe_supported(_p):
-                        _wf_probe = workflows_write_from_scopes(_wf_scopes)
-                        if _wf_probe is not None:
-                            _pat_cfg["workflows_write"] = _wf_probe
-                        if _wf_probe is False:
-                            _wf_warnings.append(_WF_MISSING_WARNING)
-                        elif _wf_probe is None:
-                            _wf_warnings.append(_WF_FINEGRAINED_WARNING)
+                if _p == "github":
+                    # Issue #3386：以校验响应的 X-OAuth-Scopes 为准覆盖显式声明
+                    #（探测未知时保留声明；不再重复 GET /user）
+                    _miss, _warn = _apply_github_scope_probe(
+                        _tok, _pat_cfg, scopes=_github_scopes_from_headers(_verify_headers))
+                    if _miss:
+                        _missing_scopes["github"] = _miss
+                    if _warn:
+                        _scope_warnings.append(_warn)
                 # 写失败必须 loud（2026-11-13 复核）：原实现丢弃返回值，凭据没写成
                 # 也照样打 "PAT bound" 成功日志。PAT 不碰身份行后无需补偿身份。
                 if not set_credential(user["id"], _p, _pat_cfg, kind="pat"):
@@ -671,7 +694,6 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
     # SETTINGS_TOKEN_FIELD_SUFFIX（LABEL_COLOR 同款模式）：声明 "token" 的平台
     # （gitcode/github 存量专用字段）用 <p>_token，其余平台走 <p>_pat 凭据键
     # （与凭据域 D31 存储口径一致）；模块缺失/未声明时回退 <p>_pat 泛型口径。
-    _scope_warnings = []
     try:
         from src.domains.runtime.public import list_vcs_platforms as _lvp
         _probe_platforms = _lvp()
@@ -732,11 +754,13 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
     # 触发依赖），不同步则"清 PAT 后空项目页而非引导页"
     from src.domains.mgmt.auth.grape_account_db import get_user_identities
     remaining = [i["provider"] for i in get_user_identities(user["id"])]
-    _scope_warnings.extend(_wf_warnings)
+    _resp_body = {"message": "凭据已更新", "bindings": remaining}
     if _scope_warnings:
-        return {"message": "凭据已更新", "scope_warnings": _scope_warnings,
-                "bindings": remaining}
-    return {"message": "凭据已更新", "bindings": remaining}
+        _resp_body["scope_warnings"] = _scope_warnings
+    if _missing_scopes:
+        # Issue #3386：前端据此在绑定弹窗展示 workflow 缺失预警与重新授权入口
+        _resp_body["missing_scopes"] = _missing_scopes
+    return _resp_body
 
 class CreateApiKeyBody(BaseModel):
     name: str = ""
@@ -987,34 +1011,33 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
         from src.domains.mgmt.vcs import create_provider_from_repo_key
         _vcs_provider = create_provider_from_repo_key(repo_key)
         _verified_login = ""
-        _bot_scopes = None
-        _verify_scopes = getattr(_vcs_provider, "verify_token_scopes", None)
+        _bot_headers: dict = {}
         try:
-            if callable(_verify_scopes):
-                _vres = _verify_scopes(token)
-                if isinstance(_vres, tuple) and len(_vres) == 2:
-                    _info, _bot_scopes = _vres[0], _vres[1]
-                else:  # 非预期形态 → 当作纯 verify 结果，能力未知
-                    _info = _vres
+            # Reuse the baseline header capture (#3386 verify_token_with_headers) so
+            # the workflow verdict costs no extra /user round-trip.
+            _verify = getattr(_vcs_provider, "verify_token_with_headers", None)
+            if callable(_verify):
+                _info, _bot_headers = _verify(token)
             else:
-                _info = _vcs_provider.verify_token(token) or {}
+                _info = _vcs_provider.verify_token(token)
             _verified_login = str((_info or {}).get("login") or "").strip()
         except Exception:
             raise HTTPException(status_code=400, detail={
                 "code": 400, "error_code": "TOKEN_INVALID",
                 "message": "Bot Token 无效，请检查后重试"
             })
-        # Issue #4301 第二批（2026-11-25 负责人拍板）：这是仓库 Bot 令牌的**第二个**
-        # 写入入口（设置页快路径）——与 /repos/bot-token 同口径预检 workflow 能力，
-        # 两路口径必须一致，否则从设置页绑的 bot 仍会静默缺权限。
-        _wf_cap = None
+        # Issue #4301: the settings page is the SECOND writer of the repository bot
+        # token (the canonical one is PUT /repos/bot-token). Both entries must apply
+        # the same workflow precheck, otherwise a bot bound here stays silent.
         from src.domains.mgmt.user.repo_manager import (
+            parse_x_oauth_scopes as _parse_bot_scopes,
             workflows_probe_supported as _wf_probe_ok,
-            workflows_write_from_scopes as _wf_from_scopes,
         )
+        _wf_cap = None
         _provider_str = repo_key.split(":", 1)[0] if ":" in repo_key else ""
+        _bot_scopes = _parse_bot_scopes(_bot_headers) if _bot_headers else None
         if _wf_probe_ok(_provider_str):
-            _wf_cap = _wf_from_scopes(_bot_scopes)
+            _wf_cap = None if _bot_scopes is None else ("workflow" in _bot_scopes)
             if _wf_cap is False:
                 _wf_warnings.append(
                     "该 Bot Token 缺少 workflow 权限：涉及 .github/workflows 的推送会被 GitHub "
@@ -1038,7 +1061,8 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
             body.bot_username = _verified_login
             _log.info(f"settings: bot username auto-filled from token owner: {_verified_login}")
         _log.info(f"settings: bot token updated for {repo_key} by user {user.get('id')}")
-        # Issue #4301 第二批：能力落 rc 单表（与 /repos/bot-token 同口径；未知不落键）
+        # Issue #4301: persist the known capability for the chain-based diagnosis
+        # (rc row, data-only, no DDL); unknown stays unpersisted on purpose.
         if _wf_cap is not None:
             try:
                 from datetime import datetime, timezone
@@ -1172,6 +1196,19 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     from src.domains.mgmt.user import db as user_db
     from src.domains.runtime.public import instance_name
     from src.kernel.session_manager import db, db_lock
+    # Issue #4349：engine_uid 比对结果（DB 行 uid vs 引擎上报 uid）的 stale 报告源
+    # ——v2 claim/heartbeat 解析失效时的进程内 TTL 注册表（runtime 域 stale_uid）。
+    from src.domains.runtime.engine import stale_uid as _stale_uid
+    _stale_reps_cache: dict = {}
+
+    def _stale_reps_for(cid: int) -> list:
+        """同凭据多引擎行共享一次快照（列表页 N 引擎 × 1 次注册表扫描）。"""
+        if cid not in _stale_reps_cache:
+            try:
+                _stale_reps_cache[cid] = _stale_uid.reports_for_credential(cid)
+            except Exception:
+                _stale_reps_cache[cid] = []
+        return _stale_reps_cache[cid]
 
     uid = str(user.get("id") or "")
     uname = user.get("username") or ""
@@ -1290,6 +1327,15 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             rt["repo_key"] = from_repo_key(cred.get("repo_key", ""))
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
         rt["spec"] = cred.get("spec") or ""
+        # Issue #4349：engine_uid 比对结果——DB 行 engine_uid vs 引擎上报 uid。
+        # stale 报告来自 v2 claim/heartbeat 解析失效时的进程内 TTL 注册表；
+        # 报告尽力关联的 runtime 行（claim/heartbeat 回退 id）标 stale，无报告
+        # 或未关联到本行 → matched。详情端点（get_agent_runtime_detail）复用
+        # 本函数，前端引擎详情弹窗据此展示 stale 标记（RuntimesView.vue）。
+        rt["engine_uid_stale_reports"] = _stale_reps_for(cid)
+        rt["engine_uid_status"] = ("stale" if any(
+            rt.get("id") in (rep.get("runtime_ids") or [])
+            for rep in rt["engine_uid_stale_reports"]) else "matched")
         # Issue #2133：spawn_failed 时间窗降级 / 场景解绑恢复入口（前端 degraded 高亮 + 一键加回）
         rt["spawn_fail_degraded"] = bool(rt.get("spawn_fail_degraded_at"))
         rt["detached_from_scenes"] = bool(rt.get("detached_from_scenes_at"))
@@ -2648,7 +2694,8 @@ def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depe
                 _csb_purge(_purged_rids, commit=False)
             db.commit()
             log.info(f"revoke {cid} via lib: engines={_purged.get('engines')} "
-                     f"sessions={_purged.get('sessions')} caps={_purged.get('caps')}")
+                     f"sessions={_purged.get('sessions')} chat_sessions={_purged.get('chat_sessions')} "
+                     f"caps={_purged.get('caps')}")
             return {"message": f"凭据 {cid} 已吊销并删除"}
         # 运行域半区（会话摘绑 + 能力 + 引擎行 + 凭据行）是 owner 域的组合原语，一次事务：
         # 单库拓扑回落进程库，三库拓扑走 owner 连接，与 lib 分支同一实现。
@@ -2658,7 +2705,8 @@ def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depe
             # mgmt 半区：清理场景 nodes_json 里对被删 runtime 的悬空引用（Issue #250）
             _cleanup_scene_engine_runtime_ids(_purged_rids)
         log.info(f"revoke {cid}: engines={_purged.get('engines')} "
-                 f"sessions={_purged.get('sessions')} caps={_purged.get('caps')}")
+                 f"sessions={_purged.get('sessions')} chat_sessions={_purged.get('chat_sessions')} "
+                 f"caps={_purged.get('caps')}")
     # 沙箱链级联（纯 DB：模板/绑定/Provider 删除 + 沙箱记录置 orphaned + 孤儿兜底）
     _sb_cleanup = _sb_revoke_cleanup(cid)
     return {"message": f"凭据 {cid} 已吊销并删除"}
@@ -3324,10 +3372,23 @@ def _attach_engine_models(runtimes: list[dict]) -> None:
       服务端读本机配置兜底（model_source=local_config，复用 worker 同一解析器）
     仅附加模型名字段，绝不输出 base_url/api_key/环境变量值。
     """
-    from src.domains.runtime.public import detect_engine_model
+    # Issue #3414：自部署机若连 public 门面本身都陈旧/缺符号，
+    # ``from src.domains.runtime.public import detect_engine_model`` 会抛 ImportError →
+    # /agent-runtimes 500 → 引擎绑定/派单链路整体断裂（新任务 runtime_id=0 永久 queued）。
+    # 说明：public wrapper 调用期的 engine_model 导入已由下方内层 try/except 兜住；
+    # 本外层降级只覆盖「public 门面自身导入失败」这一场景。模型附加是增强字段，
+    # 按 engine_model 自身降级原则（任何解析失败返回空串）此处必须 fail-open：
+    # 导入失败仅告警，跳过 local_config 兜底，recent_models（DB 聚合）照常附加。
+    try:
+        from src.domains.runtime.public import detect_engine_model
+    except Exception as e:
+        log.warning(f"agent-runtimes: engine_model import degraded (Issue #3414): {e}")
+        detect_engine_model = None
     recent = _recent_models_by_runtime([rt.get("id") for rt in runtimes])
     for rt in runtimes:
         rt["recent_models"] = recent.get(rt.get("id"), [])
+        if detect_engine_model is None:
+            continue
         if not (rt.get("model_name") or "") and (rt.get("credential_id") or 0) == 0:
             try:
                 _m = detect_engine_model(rt.get("name") or "")

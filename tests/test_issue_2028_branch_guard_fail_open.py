@@ -86,7 +86,10 @@ def test_hook_entry_code_fail_open_when_hook_main_raises(tmp_path):
     r = subprocess.run([sys.executable, "-c", code, REPO_KEY],
                        input="", text=True, capture_output=True)
     assert r.returncode == 0, r.stderr
-    assert "fail-open" in r.stderr and "cannot import name lock" in r.stderr
+    # Issue #2923：stderr 只给可读结论，原始异常文案不得回流。
+    assert "fail-open" in r.stderr
+    assert "守卫自身异常" in r.stderr
+    assert "cannot import name lock" not in r.stderr
 
 
 def test_hook_entry_code_fail_open_when_module_missing(tmp_path):
@@ -96,7 +99,8 @@ def test_hook_entry_code_fail_open_when_module_missing(tmp_path):
                        input="", text=True, capture_output=True)
     assert r.returncode == 0, r.stderr
     assert "fail-open" in r.stderr
-    assert "does_not_exist.py" in r.stderr
+    # Issue #2923：不再向 stderr 打印模块路径/原始异常。
+    assert "does_not_exist.py" not in r.stderr
 
 
 def test_hook_entry_code_fail_open_when_spec_is_none(tmp_path):
@@ -126,16 +130,21 @@ def test_hook_main_missing_dependency_reports_locatable_error(monkeypatch, capsy
     real_import = importlib.import_module
 
     def _fake_import(name, *a, **k):
-        # Issue #2292（同 #2147）：自检依赖已迁 canonical ``src.kernel.lock``。
+        # Issue #2292（同 #2147）/ #3414：自检依赖已迁 canonical ``src.kernel.lock``。
         if name == "src.kernel.lock":
-            raise ImportError("cannot import name lock from src")
+            raise ImportError("cannot import name lock from src.kernel")
         return real_import(name, *a, **k)
 
     monkeypatch.setattr(bg.importlib, "import_module", _fake_import)
     monkeypatch.setattr(bg.sys, "stdin", io.StringIO(_ref_line()))
     assert bg.hook_main([REPO_KEY]) == 0
     err = capsys.readouterr().err
-    assert "src.kernel.lock" in err and "fail-open" in err
+# Issue #2923：依赖缺失只给可读中文结论，不回传模块名/ImportError 原文；
+    # Issue #2292：仍需保留可执行修复指引（重装/升级 worker 包）。
+    assert "分支守卫依赖缺失" in err and "fail-open" in err
+    assert "修复指引" in err
+    assert "src.lock" not in err
+    assert "cannot import name lock" not in err
 
 
 def test_hook_main_still_fail_closed_on_real_block(monkeypatch, capsys):

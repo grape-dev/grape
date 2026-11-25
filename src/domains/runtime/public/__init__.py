@@ -67,6 +67,9 @@ _RUNTIME_COLS = (
     "last_seen_at", "local_skills", "skill_scan_result", "agent_tags", "host_name",
     "max_concurrent", "scene_tags", "alias", "worker_version", "org_id",
     "spawn_fail_degraded_at", "detached_from_scenes_at", "probe_spawn_fail_count",
+    # Issue #4349：/runtimes 详情需透出 DB 行 engine_uid（与 _rows_to_runtimes
+    # r[26] 既有口径对齐；此前两路 SELECT 均缺列，出口恒空串）。
+    "engine_uid",
 )
 
 
@@ -1635,24 +1638,61 @@ def purge_runtime_credential(cid: str, detach_sessions: bool = True,
                             drop_capabilities: bool = True) -> dict[str, Any]:
     """吊销凭据：删凭据行 + 级联其引擎行（可选摘绑会话 / 删能力），**一个事务**。
 
-    返回 {rids, sessions, caps, engines, deleted}；mgmt 侧还要清理场景 JSON，
+    返回 {rids, sessions, chat_sessions, caps, engines, deleted}；mgmt 侧还要清理场景 JSON，
     所以把 rids 交回调用方（跨域边界不传 mgmt 表名）。
+
+    Issue #4045：`chat_agent_session` 与 `devops_agent_session` 同批摘绑（`runtime_id=0`），
+    **保留 `engine_uid`**——引擎行删除后 uid 虽不可解析，但保留「原绑的是哪台引擎」的可审计/
+    可重绑定线索，读路径可据此重解析（`session_manager._chat_config_row_engine`）。
+
+    默认参数下走 `RuntimeRefReconciler`（reason="revoke"）统一对账：除两张会话表外，
+    还收敛池/能力/历史绑定/场景引用，避免其它删行路径留下同类悬空引用。
     """
     cid_s = str(cid)
-    out: dict[str, Any] = {"rids": [], "sessions": 0, "caps": 0, "engines": 0, "deleted": 0}
+    out: dict[str, Any] = {"rids": [], "sessions": 0, "chat_sessions": 0,
+                           "caps": 0, "engines": 0, "deleted": 0}
     with _any_tx() as c:
         c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid_s,))
         rids = [int(r[0]) for r in c.fetchall()]
         out["rids"] = rids
         if rids:
             ph = ",".join(["?"] * len(rids))
-            if detach_sessions:
-                c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
-                          tuple(rids))
-                out["sessions"] = int(c.rowcount or 0)
-            if drop_capabilities:
-                c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({ph})", tuple(rids))
-                out["caps"] = int(c.rowcount or 0)
+            if detach_sessions and drop_capabilities:
+                # Issue #4045 / #3097：删引擎行前统一走引用对账（会话/池/能力/绑定/场景），
+                # 避免只覆盖 devops+chat 两张表而漏掉 agent_type_runtime_pool /
+                # devops_agent_runtime_binding / 场景 engine_runtime_ids 等引用。
+                try:
+                    _rep = reconcile_for_caller(c, rids, 0, reason="revoke")
+                except Exception as _re:  # noqa: BLE001 - 兜底不阻断吊销主流程
+                    log.warning(f"purge_runtime_credential reconcile skipped: {_re}")
+                    _rep = {}
+                out["sessions"] = int((_rep or {}).get("sessions_reset", 0) or 0)
+                out["chat_sessions"] = int((_rep or {}).get("chat_sessions_reset", 0) or 0)
+                out["caps"] = int((_rep or {}).get("capability_rows_deleted", 0) or 0)
+                if not _rep:
+                    # 对账通道不可用：至少保证 chat/devops 两条主引用摘绑（保留 engine_uid）
+                    c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
+                              tuple(rids))
+                    out["sessions"] = int(c.rowcount or 0)
+                    c.execute(f"UPDATE chat_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
+                              tuple(rids))
+                    out["chat_sessions"] = int(c.rowcount or 0)
+                    c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({ph})",
+                              tuple(rids))
+                    out["caps"] = int(c.rowcount or 0)
+            else:
+                if detach_sessions:
+                    c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
+                              tuple(rids))
+                    out["sessions"] = int(c.rowcount or 0)
+                    # Issue #4045：chat 会话配置同事务摘绑（原缺口：只摘 devops 侧 → runtime_id 悬空
+                    # 持续打 `get_chat_config: runtime_id=… 不存在` 并静默回落本机直连）
+                    c.execute(f"UPDATE chat_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
+                              tuple(rids))
+                    out["chat_sessions"] = int(c.rowcount or 0)
+                if drop_capabilities:
+                    c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({ph})", tuple(rids))
+                    out["caps"] = int(c.rowcount or 0)
             c.execute(f"DELETE FROM agent_runtimes WHERE id IN ({ph})", tuple(rids))
             out["engines"] = int(c.rowcount or 0)
         c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid_s,))
@@ -1704,6 +1744,17 @@ def change_credential_scope(cid: str, scope: str, repo_key: str, owner_id: str,
                 rid_map[rid] = surviving
             replaced_ids.extend(replaced)
         if replaced_ids:
+            # Issue #4045：删合并行前先把引用改绑到各自的保留行（本仓既有 dedupe 路径口径），
+            # 否则 scope 切换会像 revoke 一样留下悬空 runtime_id。
+            # 按保留行分组：同一 lower(name) 组内的 replaced 只能改绑到该组 surviving。
+            _by_keep: dict[int, list[int]] = {}
+            for _rid, _keep in rid_map.items():
+                _by_keep.setdefault(int(_keep), []).append(int(_rid))
+            for _keep, _gone in _by_keep.items():
+                try:
+                    reconcile_for_caller(c, _gone, _keep, reason="credential-scope-merge")
+                except Exception as _re:  # noqa: BLE001 - 对账失败记 warn，不阻断 scope 切换
+                    log.warning(f"change_credential_scope reconcile skipped: {_re}")
             ph = ",".join(["?"] * len(replaced_ids))
             c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({ph})", tuple(replaced_ids))
             c.execute(f"DELETE FROM agent_runtimes WHERE id IN ({ph})", tuple(replaced_ids))
@@ -2506,6 +2557,12 @@ _ANY_QUERIES: dict[str, str] = {
         "WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) "
         "ORDER BY last_active_at DESC, id DESC"),
     'agent_runtime_name_by_uid': "SELECT name FROM agent_runtimes WHERE engine_uid=?",
+    # Issue #4045：uid 重解析需要同时拿到 id（回写 runtime_id）与 name（backend 派生）
+    'agent_runtime_row_by_uid': "SELECT id, name FROM agent_runtimes WHERE engine_uid=?",
+    # Issue #4045：读路径 uid 重解析命中后回写配置行的 runtime_id。
+    # CAS：带观测到的旧 runtime_id 守卫，防覆盖用户并发 upsert 写入的新值（0 行即放弃）。
+    'chat_config_runtime_id_backfill': (
+        "UPDATE chat_agent_session SET runtime_id=? WHERE id=? AND runtime_id=?"),
     'chat_config_upsert_uid': (
         "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, runtime_id, engine_uid, skill, "
         "skill_id, created_at, last_active_at) "
@@ -2527,6 +2584,11 @@ _ANY_QUERIES: dict[str, str] = {
     'conversations_by_user': (
         f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE user_id=? "
         "ORDER BY updated_at DESC LIMIT ?"),
+    # Issue #4183：任务会话按业务键精确检索（不依赖「最近 N 条」窗口，走
+    # idx_chat_conv_repo_issue 的部分唯一索引列序），供存在性判断与 1062 兜底共用。
+    'conversation_by_repo_issue_type': (
+        f"SELECT {_CONV_COLS_SQL} FROM chat_conversations "
+        "WHERE user_id=? AND repo_key=? AND issue_number=? AND conv_type=? LIMIT 1"),
     'conversation_by_id': f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE id=?",
     'conversation_by_im_user': (
         f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE im_channel_id=? AND user_id=? "
@@ -3139,13 +3201,13 @@ _ANY_QUERIES: dict[str, str] = {
         "updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, "
         "skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, "
         "worker_version, org_id, spawn_fail_degraded_at, detached_from_scenes_at, "
-        "probe_spawn_fail_count FROM agent_runtimes ORDER BY name"),
+        "probe_spawn_fail_count, engine_uid FROM agent_runtimes ORDER BY name"),
     "runtimes_by_scope": (
         "SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, "
         "updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, "
         "skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, "
         "worker_version, org_id, spawn_fail_degraded_at, detached_from_scenes_at, "
-        "probe_spawn_fail_count FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') "
+        "probe_spawn_fail_count, engine_uid FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') "
         "ORDER BY name"),
     "runtime_id_local_direct": (
         "SELECT id FROM agent_runtimes WHERE lower(name)=? AND credential_id=0 AND installed=1 "
@@ -3312,6 +3374,13 @@ _ANY_QUERIES: dict[str, str] = {
     "runtime_credentials_silent_rows": (
         "SELECT id, name, device_name, scope, owner_name, org_id, last_seen_at,"
         " status, repo_key FROM runtime_credentials WHERE status != 'revoked'"),
+    # ── ACP state.db 体积治理指标（insight/observability 采样；Issue #3773）──
+    # worker 心跳把本机 state.db 体积/清理计数写入 runtime_credentials，/metrics
+    # 采样时按 host 暴露 grape_acp_state_db_bytes 等指标。
+    "runtime_credentials_acp_state_rows": (
+        "SELECT device_name, name, acp_state_db_bytes, acp_state_db_cleanup_counts,"
+        " acp_state_db_bytes_freed_total, acp_resume_skipped_total"
+        " FROM runtime_credentials WHERE status != 'revoked'"),
     "agent_task_activity_rows": (
         "SELECT repo_key, created_at, started_at, completed_at FROM agent_tasks"
         " WHERE repo_key IS NOT NULL AND repo_key != ''"),
@@ -5454,7 +5523,7 @@ def dashboard_today_status_counts(day_prefix: str, repo_keys=None, org_id=None) 
 
 _DASH_WORKER_COLS = (
     "SELECT id, name, device_name, status, last_seen_at, last_ip, cpu_percent, memory_percent, "
-    "disk_percent, tmp_percent, bandwidth_percent, bandwidth_mbps, load_avg, owner_name "
+    "disk_percent, tmp_percent, bandwidth_percent, bandwidth_mbps, load_avg, owner_name, spec "
     "FROM runtime_credentials WHERE status != 'revoked' "
     "AND last_seen_at IS NOT NULL AND last_seen_at >= ?")
 
@@ -5466,10 +5535,18 @@ def dashboard_worker_rows(stale_cutoff: str, org_id=None, uname: str = "",
         if org_id:
             c.execute(_DASH_WORKER_COLS + " AND org_id=? ORDER BY id", (stale_cutoff, org_id))
         elif repo:
+            # 仓库级看板：global + 自己的 user + 该 repo 的 worker。
+            # repo_key 在库里存的是带平台前缀的键（gitcode:owner/repo），
+            # 而 UI/URL 传的是裸 owner/repo；必须按候选集比对，否则仓库级
+            # worker 永远不可见（Worker 卡片缺设备 / 设备管理页却能看到的根因）。
+            from src.kernel.repo_key import repo_key_candidates
+            _base = repo.split(":", 1)[1] if ":" in repo else repo
+            _cands = repo_key_candidates(_base)
+            _ph = ",".join("?" * len(_cands))
             c.execute(_DASH_WORKER_COLS +
-                      " AND (scope='global' OR (scope='user' AND owner_name=?) "
-                      "OR repo_key=? OR repo_key=?) ORDER BY id",
-                      (stale_cutoff, uname, repo_key, repo))
+                      f" AND (scope='global' OR (scope='user' AND owner_name=?) "
+                      f"OR repo_key IN ({_ph})) ORDER BY id",
+                      [stale_cutoff, uname] + list(_cands))
         else:
             c.execute(_DASH_WORKER_COLS +
                       " AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id",
@@ -6109,6 +6186,42 @@ def alerts_task_timeout(fail_cutoff: str, signature: str) -> list[tuple]:
         return [tuple(r) for r in (c.fetchall() or [])]
 
 
+#: 配置故障升级标记（Issue #3822）：与 `runtime.engine.transient_retry.MODEL_CONFIG_ALERT`
+#: 同一字面量；跨域不 import 对方内部模块，常量在本域单独声明，改动需两侧同步。
+MODEL_CONFIG_ALERT_SIGNATURE = "MODEL_CONFIG_ALERT"
+
+
+def alerts_task_model_config_alert(
+        cutoff: str,
+        signature: str = MODEL_CONFIG_ALERT_SIGNATURE) -> list[tuple]:
+    """窗口内「模型配置故障」失败任务按仓库计数 [(repo_key, count)]。
+
+    口径与 `alerts_task_timeout` 一致（`status='failed'` + `completed_at` 时间下界 + 签名 LIKE），
+    **不新增扫描形态**。签名由 `transient_retry.record_model_config_error` 写入：同一 task 在
+    24h 内 `Model not found` ≥2 次时，errors 里留下 escalated 的 `MODEL_CONFIG_ALERT` 条目，
+    与 #1985 引擎永久离线熔断（runtime 在线数）区分——本条是配置错位反复命中。
+
+    **必须同时命中 escalated 标记**（Issue #3822 审查 Required）：`record_model_config_error`
+    首次命中（count=1）就已写入 `MODEL_CONFIG_ALERT` 条目，仅凭签名会把单次 `Model not found`
+    也算成配置故障（severity=critical）。只有 `escalated: true`（24h 内 ≥2 次）才计入。
+    """
+    like = f"%{signature}%"
+    #: JSON 序列化（errors 列）与 Python repr（result_text 里拼入的调试串）两种形态
+    escalated = ('%"escalated": true%', "%'escalated': True%")
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT repo_key, COUNT(*) FROM agent_tasks"
+            " WHERE repo_key IS NOT NULL AND repo_key != ''"
+            "   AND status='failed'"
+            "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
+            "   AND ((errors LIKE ? AND (errors LIKE ? OR errors LIKE ?))"
+            "        OR (result_text LIKE ? AND (result_text LIKE ? OR result_text LIKE ?)))"
+            " GROUP BY repo_key",
+            (cutoff, like, escalated[0], escalated[1],
+             like, escalated[0], escalated[1]))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
 def alerts_task_mutation(mut0_cutoff: str, mut1_cutoff: str) -> list[tuple]:
     """突变检测两窗口 [(repo_key, status, 本窗口数, 上一窗口数)]。"""
     with _any_cursor() as c:
@@ -6412,6 +6525,18 @@ def runtime_status_healthy(runtime_id) -> tuple | None:
     """引擎的 (status, healthy) 位；无行返回 None。"""
     with _any_cursor() as c:
         c.execute("SELECT status, healthy FROM agent_runtimes WHERE id=?", (runtime_id,))
+        return c.fetchone()
+
+
+def runtime_health_row(runtime_id) -> tuple | None:
+    """Issue #3508：引擎健康判定所需最小行
+    (display_name, name, credential_id, status, healthy, installed, last_seen_at)；
+    行不存在返回 None。口径与 engine_health_ok 入参一致（mgmt 侧
+    scenes engine-status 据此派生 reachability/health_score 结构化条目）。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT display_name, name, credential_id, status, healthy, installed, last_seen_at "
+            "FROM agent_runtimes WHERE id=?", (runtime_id,))
         return c.fetchone()
 
 
@@ -7097,17 +7222,17 @@ def exec_agent_task(exec_id, agent_task_id: str = "", started_at: str = "",
     agent_task_id 非空按主键直查，为空走受约束兜底。
     """
     from src.domains.runtime.engine.scheduler import _get_exec_agent_task as _impl
-    # 与内部实现同源：_get_exec_agent_task 原本就吃调用方游标，历史上调用方一直用
-    # 进程库（session_manager.db）。这里同样用进程库，保证 agent_tasks 在同一库内解析
-    # （曾经先试 db_registry.connection_for("runtime")，在单库测试环境会连到另一个库、
-    # 查不到数据而返回 None —— 契约测试随即红）。
-    from src.kernel.session_manager import db as _conn
+    # agent_tasks 归 runtime 域：调用方可能是 mgmt 进程（手动触发/管理台），
+    # 进程库是 mgmt 库、没有该表 → 每次解析都刷 1146（实测启动扫描一批 68 条）。
+    # 统一走 db_registry 的域游标：域路由 → runtime 连接；单库/本域 → 进程主库
+    # （与历史行为一致，测试环境仍解析同一库）。
+    from src.kernel.db_registry import cursor_for as _cursor_for
 
-    cur = _conn.cursor()
-    row = _impl(cur, exec_id, agent_task_id, started_at, created_at)
-    if not row:
-        return None
-    cols = [d[0] for d in (cur.description or [])]
+    with _cursor_for("runtime") as cur:
+        row = _impl(cur, exec_id, agent_task_id, started_at, created_at)
+        if not row:
+            return None
+        cols = [d[0] for d in (cur.description or [])]
     return dict(zip(cols, row)) if cols else None
 
 # ── DevStage 云开发环境客户端（2026-11-18）──────────────────────────────────
@@ -7305,11 +7430,16 @@ def get_scene_engine_selector(scene_id: str, agent_type: str, repo_key: str = ""
 
 
 def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "",
-                              user_id: int = 0, issue_creator: str = "") -> str | None:
-    """限定广播引擎列表（JSON 字符串，供 pool_engine_ids 使用）。"""
+                              user_id: int = 0, issue_creator: str = "",
+                              source_out: dict | None = None) -> str | None:
+    """限定广播引擎列表（JSON 字符串，供 pool_engine_ids 使用）。
+
+    Issue #3790：source_out（可选出参）透传 engine_select 的来源上抛契约，
+    场景未在仓内 scene pool 登记时写入 pool_engine_source=scene_missing。
+    """
     from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids as _impl
 
-    return _impl(scene_id, agent_type, repo_key, user_id, issue_creator)
+    return _impl(scene_id, agent_type, repo_key, user_id, issue_creator, source_out)
 
 
 def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
@@ -7339,8 +7469,12 @@ def cleanup_scene_engine_bindings(rid_list: list, commit: bool = True) -> int:
 
 
 def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = None,
-                              repo_key: str = "") -> list:
-    """查询场景/引擎的被解绑提示信息。"""
+                              repo_key: str = "") -> dict:
+    """查询场景/引擎的被解绑提示信息（Issue #3909：返回 {hints, degraded, reason}）。
+
+    表归 runtime 域，本包装层只做转发；实现内部按域取连接（`cursor_for("runtime")`），
+    失败显式降级，不再把「查询失败」吞成空列表。
+    """
     from src.domains.runtime.engine.engine_select import get_detached_engine_hints as _impl
 
     return _impl(scene_row_id, runtime_ids, repo_key)
@@ -7352,6 +7486,14 @@ def explain_engine_selection(repo_key: str, agent_type: str, scene_id: str = "",
     from src.domains.runtime.engine.engine_select import explain_engine_selection as _impl
 
     return _impl(repo_key, agent_type, scene_id, user_id, issue_creator)
+
+
+def engine_health_ok(credential_id, status, healthy, installed, last_seen_at,
+                     stale_seconds: int | None = None) -> bool:
+    """引擎可达性判定的唯一真源（供 mgmt 只读消费，Issue #3508）。"""
+    from src.domains.runtime.engine.health import engine_health_ok as _impl
+
+    return _impl(credential_id, status, healthy, installed, last_seen_at, stale_seconds)
 
 
 def derive_runtime_health(status: str, last_seen_at: str | None,
@@ -7659,11 +7801,16 @@ def usage_payload(u: dict, engine: str = "") -> dict:
 _usage_payload = usage_payload
 
 
-def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
-    """runtime 健康分（缺省走 TTL 缓存）。"""
+def get_health_score(runtime_id: int, force_refresh: bool = False,
+                     allow_compute: bool = True) -> dict:
+    """runtime 健康分（缺省走 TTL 缓存）。
+
+    allow_compute=False 供 mgmt 只读消费（Issue #3508）：查询路径不现算落表，
+    避免 GET 请求向 runtime_health_scores 写脏行。
+    """
     from src.domains.runtime.engine.health_scorer import get_health_score as _impl
 
-    return _impl(runtime_id, force_refresh)
+    return _impl(runtime_id, force_refresh, allow_compute)
 
 
 def reset_health(runtime_id: int) -> dict | None:

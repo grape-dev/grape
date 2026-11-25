@@ -82,15 +82,10 @@ router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 AGENT_ORDER = ["vod", "issue", "coding", "qa", "sre"]
 AGENT_LABELS = ["VOD", "Issue", "Coding", "QA", "SRE"]
 
-STAGE_STATUS_MAP = {
-    "pending": 0,
-    "running": 1,
-    "completed": 2,
-    "failed": 3,
-    # 接管中：runner 已退出但 Issue 由本地会话推进，展示口径等同运行中
-    # （与 src/api/pipeline_status.py 的 EVENT_STATUS_MAP['takeover'] 同值）
-    "takeover": 1,
-}
+# Issue #3444：状态映射收敛单一来源——直接复用 pipeline_status.EVENT_STATUS_MAP，
+# 消除本表缺 skipped/deduped（去重留痕）导致 issues_center status_num 回落 0(pending)
+# 的口径不一致；takeover→running 语义同值保留。
+from src.api.pipeline_status import EVENT_STATUS_MAP as STAGE_STATUS_MAP  # noqa: E402
 
 # Issue #2925 / 架构闸 A8 整改：标题兜底的实现（占位判定单一事实源、缓存三件套、
 # 窗口收敛编排、写回护栏）已下沉到 `src/domains/runtime/pipeline/title_backfill.py`；

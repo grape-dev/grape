@@ -246,3 +246,59 @@ class TestWorktreeAddFailureGate:
         assert repogit._is_readonly_git_failure("error: Permission denied")
         assert not repogit._is_readonly_git_failure(
             "fatal: 'feat/issue-2245' is already checked out at '/x'")
+
+
+class TestReadonlyBaselineDegrade:
+    """Issue #3482 复审 Required：#2245 明确支持的「共享基线在只读卷、目标目录可写」
+    场景必须降级到会话级 gitdir 建树成功，不得退化为 workspace_unavailable 整任务失败
+    （`ensure_issue_worktree` 返回 None）。只读判据同时探测目标目录与共享基线。"""
+
+    def _src_repo(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        _git(["init", "-b", "main"], str(src))
+        _git(["config", "user.email", "test@example.com"], str(src))
+        _git(["config", "user.name", "Test User"], str(src))
+        (src / "a.txt").write_text("v1", encoding="utf-8")
+        _git(["add", "-A"], str(src))
+        _git(["commit", "-m", "init"], str(src))
+        return src
+
+    def test_readonly_base_writable_target_builds_session_gitdir(self, tmp_path, monkeypatch):
+        src = self._src_repo(tmp_path)
+        monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path / "ws"))
+        monkeypatch.setattr(repogit, "clone_url_for", lambda repo_key: str(src))
+        # 先正常物化共享基线（mirror），随后模拟基线卷只读
+        repogit.ensure_repo_base("gitcode:owner/repo")
+        base = repogit.repo_base_dir("gitcode:owner/repo")
+        assert repogit._is_git_dir(base)
+        # 只读基线：python 侧 os.open 探测在 base 下命中 EROFS（git 子进程不受影响，
+        # 与真实只读挂载一致——git 读 base 可用、写 base 失败）
+        _mock_readonly_prefix(monkeypatch, base)
+        # `git worktree add` 因基线只读失败（写不进 base 的 .git/worktrees）
+        real_run = repogit._run_git
+
+        def fake_run(args, *a, **kw):
+            if "worktree" in args and "add" in args:
+                return subprocess.CompletedProcess(
+                    args, 128, "",
+                    "fatal: cannot create worktree dir: Read-only file system")
+            return real_run(args, *a, **kw)
+
+        monkeypatch.setattr(repogit, "_run_git", fake_run)
+
+        wt = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "2247")
+        # 关键断言：不得退化为整任务失败（workspace_unavailable 由返回 None 触发）
+        assert wt and os.path.isdir(wt), \
+            "只读基线 + 可写目标应降级会话级 gitdir 建树成功，而非 refuse degrade"
+        assert os.path.isfile(os.path.join(wt, ".git"))
+        with open(os.path.join(wt, ".git"), encoding="utf-8") as f:
+            assert repogit._SESSION_GITDIR_NAME in f.read(), "应指向会话级 gitdir"
+        # 会话级 gitdir 可写可用：config/add/commit 全通
+        _git(["config", "user.email", "agent@example.com"], wt)
+        _git(["config", "user.name", "Agent"], wt)
+        with open(os.path.join(wt, "b.txt"), "w", encoding="utf-8") as f:
+            f.write("ok")
+        assert _git(["add", "b.txt"], wt).returncode == 0
+        r = _git(["commit", "-m", "readonly baseline degrade"], wt)
+        assert r.returncode == 0, r.stderr

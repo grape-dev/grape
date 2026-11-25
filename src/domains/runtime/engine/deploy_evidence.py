@@ -58,14 +58,15 @@ def is_deploy_task(skill: str = "", prompt: str = "", result_text: str = "",
     return any(k in _text for k in _DEPLOY_KEYWORDS)
 
 
-def _parse_env_extra(env_extra) -> dict:
+def _parse_env_extra(env_extra, task_id: str = "") -> dict:
     """agent_tasks.env_extra：可能为 dict 或 JSON 字符串。"""
     if isinstance(env_extra, dict):
         return env_extra
     if isinstance(env_extra, str) and env_extra:
         try:
             from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
-            _d = decrypt_env_extra(env_extra)  # enc:v1（#2423）
+            # #3770：带行 id → 存量明文行在该读点也能就地自愈（不只计数）
+            _d = decrypt_env_extra(env_extra, task_id=task_id)  # enc:v1（#2423）
             return _d if isinstance(_d, dict) else {}
         except Exception:
             return {}
@@ -176,7 +177,7 @@ def check_deploy_evidence(task: dict) -> dict:
                     "version_ok": None, "health_ok": None,
                     "expected_version": "", "actual_version": "",
                     "referenced_version": ""}
-        env = _parse_env_extra(task.get("env_extra"))
+        env = _parse_env_extra(task.get("env_extra"), task_id=str(task.get("id") or ""))
         expected = _resolve_expected_version(env)
         # 无显式结构化预期 → 版本维度跳过（不判失败）；文本提取版本仅作诊断参考
         actual = _fetch_worker_version(task.get("runtime_id") or 0)

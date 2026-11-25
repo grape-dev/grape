@@ -77,8 +77,12 @@ def test_messages_by_task_column_order_is_fixed():
 def test_engine_and_skill_pickers_use_named_queries():
     """引擎/技能下拉的取数也必须走 runtime public（否则 mgmt 进程 1146 → 空列表）。"""
     src = _chat_src()
-    for name in ("chat_local_engines", "chat_user_engines",
-                 "chat_skills_all", "chat_skill_scope_by_id",
+    # Issue #3396 起引擎可选面统一走 runtime public 的 query_engines 四档（local/user/repo/global）
+    # + 健康派生，不再逐档手写具名查询；形态变了，口径不变——chat.py 仍不得直查自有表。
+    assert "query_engines(" in src, "chat.py 未使用 runtime public 的 query_engines"
+    assert "derive_runtime_health" in src or "derive_local_runtime_health" in src, \
+        "chat.py 未使用 runtime public 的健康派生"
+    for name in ("chat_skills_all", "chat_skill_scope_by_id",
                  "chat_engine_by_id", "chat_skill_id_scope",
                  "chat_skill_id_scope_owner"):
         assert f'"{name}"' in src, f"chat.py 未使用具名查询 {name}"

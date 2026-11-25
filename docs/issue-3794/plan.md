@@ -6,13 +6,13 @@
 - QA #1981 C1 校准：不能写进老轨 `_create_indexes()`——老轨只在「版本表为空首跑」或
   「执行器异常兜底」时执行，存量库（已盖 legacy-stamp 202610300001）启动时整段不跑，
   三库模式下 runtime 域进程只跑登记迁移，更是永远到不了那段 → 1205 根因在生产不消除。
-- 改为 `register_migration(version="202611240003", name="add-agent-tasks-event-seq-status-index",
+- 改为 `register_migration(version="202611240009", name="add-agent-tasks-event-seq-status-index",
   kind="safe", domains=("runtime",), fn=_fn_add_agent_tasks_event_seq_status_index)`：
   - fn 在 runtime 域连接上执行 `CREATE INDEX IF NOT EXISTS idx_agent_tasks_event_seq_status ON agent_tasks(event_seq, status)`；
   - 同一迁移回收左前缀冗余索引 `idx_agent_tasks_event`（组合索引已覆盖，热表少维护一棵树；
     MySQL DROP 带 `ON agent_tasks`，SQLite 不带；删不掉只告警不阻断索引补齐）；
   - 建索引失败必须抛出（不盖章，下次启动幂等重试），吞掉会「版本号盖死、热表仍逐行扫」。
-- 只写 SQLite 通用语法；MySQL TEXT 前缀由 mysql_compat 在 CREATE INDEX 特判自动补 (191)。
+- 只写 SQLite 通用语法；MySQL 分支显式 `CREATE INDEX ... ON agent_tasks(event_seq, status(191))` 并吞 1061（三库拓扑下游标是 `db_registry._CompatCursor`，mysql_compat 的自动补前缀特判不生效）。
 - 守卫：`tests/api/test_migration_track_guard.py` 新增 `LEGACY_INDEX_DDL_FROZEN` +
   `test_legacy_index_ddl_is_frozen`——往老轨塞补索引会让它变红（补列/补表守卫的姊妹）。
 

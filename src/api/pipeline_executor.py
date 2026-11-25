@@ -263,6 +263,7 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
         # 非 plugin 模式：保留原逻辑（有 runtime_id 直接用，无则 pick_engine）。
         _pool_eids = ""
         _pool_sel_a2a = ""
+        _pool_src_a2a = ""
         _scene_uid = 0
         if is_plugin_mode():
             # 获取 issue 级场景 + 场景 user scope（解析/异常留痕/反查兜底单点）
@@ -274,33 +275,45 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
             if _picked is None:
                 return {"error": "no engine available"}
             runtime_id = _picked
-            # 场景 engine 限定广播范围（Issue #259：写入前已按健康过滤）
-            from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids
-            _pool_eids = get_scene_pool_engine_ids(_scene_id, agent_type, repo_key=repo_key, user_id=_scene_uid,
-                                                   issue_creator=evt.get("actor", ""))
-            if _pool_eids is None:
-                # 方案A：场景绑定的引擎全部离线/失联 → 不入队，明确报错
-                log.warning(f"Pipeline emit: scene={_scene_id} agent={agent_type} engines all offline (Issue #259)")
-                return {"error": f"场景绑定的引擎全部离线（scene={_scene_id}, agent={agent_type}）"}
             # [#1208 A2A selector 修复 2026-11-12] 事件驱动 A2A 入队补三分叉 gate——
             # 原路径只读 id 池（selector 场景恒空），selector 节点的任务退化为广播抢单
             # （实测 A2A 直发 → 任意引擎（含圈外个人级引擎）接单后被凭据门禁拦下）。
             # 与 run_pipeline 的 gate 同口径：selector 模式落 pool_selector、两池列空；
             # 零命中 fail-closed（上层 listener 已有 _fail_event 错误管道）。
-            _pool_sel_a2a = ""
+            # Issue #3790 审查 R1：门禁是池语义的唯一解析口，池名单与来源（scene_missing）
+            # 一并取回并显式透传入队——原「先单独取池 + 再 gate」把来源丢弃，scene_missing
+            # 行退化为普通场景绑定，且重复触发一次告警计数。
+            _gate_resolved = False
             try:
                 from src.domains.runtime.pipeline.event_pipeline import _scene_pool_gate
                 _gm_a2a, _gp_a2a, _gf_a2a = _scene_pool_gate(
-                    _scene_id, agent_type, repo_key=repo_key, user_id=_scene_uid)
+                    _scene_id, agent_type, repo_key=repo_key, user_id=_scene_uid,
+                    issue_creator=evt.get("actor", ""))
                 if _gm_a2a == "selector":
                     _pool_sel_a2a = _gp_a2a["pool_selector"]
                     _pool_eids = ""   # selector 任务两池列均空（与 run_pipeline gate 契约一致）
+                    _gate_resolved = True
+                elif _gm_a2a == "pool":
+                    _pool_eids = _gp_a2a["pool_engine_ids"]
+                    _pool_src_a2a = _gp_a2a.get("pool_engine_source", "") or ""
+                    _gate_resolved = True
                 elif _gf_a2a:
                     log.warning(f"Pipeline emit: scene={_scene_id} agent={agent_type} "
                                 f"selector zero-hit, skip enqueue (Issue #1208): {_gf_a2a}")
                     return {"error": _gf_a2a}
             except Exception as _gate_e:
                 log.warning(f"Pipeline emit: selector gate failed (fail-open): {_gate_e}")
+            if not _gate_resolved:
+                # 门禁异常 fail-open：回落既有池解析（无来源标记），广播语义不变
+                # 场景 engine 限定广播范围（Issue #259：写入前已按健康过滤）
+                from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids
+                _pool_eids = get_scene_pool_engine_ids(
+                    _scene_id, agent_type, repo_key=repo_key, user_id=_scene_uid,
+                    issue_creator=evt.get("actor", ""))
+            if _pool_eids is None:
+                # 方案A：场景绑定的引擎全部离线/失联 → 不入队，明确报错
+                log.warning(f"Pipeline emit: scene={_scene_id} agent={agent_type} engines all offline (Issue #259)")
+                return {"error": f"场景绑定的引擎全部离线（scene={_scene_id}, agent={agent_type}）"}
         elif not runtime_id:
             _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0)
             if _picked is None:
@@ -311,7 +324,7 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
             repo_key, seq, agent_type, "", skill_name, evt,
             skill_id, skill_path, runtime_id, issue_id,
             pool_engine_ids=_pool_eids, user_id=_scene_uid if is_plugin_mode() else 0,
-            pool_selector=_pool_sel_a2a,
+            pool_selector=_pool_sel_a2a, pool_engine_source=_pool_src_a2a,
         )
         return {"task_id": "enqueued"}
     except Exception as e:

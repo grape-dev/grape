@@ -13,7 +13,13 @@
 1. test_legacy_track_is_frozen：AST 比对 `_run_all_migrations()` 里的迁移调用
    集合与 `LEGACY_TRACK_FROZEN` 快照，多一条（有人塞新迁移）即失败；
 2. test_registered_versions_unique：注册式迁移的 version 必须全局唯一，
-   同号会被版本表判「已执行」永久跳过（202611050001 / 202611060001 两次事故）。
+   同号会被版本表判「已执行」永久跳过（202611050001 / 202611060001 两次事故）；
+3. test_registered_versions_unique_at_runtime：直接读运行时注册表 `_MIGRATIONS`
+   再比一次。**为什么 2 不够**（PR #2157 门禁复审 Critical）：`register_migration(
+   **MIGRATION)` 的展开式注册（`repo-vcs-health-breaker-columns` 就是这么登记的）
+   在源码里没有 `version=` 关键字，旧的 AST 解析看不到 —— 于是
+   `202611250001` 实际被 4 条迁移共用，静态守卫却报唯一。此处 2 已扩展为解析
+   `**` 展开（读被导入模块的 `MIGRATION = {...}` 字典），3 再从运行时兜一层。
 
 运行时守卫（Issue #1412）
 ------------------------
@@ -31,6 +37,7 @@ import pathlib
 import re
 
 DB_SETUP = pathlib.Path(__file__).resolve().parents[2] / "src" / "api" / "db_setup.py"
+REPO_ROOT = DB_SETUP.parents[2]
 LEGACY_CALL_PREFIXES = ("_migrate_", "_mig_", "_ensure_")
 
 
@@ -78,9 +85,15 @@ def _registered_versions() -> list:
     version 可以是字面量，也可以是模块级字符串常量（`_resolve_static_str` 解出）；
     解不出的表达式返回 None，由 test_registered_versions_format 判红，避免守卫
     静默漏看某条注册。
+
+    `register_migration(**MIGRATION)` 展开式注册（PR #2157 门禁复审 Critical：
+    `repo-vcs-health-breaker-columns` 就是这样登记的，旧解析器完全看不到它的号）
+    按「模块级 `from ... import MIGRATION[_X] as _M_Y` + 该模块 `MIGRATION[_X]`
+    字典的 version 键」静态解析；解不出同样返回 None 判红。
     """
     tree = _tree()
     consts = _module_str_consts(tree)
+    spreads = _spread_imports(tree)
     versions = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -90,11 +103,55 @@ def _registered_versions() -> list:
             continue
         if node.args:
             versions.append(_resolve_static_str(node.args[0], consts))
-        else:
-            for kw in node.keywords:
-                if kw.arg == "version":
-                    versions.append(_resolve_static_str(kw.value, consts))
+            continue
+        for kw in node.keywords:
+            if kw.arg == "version":
+                versions.append(_resolve_static_str(kw.value, consts))
+            elif kw.arg is None:
+                versions.append(_resolve_spread_version(kw.value, spreads))
     return versions
+
+
+def _spread_imports(tree) -> dict:
+    """`from <mod> import MIGRATION[_X] as _M_Y` → {_M_Y: (<mod>, MIGRATION[_X])}。"""
+    out = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ImportFrom) and node.module):
+            continue
+        for alias in node.names:
+            if alias.asname and alias.name.startswith("MIGRATION"):
+                out[alias.asname] = (node.module, alias.name)
+    return out
+
+
+def _dict_version(module: str, dict_name: str):
+    """读 `<module>.py` 里 `MIGRATION[_X] = {...}` 字典的 version（字面量/常量）。"""
+    path = REPO_ROOT.joinpath(*module.split(".")).with_suffix(".py")
+    if not path.exists():
+        return None
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    consts = _module_str_consts(tree)
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == dict_name
+                and isinstance(node.value, ast.Dict)):
+            continue
+        for key, value in zip(node.value.keys, node.value.values):
+            if isinstance(key, ast.Constant) and key.value == "version":
+                return _resolve_static_str(value, consts)
+    return None
+
+
+def _resolve_spread_version(node, spreads: dict):
+    """`register_migration(**X)` 里的 X → 目标模块 MIGRATION 字典的 version。"""
+    if not isinstance(node, ast.Name):
+        return None
+    target = spreads.get(node.id)
+    if not target:
+        return None
+    module, dict_name = target
+    return _dict_version(module, dict_name)
 
 
 def test_legacy_track_is_frozen():
@@ -200,7 +257,7 @@ def test_legacy_index_ddl_is_frozen():
     Issue #3794 事故样本：`idx_agent_tasks_event_seq_status` 起初写进老轨，
     存量库（已盖 legacy-stamp）启动时根本不执行 → 1205 根因未消除，
     但新库与 CI 全绿。正确做法同补列/补表：register_migration(version, name,
-    kind="safe", domains=(属主域,), fn=...)（参考 202611230003）。
+    kind="safe", domains=(属主域,), fn=...)（参考 202611240004）。
     仅当确认索引必须留在老轨（全新库建表顺序依赖）时同步改常量并写明理由。
     """
     actual = _legacy_index_names()
@@ -226,6 +283,27 @@ def test_registered_versions_unique():
     assert not dup, (
         f"注册式迁移版本号撞号: {dup}。同号迁移会被判「已执行」永久跳过，"
         "请改用未占用的号（日期+序号顺延）。"
+    )
+
+
+def test_registered_versions_unique_at_runtime():
+    """运行时注册表版本号必须唯一（`**MIGRATION` 展开后仍唯一）。
+
+    PR #2157 门禁复审 Critical 的回归锁：`repo-vcs-health-breaker-columns` /
+    `events-cascade-compensation-columns` / `issue4339-events-payload-mediumtext` /
+    `create-autopilot-payload-guard-table` 曾共用 202611250001，而 AST 守卫只看到
+    其中三条字面量、仍判「唯一」。这里直接读 `_MIGRATIONS`，任何登记形态的撞号
+    （字面量 / 常量 / `**` 展开 / 未来新增写法）都绕不过去。
+    """
+    from src.api import db_setup as ds
+
+    versions = [m.version for m in ds._MIGRATIONS]
+    dup = {v: c for v, c in collections.Counter(versions).items() if c > 1}
+    names = {v: [m.name for m in ds._MIGRATIONS if m.version == v] for v in dup}
+    assert not dup, (
+        f"运行时注册表撞号: {names}。版本台账以 version 为键，同号后登记者"
+        "会被判「已执行」永久跳过（payload-guard 这类无 post_check 的更是静默跳过），"
+        "请 renumber 到未占用号（日期+序号顺延）。"
     )
 
 
@@ -264,3 +342,33 @@ def test_org_domain_text_migration_registered_for_both_domains():
     assert len(found) == 1, f"同名迁移重复登记: {found}"
     assert {"mgmt", "runtime"} <= set(found[0]), (
         f"登记域不全: {found[0]}——缺哪个域，那个库的 org_id 就不会被转换")
+
+def test_create_table_migration_must_carry_post_check(monkeypatch):
+    """建表类迁移必须带 post_check（PR #2157 门禁复审 Critical 的配套）。
+
+    `create-autopilot-payload-guard-table` 曾是 202611250001 四条同号迁移里**唯一
+    没有 post_check** 的一条：建表 fn 是「表在则零写」，没有后置校验时，被守卫
+    跳过 / 被同号顶替的库只会留一行 ERROR，版本号照盖、下次不再重试 —— 静默假绿。
+    """
+    import sqlite3
+
+    import pytest
+
+    from src.api import db_setup as ds
+
+    migs = [m for m in ds._MIGRATIONS
+            if m.name == "create-autopilot-payload-guard-table"]
+    assert len(migs) == 1, f"迁移未唯一注册: {[m.version for m in migs]}"
+    mig = migs[0]
+    assert callable(mig.post_check), "建表迁移缺 post_check：目标缺失会被静默盖章"
+
+    monkeypatch.setattr(ds, "_owned_skip", lambda table, what="": False)
+    monkeypatch.setattr(ds, "_migration_conn",
+                        lambda domain, default=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(ds, "_table_present", lambda c, table: False)
+    with pytest.raises(RuntimeError) as ei:
+        mig.post_check()
+    assert "grape_t_autopilot_payload_guard" in str(ei.value)
+
+    monkeypatch.setattr(ds, "_table_present", lambda c, table: True)
+    mig.post_check()  # 表在位 → 不抛（盖章放行）

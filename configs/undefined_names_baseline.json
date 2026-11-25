@@ -1,5 +1,5 @@
 {
-  "undefined_names": 1,
-  "tool": "pyflakes",
+  "undefined_names": 0,
+  "tool": "ruff",
   "note": "棘轮基线：只允许下降；收紧请重跑 --update"
 }

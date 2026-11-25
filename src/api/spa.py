@@ -7,6 +7,7 @@ NoCacheStaticMiddleware、i18n boost 注入、auth 页面、SPA catch-all、
 仅 A 进程（grape_server.py）与单进程模式（main.py）调用——B/C 进程
 不提供前端页面。
 """
+import asyncio
 import json as _json_mod
 import logging
 import os
@@ -15,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import ClientDisconnect
 
 # Issue #3395：前端功能开关单一下发源（shell HTML 注入 window.__FEATURES__）
 from src.api.frontend_flags import apply_feature_flags
@@ -29,6 +31,37 @@ _FARO_UPSTREAM = os.environ.get("GRAPE_FARO_UPSTREAM", "").strip()
 _FARO_MAX_BODY = int(os.environ.get("GRAPE_FARO_MAX_BODY", str(256 * 1024)))
 # 同源校验开关（默认开；无 Origin 的探针请求放行）
 _FARO_STRICT_ORIGIN = os.environ.get("GRAPE_FARO_STRICT_ORIGIN", "1").strip() not in ("0", "false", "no")
+
+
+def _registered(app: FastAPI, path: str, method: str = "GET") -> bool:
+    """该 (method, path) 是否已被别的装配函数注册过（Issue #3757）。"""
+    from src.api.server_common import has_route
+    return has_route(app, path, method)
+
+
+def _spa_post(app: FastAPI, path: str, *, include_in_schema: bool = True):
+    """幂等 POST 注册装饰器（同 `_spa_get`）。"""
+    def deco(fn):
+        if not _registered(app, path, "POST"):
+            app.add_api_route(path, fn, methods=["POST"], include_in_schema=include_in_schema)
+        return fn
+    return deco
+
+
+def _spa_get(app: FastAPI, path: str, *, include_in_schema: bool = True):
+    """幂等 GET 注册装饰器（Issue #3757）。
+
+    `server_common.attach_frontend` 与 `install_spa_routes` 是同一批页面路由的两份
+    装配实现（M-1 架构守护），两个入口（main.py / grape_server.py）都会依次调用；
+    此前只有 mount 做了「已挂过就跳过」，**页面路由没有**——同一 path 进 app.routes
+    两遍，先注册者生效、第二份是死代码，却让路由注册表与契约唯一性双双失真。
+    这里把「已注册则不再挂载」补齐到路由级；返回原函数，保证退化时不丢 handler。
+    """
+    def deco(fn):
+        if not _registered(app, path):
+            app.add_api_route(path, fn, methods=["GET"], include_in_schema=include_in_schema)
+        return fn
+    return deco
 
 
 def install_spa_routes(app: FastAPI) -> None:
@@ -293,7 +326,7 @@ document.documentElement.classList.remove('i18n-loading');})();
         html = _inject_email_configured(html)
         return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
 
-    @app.post("/faro/collect")
+    @_spa_post(app, "/faro/collect")
     async def faro_collect_proxy(request: Request):
         """Faro 上报反代 → Alloy faro.receiver（前端 RUM）。
 
@@ -325,7 +358,16 @@ document.documentElement.classList.remove('i18n-loading');})();
             return Response(content='{"error":"payload too large"}', status_code=413,
                             media_type="application/json")
         import httpx
-        body = await request.body()
+        # Issue #4248：读取请求体也可能因客户端在途断开而抛异常（页面卸载/切换），
+        # 必须在本 handler 内兜住，避免直落全局兜底被记成服务端 500。
+        try:
+            body = await request.body()
+        except (ClientDisconnect, asyncio.CancelledError):
+            # 客户端主动中止（nginx 记 499）：不是服务端故障。返回 499 让访问日志
+            # 与指标按状态码与 5xx 分离（499 不计入错误率）；仅 debug 留痕，避免刷屏。
+            log.debug("faro collect: client disconnected while reading request body")
+            return Response(content='{"error":"client disconnected"}', status_code=499,
+                            media_type="application/json")
         if len(body) > _FARO_MAX_BODY:
             return Response(content='{"error":"payload too large"}', status_code=413,
                             media_type="application/json")
@@ -339,11 +381,11 @@ document.documentElement.classList.remove('i18n-loading');})();
             return Response(content=upstream.content, status_code=upstream.status_code,
                             media_type="application/json")
         except Exception as e:
-            log.warning(f"faro collect proxy error: {e}")
+            log.warning(f"faro collect proxy error: {type(e).__name__}: {e}")
             return Response(content='{"error":"faro upstream unavailable"}', status_code=502,
                             media_type="application/json")
 
-    @app.get("/")
+    @_spa_get(app, "/")
     async def serve_spa():
         _lf = _landing_file("index.html")
         if _lf:
@@ -351,18 +393,18 @@ document.documentElement.classList.remove('i18n-loading');})();
             return _LFR(_lf)
         return _spa_response()
 
-    @app.get("/register")
+    @_spa_get(app, "/register")
     async def serve_register():
         """注册页面 — 独立 HTML。"""
         return _serve_auth_page("register.html")
 
-    @app.get("/forgot")
+    @_spa_get(app, "/forgot")
     async def serve_forgot():
         """忘记密码页面 — 独立 HTML。"""
         return _serve_auth_page("forgot.html")
 
-    @app.get("/en")
-    @app.get("/en/{path:path}")
+    @_spa_get(app, "/en")
+    @_spa_get(app, "/en/{path:path}")
     async def serve_spa_en(path: str = ""):
         """英文国际化路由——返回同一个 index.html。"""
         from fastapi import HTTPException
@@ -384,8 +426,8 @@ document.documentElement.classList.remove('i18n-loading');})();
         return _spa_response()
 
     # SPA catch-all 延迟注册（不拦截 /health /healthz 等系统端点）
-    @app.get("/admin", include_in_schema=False)
-    @app.get("/admin/{path:path}", include_in_schema=False)
+    @_spa_get(app, "/admin", include_in_schema=False)
+    @_spa_get(app, "/admin/{path:path}", include_in_schema=False)
     async def serve_admin(path: str = ""):
         """Admin 独立页面。"""
         if path.startswith("api/") or path.startswith("static/"):
@@ -397,13 +439,13 @@ document.documentElement.classList.remove('i18n-loading');})();
             return resp
         raise HTTPException(status_code=404, detail="admin.html not found")
 
-    @app.get("/account", include_in_schema=False)
-    @app.get("/account/{path:path}", include_in_schema=False)
+    @_spa_get(app, "/account", include_in_schema=False)
+    @_spa_get(app, "/account/{path:path}", include_in_schema=False)
     async def serve_account_redirect():
         """旧用户中心 URL 302 重定向到内嵌 SPA view。"""
         return RedirectResponse(url="/#account", status_code=302)
 
-    @app.get("/oauth-popup-callback.html", include_in_schema=False)
+    @_spa_get(app, "/oauth-popup-callback.html", include_in_schema=False)
     async def serve_oauth_popup_callback():
         """OAuth 弹窗回调中间页。"""
         resp = FileResponse(os.path.join(STATIC_DIR, "oauth-popup-callback.html"))
@@ -411,7 +453,7 @@ document.documentElement.classList.remove('i18n-loading');})();
         resp.headers["Referrer-Policy"] = "no-referrer"
         return resp
 
-    @app.get("/favicon.ico", include_in_schema=False)
+    @_spa_get(app, "/favicon.ico", include_in_schema=False)
     async def serve_favicon():
         """页签图标：浏览器/书签直连 /favicon.ico，不能落到 SPA 兜底。
 
@@ -425,7 +467,7 @@ document.documentElement.classList.remove('i18n-loading');})();
         resp.headers["Cache-Control"] = "public, max-age=86400"
         return resp
 
-    @app.get("/{path:path}")
+    @_spa_get(app, "/{path:path}")
     async def spa_catch_all(path: str):
         if path.startswith("api/") or path.startswith("static/"):
             raise HTTPException(status_code=404)

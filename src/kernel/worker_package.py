@@ -348,7 +348,11 @@ def _manifest_version() -> str:
                     if _is_runtime_state_file(root, f):
                         continue
                     fp = os.path.join(root, f)
-                    h.update(fp.encode("utf-8"))
+                    # Issue #2923：指纹只取**相对归档路径**，不含安装绝对路径——
+                    # 构建期 ROOT 与安装期 $INSTALL_DIR 不同，绝对路径会让同内容
+                    # 指纹不同，导致每次安装都误报 "package may be stale"。
+                    arc = os.path.relpath(fp, ROOT).replace(os.sep, "/")
+                    h.update(arc.encode("utf-8"))
                     try:
                         with open(fp, "rb") as fh:
                             h.update(hashlib.sha256(fh.read()).hexdigest().encode("utf-8"))
@@ -357,7 +361,7 @@ def _manifest_version() -> str:
         elif os.path.isfile(path):
             if _is_runtime_state_file(os.path.dirname(path), os.path.basename(path)):
                 continue
-            h.update(path.encode("utf-8"))
+            h.update(item.replace(os.sep, "/").encode("utf-8"))
             try:
                 with open(path, "rb") as fh:
                     h.update(hashlib.sha256(fh.read()).hexdigest().encode("utf-8"))

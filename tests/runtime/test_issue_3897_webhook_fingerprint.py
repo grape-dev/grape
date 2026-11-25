@@ -5,7 +5,8 @@
 「平台端 Secret 与 Grape 端配置不同」还是「请求根本没带 token」——只能两边猜。
 
 契约：
-  1. 拒绝日志带 `expected=<指纹> actual=<指纹>`（sha256 前缀，不可逆）与来源 IP；
+  1. 拒绝日志带两端指纹（sha256 前缀，不可逆）与来源 IP——Issue #3750 起字段名
+     改为 `expected_fp=`（期望）/ `token_fp=`（实收），值口径与不可逆性不变；
   2. 任何情况下不得输出明文 token；
   3. 校验语义不变（403 拒绝、不调度流水线）。
 """
@@ -57,4 +58,4 @@ def test_gitcode_missing_token_logs_absent(monkeypatch, caplog):
     r = TestClient(app).post("/webhook/gitcode", content=body)
 
     assert r.status_code == 403
-    assert "actual=absent" in caplog.text
+    assert "token_fp=absent" in caplog.text

@@ -121,6 +121,227 @@ class TestIssueWorktree:
         assert wt not in r.stdout
 
 
+class TestWorktreePreflightDisposal:
+    """Issue #3482（B）：`git worktree add` **之前**先 stat 目标目录并按内容分流处置。
+
+    「目标目录已存在且无 `.git`」有两个来源：direct 端旧顺序（物化先于建树）与上次运行
+    残留。此前只有失败后的兜底（症状侧、且靠 stderr 文案）；现在改为建树前处置：
+    仅平台产物 → 清空重建；含未知内容 → 隔离为 `<dir>.stale-<ts>` 留证后重建。
+    """
+
+    def _preset(self, issue_num, entries):
+        wt = repogit.issue_dir_for("gitcode:owner/repo", "coding", issue_num)
+        os.makedirs(wt, exist_ok=True)
+        for rel, content in entries.items():
+            p = os.path.join(wt, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(content)
+        return wt
+
+    @staticmethod
+    def _has_git(wt):
+        return (os.path.isdir(os.path.join(wt, ".git"))
+                or os.path.isfile(os.path.join(wt, ".git")))
+
+    @staticmethod
+    def _stale_dirs(wt):
+        parent = os.path.dirname(wt)
+        return [p for p in os.listdir(parent) if p.startswith("coding.stale-")]
+
+    def test_platform_assets_only_cleared_and_rebuilt(self):
+        """预置 .skills/.project-info/.knowledge（无 .git）→ 清空重建：可 commit、
+        inject_git_write_context 不误置 GRAPE_GIT_READONLY、不产生 .stale 隔离。"""
+        wt = self._preset("16", {".skills/coding-cli-1/SKILL.md": "# skill\n",
+                                 ".project-info/graph.md": "# pi\n",
+                                 ".knowledge/k.md": "# k\n"})
+        got = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "16")
+        assert got == wt, "清空重建后应返回目标目录"
+        assert self._has_git(wt), "重建后 .git 应落位"
+        assert self._stale_dirs(wt) == [], "平台产物应清空重建，不做隔离"
+        assert not os.path.exists(os.path.join(wt, ".skills")), "平台产物已清空（由本轮重新物化）"
+        with open(os.path.join(wt, "fix-3482.txt"), "w", encoding="utf-8") as f:
+            f.write("ok\n")
+        _git(["config", "user.email", "agent@example.com"], wt)
+        _git(["config", "user.name", "Agent"], wt)
+        assert _git(["add", "fix-3482.txt"], wt).returncode == 0
+        assert _git(["commit", "-m", "verify writable after preflight"], wt).returncode == 0
+        env = {}
+        _prompt, status = repogit.inject_git_write_context(
+            {"repo_key": "gitcode:owner/repo", "agent_type": "coding",
+             "issue_id": "#16"}, env, "p")
+        assert status.get("writable") is True
+        assert env.get("GRAPE_GIT_WRITABLE") == "true"
+        assert "GRAPE_GIT_READONLY" not in env, "建树成功不得误置 GRAPE_GIT_READONLY"
+
+    def test_unknown_content_quarantined_as_stale(self):
+        """含未知文件 → 整体隔离为 <dir>.stale-<ts>（留证不删），随后建树成功。"""
+        wt = self._preset("17", {".skills/coding-cli-1/SKILL.md": "# skill\n",
+                                 "notes.txt": "user work\n"})
+        got = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "17")
+        assert got == wt
+        stales = self._stale_dirs(wt)
+        assert len(stales) == 1, f"未知内容应隔离为单个 .stale 目录: {stales}"
+        stale = os.path.join(os.path.dirname(wt), stales[0])
+        assert os.path.isfile(os.path.join(stale, "notes.txt")), "未知内容必须留证不删除"
+        assert os.path.isfile(os.path.join(stale, ".skills", "coding-cli-1", "SKILL.md"))
+        assert self._has_git(wt), "隔离后应重建出带 .git 的 worktree"
+        assert not os.path.exists(os.path.join(wt, "notes.txt")), "新 worktree 不应带未知内容"
+
+    def test_quarantine_failure_returns_none(self, monkeypatch):
+        """隔离失败（跨设备/权限）→ 返回 None（workspace 不可用，上游置 failed），
+        不得 fail-open 继续跑成「只读 completed」（验收 3）。"""
+        wt = self._preset("18", {"notes.txt": "x\n"})
+        real_rename = os.rename
+
+        def _fail_quarantine(src, dst):
+            if src == wt and ".stale-" in dst:
+                raise OSError("cross-device link simulated")
+            return real_rename(src, dst)
+
+        monkeypatch.setattr(os, "rename", _fail_quarantine)
+        assert repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "18") is None
+
+    def test_dispose_classification(self):
+        """分流判据：空目录/不存在 → none；仅平台产物 → cleared；含未知 → quarantined。"""
+        assert repogit.dispose_occupied_workdir_target(
+            "gitcode:owner/repo", "/nonexistent-3482-dir")["action"] == "none"
+        wt = self._preset("19", {".skills/a/SKILL.md": "# s\n"})
+        assert repogit.dispose_occupied_workdir_target(
+            "gitcode:owner/repo", wt)["action"] == "cleared"
+        wt2 = self._preset("20", {"mine.py": "print(1)\n"})
+        d = repogit.dispose_occupied_workdir_target("gitcode:owner/repo", wt2)
+        assert d["action"] == "quarantined" and d["unknown"] == ["mine.py"]
+        assert os.path.isdir(d["stale_path"])
+
+
+class TestAlreadyExistsLastDefense:
+    """Issue #3482：前置处置之后的最后一道防线（竞态 / 预置目录仍被占）。"""
+
+    def test_last_defense_rebuilds_and_merges_assets(self):
+        wt = repogit.issue_dir_for("gitcode:owner/repo", "coding", "21")
+        skill_md = os.path.join(wt, ".skills", "coding-cli-1", "SKILL.md")
+        os.makedirs(os.path.dirname(skill_md), exist_ok=True)
+        with open(skill_md, "w", encoding="utf-8") as f:
+            f.write("# skill\n")
+        base = repogit.ensure_repo_base("gitcode:owner/repo")
+        assert base
+        ok = repogit._recover_worktree_already_exists(
+            "gitcode:owner/repo", wt, base, "feat/issue-21", "main", False)
+        assert ok, "最后防线应完成迁移重建"
+        assert (os.path.isdir(os.path.join(wt, ".git"))
+                or os.path.isfile(os.path.join(wt, ".git")))
+        assert os.path.isfile(skill_md), "最后防线保留占用产物"
+        assert not os.path.exists(wt + ".grape-collide-backup"), "备份目录应清理"
+
+    def test_merge_keeps_backup_when_asset_conflicts(self):
+        """QA 复审：同名文件未合并时不得删备份（「迁移不删除」红线）。"""
+        wt = repogit.issue_dir_for("gitcode:owner/repo", "coding", "23")
+        backup = wt + ".grape-collide-backup"
+        os.makedirs(backup, exist_ok=True)
+        os.makedirs(wt, exist_ok=True)
+        with open(os.path.join(backup, "a.txt"), "w", encoding="utf-8") as f:
+            f.write("backup-a\n")
+        with open(os.path.join(backup, "extra.txt"), "w", encoding="utf-8") as f:
+            f.write("extra\n")
+        with open(os.path.join(wt, "a.txt"), "w", encoding="utf-8") as f:
+            f.write("baseline-a\n")
+        assert repogit._merge_collided_assets(backup, wt) is False
+        assert os.path.isdir(backup), "未合并条目存在时备份必须保留（留证）"
+        assert os.path.isfile(os.path.join(backup, "a.txt"))
+        assert os.path.isfile(os.path.join(wt, "extra.txt")), "可合并条目应已迁入"
+        with open(os.path.join(wt, "a.txt"), encoding="utf-8") as f:
+            assert f.read() == "baseline-a\n", "同名文件以基线为准"
+
+    def test_is_already_exists_collision(self):
+        """错误特征匹配：真实 already exists stderr 命中；其它失败不命中。"""
+        assert repogit._is_already_exists_collision(
+            "fatal: '/ws/issues/16/coding' already exists") is True
+        assert repogit._is_already_exists_collision(
+            "fatal: unable to access") is False
+        assert repogit._is_already_exists_collision("") is False
+
+
+class TestReadonlyErrnoJudgement:
+    """Issue #3482（D）：只读判据 = stat 目标目录 + errno(EROFS/EACCES/EPERM)，
+    不再依赖 stderr 文案白名单。"""
+
+    @staticmethod
+    def _mock_errno(monkeypatch, path_prefix, err):
+        real_open = os.open
+        root = os.path.abspath(path_prefix)
+
+        def _fake_open(path, flags, *a, **kw):
+            if os.path.abspath(str(path)).startswith(root):
+                raise OSError(err, os.strerror(err))
+            return real_open(path, flags, *a, **kw)
+
+        monkeypatch.setattr(os, "open", _fake_open)
+
+    def test_erofs_eprem_eacces_detected(self, tmp_path, monkeypatch):
+        import errno as _errno
+        for err, code in ((_errno.EROFS, "EROFS"), (_errno.EACCES, "EACCES"),
+                          (_errno.EPERM, "EPERM")):
+            with monkeypatch.context() as m:
+                self._mock_errno(m, str(tmp_path), err)
+                reason = repogit.readonly_errno_reason(str(tmp_path))
+                assert code in reason, f"errno {code} 应判只读: {reason}"
+
+    def test_other_errno_not_readonly(self, tmp_path, monkeypatch):
+        import errno as _errno
+        for err in (_errno.ENOSPC, _errno.EIO):
+            with monkeypatch.context() as m:
+                self._mock_errno(m, str(tmp_path), err)
+                assert repogit.readonly_errno_reason(str(tmp_path)) == "", \
+                    f"errno {err} 不是只读，不许据此降级建树"
+
+    def test_writable_dir_not_readonly(self, tmp_path):
+        assert repogit.readonly_errno_reason(str(tmp_path)) == ""
+        assert repogit.readonly_errno_reason(os.path.join(str(tmp_path), "gone")) == ""
+
+    def test_readonly_base_writable_target_judged_readonly(self, tmp_path, monkeypatch):
+        """Issue #3482 复审 Required：#2245 只读基线 + 可写目标——base 命中 errno
+        即判只读（前缀区分 target/base），否则该场景会误走 refuse degrade。"""
+        import errno as _errno
+        base = tmp_path / "base"
+        base.mkdir()
+        target = tmp_path / "ws" / "issues" / "1" / "coding"
+        target.mkdir(parents=True)
+        self._mock_errno(monkeypatch, str(base), _errno.EROFS)
+        reason = repogit.readonly_errno_reason(str(target), str(base))
+        assert reason.startswith("base:"), f"只读基线应标 base 命中: {reason}"
+        assert "EROFS" in reason
+
+    def test_readonly_target_prefix_distinguishes_location(self, tmp_path, monkeypatch):
+        import errno as _errno
+        self._mock_errno(monkeypatch, str(tmp_path), _errno.EACCES)
+        reason = repogit.readonly_errno_reason(str(tmp_path), "/no-such-base")
+        assert reason.startswith("target:") and "EACCES" in reason
+
+    def test_both_writable_not_readonly(self, tmp_path):
+        base = tmp_path / "b"
+        base.mkdir()
+        assert repogit.readonly_errno_reason(str(tmp_path), str(base)) == ""
+
+
+class TestWorkspaceMissingIsError:
+    """Issue #3482（C）：`git dir not found` 不再降级只读。"""
+
+    def test_missing_gitdir_marks_workspace_missing_not_readonly(self):
+        wt = repogit.issue_dir_for("gitcode:owner/repo", "coding", "22")
+        os.makedirs(wt, exist_ok=True)  # 有目录但无 .git
+        env = {}
+        prompt, status = repogit.inject_git_write_context(
+            {"repo_key": "gitcode:owner/repo", "agent_type": "coding",
+             "issue_id": "#22"}, env, "p")
+        assert status.get("writable") is False
+        assert status.get("mode") == "missing"
+        assert "GRAPE_GIT_READONLY" not in env, "gitdir 不存在不是只读降级"
+        assert env.get("GRAPE_GIT_WRITABLE") == "false"
+        assert env.get("GRAPE_GIT_WORKSPACE_MISSING") == "true"
+        assert "NOT a read-only session" in prompt
+
+
 class TestTokenNoPersist:
     def test_token_not_on_disk(self):
         repogit.ensure_repo_base("gitcode:owner/repo", token="sk_secret_123")
@@ -298,3 +519,43 @@ class TestLinkedRepoTokenFromEnv:
         monkeypatch.setattr("src.kernel.repo.Repo", _FakeRepo)
         wts = repogit.ensure_linked_repo_worktrees(self.LINKED, "coding", "466")
         assert wts and wts[0]["worktree_dir"] == ("gitcode:OPCTeam/HDBlogService", "tok_osenv")
+
+
+class TestPrScopedWorktree:
+    """Issue #3375：同 Issue 多 PR 派生独立分支/目录，清理链路按 PR 维度对称。"""
+
+    def test_multi_pr_derives_branch_and_dir(self):
+        wt12 = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "5",
+                                            pr_number="12")
+        wt13 = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "5",
+                                            pr_number="13")
+        assert wt12 and wt13 and wt12 != wt13
+        assert wt12.endswith(os.path.join("issues", "5", "pr-12", "coding")), wt12
+        assert wt13.endswith(os.path.join("issues", "5", "pr-13", "coding")), wt13
+        assert _git(["rev-parse", "--abbrev-ref", "HEAD"], wt12).stdout.strip() == "feat/issue-5-pr-12"
+        assert _git(["rev-parse", "--abbrev-ref", "HEAD"], wt13).stdout.strip() == "feat/issue-5-pr-13"
+
+    def test_no_pr_branch_unchanged(self):
+        wt = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "5")
+        assert _git(["rev-parse", "--abbrev-ref", "HEAD"], wt).stdout.strip() == "feat/issue-5"
+
+    def test_cleanup_pr_scoped_only_removes_target(self):
+        wt12 = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "5",
+                                            pr_number="12")
+        wt13 = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "5",
+                                            pr_number="13")
+        repogit.cleanup_issue_worktree("gitcode:owner/repo", "coding", "5",
+                                       pr_number="12")
+        assert not os.path.isdir(wt12)
+        assert os.path.isdir(wt13)
+
+    def test_cleanup_issue_less_pr_workdir(self):
+        ws = repogit.pr_workdir_dir("gitcode:owner/repo", "coding", "452")
+        os.makedirs(ws, exist_ok=True)
+        with open(os.path.join(ws, "out.txt"), "w", encoding="utf-8") as f:
+            f.write("artifact")
+        assert repogit.cleanup_pr_worktree("gitcode:owner/repo", "coding", "452")
+        assert not os.path.isdir(ws)
+
+    def test_cleanup_pr_worktree_missing_is_noop(self):
+        assert repogit.cleanup_pr_worktree("gitcode:owner/repo", "coding", "999") is False

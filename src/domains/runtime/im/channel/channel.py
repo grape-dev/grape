@@ -37,6 +37,27 @@ class ChannelRegistrationConflict(ChannelError):
     """
 
 
+class ChannelWsClosed(ChannelError):
+    """传输层 WS 关闭：对端/服务端发来关闭帧（含关闭码）。
+
+    例：飞书 ``3003 (registered) ping timeout``——服务端主动关闭，是**预期内的传输层
+    抖动**，不是适配器 bug。携带关闭码让 Supervisor 按 ``ws_close_<code>`` 独立归因、
+    记 WARNING 单行，而不是落进 ``channel crashed (unexpected)`` 全栈 ERROR（Issue #3795）。
+
+    仍属可重试（继承 ChannelError → 既有指数退避重连）。
+    """
+
+    def __init__(self, message: str = "", close_code: Optional[int] = None) -> None:
+        self.close_code = close_code
+        super().__init__(message or f"ws closed code={close_code}")
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        if "ws closed code=" in base:
+            return base
+        return f"{base} (ws closed code={self.close_code})"
+
+
 class CancelContext:
     """连接生命周期取消信号；必须容忍在新 ctx 上被重复调用（继承 run_bot 语义）。"""
 
@@ -100,6 +121,7 @@ ChannelFactory = Callable[[ChannelConfig], Channel]
 
 __all__ = [
     "Channel", "ChannelConfig", "ChannelFactory", "ChannelError",
-    "ChannelRegistrationConflict", "PermanentChannelError", "CancelContext",
+    "ChannelRegistrationConflict", "ChannelWsClosed", "PermanentChannelError",
+    "CancelContext",
     "InboundHandler",
 ]

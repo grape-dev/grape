@@ -42,7 +42,8 @@
     "menu_edit": "✎ Edit",
     "menu_delete": "🗑 Delete",
     "confirm_delete_selected": "Delete {{count}} selected tasks?",
-    "confirm_delete_one": "Delete this task?"
+    "confirm_delete_one": "Delete this task?",
+    "not_dispatchable": "Not dispatchable (empty instruction)"
   },
   "form": {
     "edit_title": "Edit Automation",
@@ -188,10 +189,14 @@
     "load_failed": "Failed to load: {{msg}}",
     "engine_detached_hint": "Bound engine(s) ",
     "engine_detached_rebind": " went offline (8h+) and were removed from the scene by the system. Task binding is kept; adjust or rebind manually.",
+    "engine_detached_unavailable": "Detach info temporarily unavailable (detach log query failed); retry later.",
     "subscribe": "Subscribe Feishu",
     "subscribed": "Subscribed",
     "subscribe_on": "Subscription on",
-    "subscribe_off": "Subscription off"
+    "subscribe_off": "Subscription off",
+    "not_dispatchable_title": "Enabled but not dispatchable",
+    "not_dispatchable_desc": "The instruction is empty. Fill it in to resume cron dispatch.",
+    "not_dispatchable_fix": "Add instruction"
   },
   "advanced": {
     "save": "Save",

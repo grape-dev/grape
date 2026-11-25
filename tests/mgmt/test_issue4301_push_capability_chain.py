@@ -185,6 +185,8 @@ def test_blocker_empty_when_task_unrelated_or_unknown(monkeypatch):
 # ── 3. 仓库 Bot 设置页快路径：落键 + 告警（与 /repos/bot-token 同口径） ──
 
 class _FakeProvider:
+    """Mirrors the baseline provider API: verify_token_with_headers -> (info, headers)."""
+
     def __init__(self, scopes):
         self._scopes = scopes
         self.calls = 0
@@ -193,8 +195,10 @@ class _FakeProvider:
         self.calls += 1
         return {"id": "1", "login": "botlogin", "name": "Bot"}
 
-    def verify_token_scopes(self, tok):
-        return self.verify_token(tok), self._scopes
+    def verify_token_with_headers(self, tok):
+        info = self.verify_token(tok)
+        headers = {} if self._scopes is None else {"X-OAuth-Scopes": self._scopes}
+        return info, headers
 
 
 def _put_repo_bot(monkeypatch, scopes):
@@ -272,8 +276,9 @@ def test_platform_bot_persists_capability_meta(monkeypatch):
     from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo as R
     from src.domains.mgmt.admin import config_store as cs
 
-    monkeypatch.setattr(cs, "verify_token_scopes",
-                        lambda p, t: ({"login": "botx"}, "repo, admin:repo_hook"))
+    monkeypatch.setattr(cs, "verify_token_with_scopes",
+                        lambda p, t: ({"login": "botx"},
+                                      {"repo", "admin:repo_hook"}))
     monkeypatch.setattr(cs, "platform_bot_old_token", lambda p: "")
     monkeypatch.setattr(cs, "trigger_platform_bot_swap", lambda *a, **k: None)
     monkeypatch.setattr(R, "set_bot", staticmethod(lambda s, provider, username=None, token_enc=None: True))
@@ -292,11 +297,11 @@ def test_platform_bot_persists_capability_meta(monkeypatch):
 
 # ── 5. verify_token_scopes 复用单次 /user 响应头 ──────────────────────
 
-def test_config_store_verify_token_scopes_single_roundtrip(monkeypatch):
+def test_config_store_verify_token_with_scopes_single_roundtrip(monkeypatch):
     from src.domains.mgmt.admin import config_store as cs
 
     holder = {"p": _FakeProvider("repo, workflow")}
     monkeypatch.setattr("src.domains.mgmt.vcs.create_provider", lambda p: holder["p"])
-    info, scopes = cs.verify_token_scopes("github", "tok")
-    assert scopes == "repo, workflow" and info["login"] == "botlogin"
-    assert holder["p"].calls == 1, "预检必须复用同一次 verify，禁止第二次网络往返"
+    info, scopes = cs.verify_token_with_scopes("github", "tok")
+    assert scopes == {"repo", "workflow"} and info["login"] == "botlogin"
+    assert holder["p"].calls == 1, "probe must reuse the single verify round-trip"

@@ -43,6 +43,27 @@ def task_creator_account(user_id) -> str:
         return ""
 
 
+def owner_account_for_repo(repo_key: str) -> str:
+    """Issue #3905：无 actor 事件（autopilot）的仓库属主兜底账号，单一实现。
+
+    仅在明确放行 owner 回退的路径调用（autopilot 定时任务 / 无 actor 的
+    ``autopilot_event``）。人工/事件驱动的 ``resolve_actor_account`` 默认**不启用**
+    （见 Issue #1819：禁止把仓库属主当成触发人），保持既有安全语义。
+
+    取值 = ``repo_key`` 的 owner 段（gitcode:owner/repo → owner），过账号形态校验；
+    派生失败返回空串，由调用方留空并告警。
+    """
+    if not repo_key:
+        return ""
+    try:
+        from src.kernel.repo_key import derive_repo_identity, from_repo_key
+        _full, _owner, _name = derive_repo_identity(from_repo_key(repo_key), repo_key)
+        return normalize_account(_owner)
+    except Exception as e:  # noqa: BLE001 - 兜底派生失败不得打断派发
+        log.warning(f"ACCOUNT_OWNER_FALLBACK_LOOKUP_FAILED repo_key={repo_key}: {e}")
+        return ""
+
+
 def log_account_alert(kind: str, level: str = "warning", **fields) -> None:
     """输出 ACCOUNT_* 结构化告警（kind 如 ACCOUNT_INVALID / ACCOUNT_MISSING）。
 

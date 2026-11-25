@@ -22,6 +22,40 @@ from src.domains.runtime.vcs.redact import redact_text, redact_url
 # 先脱敏后截断：截断只会切到已掩码的 ***，不会把凭据切成半截片段。
 _LOG_BODY_MAX = 500
 
+# ── Issue #3759：上游 4xx 失败日志窗口聚合 ────────────────────────────────────
+# key = 仓库 + 归一资源 + 错误码（数字段归一为 {n}，issues/62 与 issues/63 同 key）。
+# 目的：孤儿仓库卡的 404 不再因 issue 数线性放大 WARNING；窗口滚动时补一条折叠计数。
+_ERROR_LOG_DEDUPER = None
+_ERROR_LOG_LOCK = threading.Lock()
+
+
+def _error_log_key(url: str, status_code) -> str:
+    path = str(url or "").split("?", 1)[0]
+    norm = re.sub(r"/\d+(?=/|$)", "/{n}", path)
+    m = re.search(r"/(?:repos|projects)/([^/]+)(?:/([^/]+))?", norm)
+    scope = "/".join(g for g in (m.group(1), m.group(2)) if g) if m else norm
+    return f"{scope}:{status_code}"
+
+
+def _error_log_deduper():
+    global _ERROR_LOG_DEDUPER
+    if _ERROR_LOG_DEDUPER is None:
+        with _ERROR_LOG_LOCK:
+            if _ERROR_LOG_DEDUPER is None:
+                from src.kernel.log_dedupe import WindowDeduper
+                try:
+                    _win = max(1.0, float(os.environ.get(
+                        "GRAPE_UPSTREAM_LOG_WINDOW_SECONDS", "") or 60.0))
+                except (TypeError, ValueError):
+                    _win = 60.0
+                _ERROR_LOG_DEDUPER = WindowDeduper(_win)
+    return _ERROR_LOG_DEDUPER
+
+
+# Issue #3348 复审：避免 404 魔法字面量散落（用户查询/存在性判定共用）。
+_HTTP_NOT_FOUND = 404
+_GITLAB_USERS_ENDPOINT = "/users?username={name}"
+
 
 # ── 建单幂等：open 标题索引缓存（Issue #3250）────────────────────────────────
 # 非 github 平台没有标题过滤参数，只能 `state=open&per_page=50&page=N` 全量翻页：
@@ -100,6 +134,10 @@ _USER_ATTACHMENT_URL_RE = re.compile(r"https://gitcode\.com/user-attachments/[^\
 _USER_ATTACHMENT_URL_PREFIX = "https://gitcode.com/user-attachments/"
 USER_ATTACHMENT_MAX_SIZE = 50 * 1024 * 1024    # 与视频理解 50MB 阈值一致，避免整段下载后才判超限
 USER_ATTACHMENT_TIMEOUT = 60                   # 下载 60s 超时（视频较大）
+# Issue #3349（架构守护条件 3 整改）：建单 POST 默认 socket 超时。issues_center
+# 建单链经 `_create_issue_unified` 显式传入 `CREATE_HTTP_TIMEOUT`（15s）；
+# 此默认值 30s 仅为其它直接调用方保持既有行为（继承自统一请求入口的既有默认）。
+CREATE_ISSUE_HTTP_TIMEOUT = 30
 # 单次评论最多采集的媒体附件数。取值依据（Issue #1748 复审，MR !1145 Critical-3）：
 # 与同族 USER_IMAGE_MAX_COUNT（编辑器上传图片）对齐为 8，避免「同一评论里图片比编辑器
 # 图片少采 2 个」的口径分裂；8 也是单条评论里人工可一次性上传/贴链的实际上限，
@@ -380,7 +418,6 @@ class VcsApiClient:
                             issue_number=str(issue_number or ""),
                             content_hash=content_hash_md5(body) if body else "")
         except Exception as e:
-            from src.kernel.config import log
             log.warning(f"VcsApiClient ledger record failed (non-blocking): {e}")
 
     def post_issue_comment(self, issue_number: int, body: str) -> dict:
@@ -463,8 +500,15 @@ class VcsApiClient:
     # === Issue 查询 ===
 
 
-    def create_issue(self, title: str, body: str = "", assignee: str = "") -> dict:
-        """创建 Issue（D20/S31，命令面补齐：卡驱动路径+鉴权，方言 assignee 语义）。"""
+    def create_issue(self, title: str, body: str = "", assignee: str = "",
+                     timeout: int = CREATE_ISSUE_HTTP_TIMEOUT) -> dict:
+        """创建 Issue（D20/S31，命令面补齐：卡驱动路径+鉴权，方言 assignee 语义）。
+
+        ``timeout``：建单 POST 的 socket 超时。Issue #3349 接线：issues_center
+        的 ``CREATE_HTTP_TIMEOUT``（15s）经 ``_create_issue_unified`` 透传至此
+        （架构守护条件 3：常量定义后必须被生产路径消费）；默认 30s 仅供其它
+        直接调用方保持既有行为。
+        """
         # D22：全平台统一走卡路径（gitcode/gitee form 语义、github JSON+token 头，
         # gitlab 走 projects/issues——后者为此前 unsupported 的新增能力）
         card = self._platform_card()
@@ -487,9 +531,11 @@ class VcsApiClient:
         if card.issue_write_form == "owner_param":
             data = dict(data)
             data["repo"] = self.repo
-            return self._request("POST", f"/repos/{self.owner}/issues", data, form=_form)
+            return self._request("POST", f"/repos/{self.owner}/issues", data,
+                                 form=_form, timeout=timeout)
         return self._request("POST", self._generic_path(
-            f"/repos/{self.owner}/{self.repo}/issues", "/issues"), data, form=_form)
+            f"/repos/{self.owner}/{self.repo}/issues", "/issues"), data,
+            form=_form, timeout=timeout)
 
     def get_issue(self, issue_number: int, timeout: float = 30.0) -> dict:
         """获取 Issue 详情。"""
@@ -545,7 +591,8 @@ class VcsApiClient:
 
     # === Issue 查重（D36/S56 端口方法）===
 
-    def find_open_issue_by_title(self, title: str, max_pages: int = 1000) -> "int | None":
+    def find_open_issue_by_title(self, title: str, max_pages: int = 1000,
+                                timeout: int = 30) -> "int | None":
         """按标题查找同名 open Issue，返回其 number（无则 None）。
 
         D36/S56：策略归适配器内部——github 走 Search API 精确匹配
@@ -555,13 +602,13 @@ class VcsApiClient:
         重复建单（#343 契约）。调用方零平台分支（端口-适配器形态）。
         """
         try:
-            return self._find_open_issue_impl(title, max_pages)
+            return self._find_open_issue_impl(title, max_pages, timeout)
         except RuntimeError:
             raise
         except Exception as e:
             raise RuntimeError(f"幂等查重失败（token 可能失效）: {e}")
 
-    def _find_open_issue_impl(self, title: str, max_pages: int) -> "int | None":
+    def _find_open_issue_impl(self, title: str, max_pages: int, timeout: int = 30) -> "int | None":
         import urllib.parse as _up
         # D36/S56：策略按卡能力位分派（issue_search），不比平台名——
         # 有搜索端点的平台走精确匹配，无则分页遍历（第 5 平台配卡即得）
@@ -569,7 +616,7 @@ class VcsApiClient:
         if _card is not None and _card.issue_search:
             # 搜索端点策略：Search API 精确匹配（in:title + repo scope，#344 语义）
             _q = _up.quote(f'{title} in:title repo:{self.owner}/{self.repo} is:issue is:open')
-            data = self._request("GET", f"/search/issues?q={_q}&per_page=5")
+            data = self._request("GET", f"/search/issues?q={_q}&per_page=5", timeout=timeout)
             if isinstance(data, dict) and "error" in data:
                 raise RuntimeError(_dedup_error_text(data))
             if not isinstance(data, dict) or "items" not in data:
@@ -605,7 +652,7 @@ class VcsApiClient:
                 self._generic_path(
                     f"/repos/{self.owner}/{self.repo}/issues?state=open&per_page=50&page={page}",
                     f"/issues?state=opened&per_page=50&page={page}",
-                ))
+                ), timeout=timeout)
             if isinstance(data, dict):
                 if "error" in data:
                     raise RuntimeError(_dedup_error_text(data))
@@ -779,6 +826,22 @@ class VcsApiClient:
         card = self._platform_card()
         return bool(card is not None and card.dialect == "gitlab")
 
+    def _gitlab_users_by_username(self, username: str, timeout: "int | None" = None) -> "list | dict":
+        """GitLab `GET /users?username=<name>` 列表查询（Issue #3348 复审：去重）。
+
+        `_gitlab_assignee_ids` 与 `get_user` 共用。返回 list（成功）或错误 dict
+        （网络/HTTP 异常，`_request` 原样透出），调用方据此区分"空结果"与"查询失败"：
+        前者是真实不存在，后者必须 fail-open，不能当成 404（Issue #3348 二轮复审）。
+        """
+        from urllib.parse import quote as _quote
+        _name = str(username or "").strip()
+        if not _name:
+            return []
+        _path = _GITLAB_USERS_ENDPOINT.format(name=_quote(_name, safe=""))
+        if timeout is None:
+            return self._request("GET", _path)
+        return self._request("GET", _path, timeout=timeout)
+
     def _gitlab_assignee_ids(self, assignee: str) -> list:
         """GitLab 指派：用户名 → assignee_ids（Issue #3580 复审，对齐 PR #1854）。
 
@@ -792,13 +855,16 @@ class VcsApiClient:
             return []
         if _raw.isdigit():
             return [int(_raw)]
-        from urllib.parse import quote as _quote
         try:
-            users = self._request("GET", f"/users?username={_quote(_raw)}")
+            users = self._gitlab_users_by_username(_raw)
         except Exception as e:  # noqa: BLE001
             log.warning(f"gitlab assignee resolve failed ({_raw}): {e}")
             return []
-        for u in users if isinstance(users, list) else []:
+        if not isinstance(users, list):
+            # 网络/HTTP 错误 dict：指派是可选语义，解析不到只告警放弃。
+            log.warning(f"gitlab assignee resolve failed ({_raw}): {users}")
+            return []
+        for u in users:
             if not isinstance(u, dict):
                 continue
             if str(u.get("username", "")).lower() == _raw.lower() and u.get("id"):
@@ -930,18 +996,50 @@ class VcsApiClient:
         return self._request("GET", path)
 
 
-    def get_repo_info(self) -> dict:
+    def get_repo_info(self, timeout: int = 30) -> dict:
         """获取仓库信息。"""
         return self._request("GET", self._generic_path(
-            f"/repos/{self.owner}/{self.repo}", ""))
+            f"/repos/{self.owner}/{self.repo}", ""), timeout=timeout)
 
-    def repo_exists(self) -> bool:
+    def get_user(self, username: str, timeout: "int | None" = None) -> dict:
+        """查询平台用户信息（Issue #3348：BOT_USERNAME 注入前有效性校验）。
+
+        github/gitcode/gitee 走 `GET /users/{username}`；gitlab 走
+        `GET /users?username=...`（精确匹配 username，避免模糊命中他人后误判有效）。
+        不存在返回平台 404 error dict（含 status_code=404），调用方据此判定
+        user_not_found；网络/HTTP 异常原样返回错误 dict（无 404 语义），调用方按
+        fail-open 处理，不能伪造 404（Issue #3348 二轮复审）。
+        `timeout` 供派发热路径限时，避免平台变慢拖住任务派发。
+        """
+        from urllib.parse import quote as _quote
+        _name = str(username or "").strip()
+        if not _name:
+            return {"error": "empty username"}
+        if self._dialect_is_gitlab():
+            # 与 _gitlab_assignee_ids 共用列表查询（复审去重）；仅精确匹配才算存在。
+            _data = self._gitlab_users_by_username(_name, timeout=timeout)
+            if isinstance(_data, dict):
+                # 网络/HTTP 错误原样返回，交给调用方 fail-open（不得伪造成 404）。
+                return _data
+            if not isinstance(_data, list):
+                return {"error": "unexpected gitlab users response"}
+            for _user in _data:
+                if not isinstance(_user, dict):
+                    continue
+                if str(_user.get("username") or "").strip().lower() == _name.lower():
+                    return _user
+            return {"error": f"HTTP {_HTTP_NOT_FOUND}", "status_code": _HTTP_NOT_FOUND}
+        if timeout is None:
+            return self._request("GET", f"/users/{_quote(_name, safe='')}")
+        return self._request("GET", f"/users/{_quote(_name, safe='')}", timeout=timeout)
+
+    def repo_exists(self, timeout: int = 30) -> bool:
         """探测仓库是否存在（Issue #340 代码仓删除感知）。
 
         404 → False（已删除）；200 → True；其他错误（403/网络）→ True（不误判，
         交由探活轮询/webhook 双通道兜底）。
         """
-        info = self.get_repo_info()
+        info = self.get_repo_info(timeout=timeout)
         if isinstance(info, dict) and str(info.get("error", "")).strip() == "HTTP 404":
             return False
         return True
@@ -1098,8 +1196,21 @@ class VcsApiClient:
                     err_body = e.read().decode()
                 except Exception:
                     pass
-                log.warning(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code}: "
-                            f"{redact_text(err_body)[:_LOG_BODY_MAX]}")
+                # Issue #3759：上游 4xx 在此同样逐次刷 WARNING（孤儿仓库卡 404 轮询的
+                # 另一半噪声源）。按「仓库 + 资源 + 错误码」窗口聚合，窗口内只留首条。
+                try:
+                    _dec = _error_log_deduper().note(
+                        _error_log_key(url, e.code))
+                except Exception:  # noqa: BLE001
+                    _dec = None
+                if _dec is None or _dec.emit_full:
+                    log.warning(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code}: "
+                                f"{redact_text(err_body)[:_LOG_BODY_MAX]}"
+                                + (f" | folded_prev_window={_dec.folded}" if _dec and _dec.folded
+                                   else ""))
+                else:
+                    log.debug(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code} "
+                              f"(deduped folded={_dec.folded})")
                 if _span is not None:
                     _span.set_attribute("http.status_code", e.code)
                     _span.set_attribute("vcs.result", "http_error")

@@ -874,7 +874,7 @@
           "repos"
         ],
         "summary": "List repos I can operate",
-        "description": "Lists repositories the current user can operate. Reads the user_repos cache, auto-refreshing from VCS when empty or stale; prunes managed repos removed upstream. Supports ?provider=gitcode|github to filter by platform (需求 17 项目页按平台切换).",
+        "description": "Lists repositories the current user can operate. Reads the user_repos cache with stale-while-revalidate: fresh cache returns directly, stale cache returns immediately while a background refresh (parallel across providers) updates it; empty cache fetches once. Supports ?provider=gitcode|github to filter by platform, and ?refresh=1 to skip the cache and fetch from VCS synchronously before answering (the released contract used by write-then-read paths: the request waits up to MEMBER_REFRESH_DEADLINE and degrades to the cached rows on timeout, which then answer _cached=true plus _refresh_requested=true).",
         "operationId": "repos_member",
         "parameters": [
           {
@@ -1307,6 +1307,68 @@
         "x-token-scope": "dual"
       }
     },
+    "/api/repos/{owner}/{repo}/vcs-health/reset": {
+      "post": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "Reset repo VCS breaker",
+        "description": "Issue #3759: clears the repo-level VCS missing breaker (`vcs_status`/`vcs_fail_count`/probe ledger). Use after rebinding the provider or confirming the upstream repository exists again; the next issue read re-probes upstream. Idempotent.",
+        "operationId": "repos_vcs_health_reset",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Owner"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/repos/{provider}/connection": {
       "get": {
         "tags": [
@@ -1551,6 +1613,78 @@
             }
           },
           "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/repos/{owner}/{repo_name}/bot-token": {
+      "put": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "Bind repository bot token (explicit)",
+        "description": "Explicitly binds a repository-level bot token: validates it against the upstream platform (GET /user) first, then stores it encrypted in grape_t_repo_credentials (cred_type=bot).",
+        "operationId": "repos_bot_token_bind",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Owner"
+            }
+          },
+          {
+            "name": "repo_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BotTokenBindBody"
+              }
+            }
+          }
         },
         "responses": {
           "200": {
@@ -6118,7 +6252,7 @@
           "agents"
         ],
         "summary": "Get agent config",
-        "description": "Returns the agent session config (runtime/skill/engine bindings) for name/owner/repo.",
+        "description": "Returns the agent session config (runtime/skill/engine bindings) for name/owner/repo. metrics.total_events is the sum of the five whitelisted statuses (pending/completed/running/failed/cancelled, unknown statuses excluded); the unbounded raw count is returned separately as metrics.total_events_raw.",
         "operationId": "agents_detail",
         "parameters": [
           {
@@ -15062,7 +15196,7 @@
           "scenes"
         ],
         "summary": "Scene engine online status",
-        "description": "On-demand engine probe for one scene (moved out of /scenes/with-pipeline, Issue #501). Returns offline_nodes / sre_unbound / all_offline for the given scene; probe failures degrade to no-warning.",
+        "description": "On-demand engine probe for one scene (moved out of /scenes/with-pipeline, Issue #501). Returns offline_nodes / sre_unbound / all_offline for the given scene; probe failures degrade to no-warning. Issue #3508: adds per-engine structured health entries engines:[{id, name, health_score, reachability, reason, node}] plus low_score_nodes (engines reachable but below health threshold, distinct from physically unreachable offline_nodes); internal query errors degrade to 2xx {degraded, error} instead of a raw 500.",
         "operationId": "scenes_engine_status",
         "parameters": [
           {
@@ -17603,7 +17737,7 @@
           "issues"
         ],
         "summary": "Query issue status (polling)",
-        "description": "Returns the Issue status with context for CLI 'grape issues wait' polling.",
+        "description": "Returns the Issue status with context for CLI 'grape issues wait' polling. Authoritative status is `issue.status` (same row as `issues detail.task_status`); `review_point.status`/`review_point.references` are read-only projections of that row (Issue #4063). CLI availability note (Issue #4026): the `grape issues status get --issue_id` subcommand exists in CLI >= 0.3.4; CLI 0.3.2 does not provide this subcommand.",
         "operationId": "issues_status_get",
         "parameters": [
           {
@@ -18393,7 +18527,7 @@
           "issues"
         ],
         "summary": "Agent declares issue pending_review (阶段审核点)",
-        "description": "任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。重复调用幂等（Issue #725）：已是 pending_review 时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。issue_id 必须是纯数字内部 id（Issue #2695：空/非数字在入口前置返回 400 invalid issue_id，不是 GitCode issue number）。",
+        "description": "任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。幂等（Issue #725/#4063）：已在位且 review_points/references 未变时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）；审核点**内容变更**时 changed:true 并刷新快照。Issue #4103：回执新增 prior_status（写入前同事务实读状态），与 status（写后实读）成对返回；changed 仅表示本次真实写入（rowcount>0），并发 CAS 未命中时为 false，不重复触发通知。`issue.status` 是权威状态，`issues detail.task_status` 与 `issues status get.status` 均回读同一行（detail 的 `review_point.status` 为其派生只读投影）。非审核事件（issue_comment 等）不驱动 pending_review 流转。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。issue_id 必须是纯数字内部 id（Issue #2695：空/非数字在入口前置返回 400 invalid issue_id，不是 GitCode issue number）。",
         "operationId": "issues_pending-review",
         "parameters": [
           {
@@ -19292,7 +19426,7 @@
           "issues"
         ],
         "summary": "Issue detail (stage+events+pipeline)",
-        "description": "Single issue detail: base fields + events (seq asc) + pipeline segments. D105 string-ident: `number` accepts numeric idents and platform string idents (gitee IK*, # prefix tolerated).",
+        "description": "Single issue detail: base fields + events (seq asc) + pipeline segments + read-only `review_point` (Issue #4063: `review_point.status`/`review_point.references`; status is a projection of the authoritative `issue.status`, identical to `task_status` and `issues status get.status` — no separate review-point state column). Response carries `id`/`issue_number` aliases aligned with `issues status get` (`id` = internal card id, `issue_number` = platform issue number; `number`/`issue_id` kept for compatibility, Issue #4063 In Scope 3 / #3981). D105 string-ident: `number` accepts numeric idents and platform string idents (gitee IK*, # prefix tolerated).",
         "operationId": "issues_detail",
         "parameters": [
           {
@@ -19768,7 +19902,7 @@
           "runtime"
         ],
         "summary": "Set role tags",
-        "description": "Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Write is restricted to the credential owner (user/org owner+admin) or platform admin (Issue #3396).",
+        "description": "Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Write permission is layered (Issue #3396, 2026-11-24): locally-attached engines (credential_id=0) accept any authenticated user; credential-backed engines accept only a platform admin, the credential owner, or an owner/admin of the credential's org; session_token is always 403. Tag values are domain-validated (400 INVALID_ROLE_TAGS) and empty tag sets are rejected (400 EMPTY_ROLE_TAGS, at least one role must remain).",
         "operationId": "runtime_tags_set",
         "parameters": [
           {
@@ -30774,6 +30908,20 @@
         "title": "BotBody",
         "description": "平台 bot 写入体（D110）：username 空=不改；token 空=不改；token 留空无法清除，清除走 DELETE。"
       },
+      "BotTokenBindBody": {
+        "properties": {
+          "bot_token": {
+            "type": "string",
+            "title": "Bot Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bot_token"
+        ],
+        "title": "BotTokenBindBody",
+        "description": "Issue #3427：显式绑定接口请求体（PUT /{owner}/{repo}/bot-token）。"
+      },
       "BotTokenBody": {
         "properties": {
           "full_name": {
@@ -32427,44 +32575,106 @@
             "default": []
           },
           "cpu_percent": {
-            "type": "number",
-            "title": "Cpu Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Percent"
           },
           "memory_percent": {
-            "type": "number",
-            "title": "Memory Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Percent"
           },
           "disk_percent": {
-            "type": "number",
-            "title": "Disk Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disk Percent"
           },
           "tmp_percent": {
-            "type": "number",
-            "title": "Tmp Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tmp Percent"
           },
           "bandwidth_percent": {
-            "type": "number",
-            "title": "Bandwidth Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bandwidth Percent"
           },
           "bandwidth_mbps": {
-            "type": "number",
-            "title": "Bandwidth Mbps",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bandwidth Mbps"
           },
           "load_avg": {
-            "type": "string",
-            "title": "Load Avg",
-            "default": ""
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Avg"
           },
           "spec": {
             "type": "string",
             "title": "Spec",
             "default": ""
+          },
+          "acp_state_db_bytes": {
+            "type": "number",
+            "title": "Acp State Db Bytes",
+            "default": 0.0
+          },
+          "acp_state_db_cleanup_counts": {
+            "type": "string",
+            "title": "Acp State Db Cleanup Counts",
+            "default": ""
+          },
+          "acp_state_db_bytes_freed_total": {
+            "type": "number",
+            "title": "Acp State Db Bytes Freed Total",
+            "default": 0.0
+          },
+          "acp_resume_skipped_total": {
+            "type": "integer",
+            "title": "Acp Resume Skipped Total",
+            "default": 0
           },
           "log_lines": {
             "items": {
@@ -32482,7 +32692,8 @@
           }
         },
         "type": "object",
-        "title": "HeartbeatBody"
+        "title": "HeartbeatBody",
+        "description": "心跳 body。\n\nIssue（心跳双写覆盖指标）：worker 有两个心跳循环——完整心跳带 metrics，\n`_presence_heartbeat_loop` 的最小在线态心跳**不带**。旧模型把缺省值定为 0.0 并\n无条件 UPDATE，于是最小心跳每 15~20s 就把真实 cpu/mem/disk 刷成 0，看板来回跳\n「有数据 → 全 0」。现在缺省为 None，服务端只更新**真的上报了**的列。"
       },
       "HeartbeatBodyV2": {
         "properties": {
@@ -32495,44 +32706,106 @@
             "default": []
           },
           "cpu_percent": {
-            "type": "number",
-            "title": "Cpu Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Percent"
           },
           "memory_percent": {
-            "type": "number",
-            "title": "Memory Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Percent"
           },
           "disk_percent": {
-            "type": "number",
-            "title": "Disk Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disk Percent"
           },
           "tmp_percent": {
-            "type": "number",
-            "title": "Tmp Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tmp Percent"
           },
           "bandwidth_percent": {
-            "type": "number",
-            "title": "Bandwidth Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bandwidth Percent"
           },
           "bandwidth_mbps": {
-            "type": "number",
-            "title": "Bandwidth Mbps",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bandwidth Mbps"
           },
           "load_avg": {
-            "type": "string",
-            "title": "Load Avg",
-            "default": ""
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Avg"
           },
           "spec": {
             "type": "string",
             "title": "Spec",
             "default": ""
+          },
+          "acp_state_db_bytes": {
+            "type": "number",
+            "title": "Acp State Db Bytes",
+            "default": 0.0
+          },
+          "acp_state_db_cleanup_counts": {
+            "type": "string",
+            "title": "Acp State Db Cleanup Counts",
+            "default": ""
+          },
+          "acp_state_db_bytes_freed_total": {
+            "type": "number",
+            "title": "Acp State Db Bytes Freed Total",
+            "default": 0.0
+          },
+          "acp_resume_skipped_total": {
+            "type": "integer",
+            "title": "Acp Resume Skipped Total",
+            "default": 0
           },
           "log_lines": {
             "items": {
@@ -34310,6 +34583,12 @@
             "type": "object",
             "title": "Engine Selector",
             "default": {}
+          },
+          "engine_priorities": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Engine Priorities",
+            "default": {}
           }
         },
         "type": "object",
@@ -35983,7 +36262,7 @@
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 401,
+  "x-endpoint-count": 403,
   "x-groups": [
     "a2a",
     "agents",
@@ -36018,7 +36297,7 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "8b1599e96",
-  "x-generated-at": "2026-11-24T08:52:05.641856+00:00",
+  "x-source-commit": "d0839cec8e",
+  "x-generated-at": "2026-11-25T05:56:58.190658+00:00",
   "tags": []
 }

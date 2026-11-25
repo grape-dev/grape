@@ -8,6 +8,12 @@ from src.kernel.config import log
 from src.kernel.issue_ident import native_issue_number  # Issue #3055
 
 
+def _task_pr_number(task) -> str:
+    """任务行上的 PR 号（Issue #3375）：从 env_extra 快照解析，供 cwd 重算使用。"""
+    from src.kernel.pr_scope import pr_number_from_env_extra
+    return pr_number_from_env_extra((task or {}).get("env_extra"))
+
+
 class _OwnedCursor:
     """自带连接的游标：close 时把连接一并关掉。"""
 
@@ -139,9 +145,13 @@ def _engine_scope_extra(repo_bare: str, account_id) -> tuple[str, list]:
 
 
 def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
-                         task_id: str = "", error: str = ""):
+                         task_id: str = "", error: str = "",
+                         extra: dict | None = None):
     """Issue #587：管理端终止/重派等可审计操作强制留痕（actor/time/target_event/动作）。
     Issue #2547：error 非空时写入 payload（失败留痕附失败原因，与主流程结果对齐）。
+    Issue #4345：``extra`` 写入 ``dispatch``/``reason``/``candidate_base_url`` 等决策字段，
+    失败审计（redispatch_failed + dispatch=failed）与成功语义可区分，不再「审计有据、
+    重派未生效」的假成功。
 
     追加 admin_action 审计事件（status=completed，不参与业务流转，仅留痕）。
     Issue #1312：继承目标事件的真实 repo_key / issue_id，避免审计事件被兜底成
@@ -194,6 +204,7 @@ def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
                 "target_task_id": task_id,
                 "related": _related,
                 **({"error": error} if error else {}),
+                **({k: v for k, v in (extra or {}).items() if v not in (None, "")}),
             },
             status="completed",
         )
@@ -207,13 +218,17 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     db = _rt_db
     with db_lock:
         c = db.cursor()
-        try:
-            c.execute(
-                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, runtime, skill, exit_code, duration, agent_logs, started_at, completed_at, result, structured_output, scene_id FROM events WHERE seq=?",
-                (seq,))
-            row = c.fetchone()
-        except Exception:
-            row = None
+        _base_cols = ("seq, repo_key, issue_id, event_type, source, agent_type, title, actor, "
+                      "summary, payload, status, created_at, runtime, skill, exit_code, duration, "
+                      "agent_logs, started_at, completed_at, result, structured_output, scene_id")
+        # Issue #3433：按列名探测决定是否选 failure_info（历史库/未迁移库无该列），
+        # 仅缺列降级，其他 DB 错误不吞并（交由调用方按真实错误处理）。
+        from src.api.event_store import _events_column_exists
+        _has_failure_info = _events_column_exists(c, "failure_info")
+        _select_cols = _base_cols + (", failure_info" if _has_failure_info else "")
+        c.execute(f"SELECT {_select_cols} FROM events WHERE seq=?", (seq,))
+        row = c.fetchone()
+        _col_names = [d[0] for d in (c.description or [])]
 
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到"})
@@ -258,6 +273,17 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
         "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
+    # Issue #3433：结构化失败原因（历史事件/未迁移库缺列时降级为 null）。
+    # 用 cursor.description 列名定位，避免 SELECT 列序变动导致静默取空/取错列。
+    _failure_info = None
+    _failure_idx = _col_names.index("failure_info") if "failure_info" in _col_names else -1
+    if _has_failure_info and _failure_idx >= 0 and _failure_idx < len(row) and row[_failure_idx]:
+        try:
+            from src.domains.runtime.agents.failure_info import parse_failure_info
+            _failure_info = parse_failure_info(row[_failure_idx]) or None
+        except Exception:
+            _failure_info = None
+    result["failure_info"] = _failure_info
     # Issue #574：Skill 展示改 display_name（与场景选择处同款查询条件；display_name 为空时前端回退 Skill ID）
     _skill_display_name = ""
     try:
@@ -772,7 +798,13 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     # 3) 事件状态回写 failed（兜底，fail_task/cancel_task 已处理但再确认一次）
     # Issue #476：显式 reason，避免 terminate 产生空 result 无头失败
     try:
-        update_event_status(seq, "failed", result="用户手动终止事件（terminate）")
+        from src.domains.runtime.agents.failure_info import build_failure_info
+        _terminate_reason = "用户手动终止事件（terminate）"
+        update_event_status(
+            seq, "failed", result=_terminate_reason,
+            failure_info=build_failure_info(
+                error_type="CancelledByUser", phase="cancelled",
+                message=_terminate_reason))
     except Exception as e:
         log.warning(f"Event terminate: update_event_status failed: {e}")
 
@@ -857,6 +889,145 @@ def _redispatch_success(task_id, event_seq, token_reissued=None, **extra) -> dic
 # 特权位用**显式参数** skip_debounce 承载（#2678 复审观察 6）：只有服务内调用能传 True，
 # 公共 HTTP 路由的函数签名里没有该参数（query 里塞 skip_debounce 无效），外部无法放宽防抖。
 
+# ===== Issue #4345：30s 同 seq 幂等回放（回放上次回执，不再 500/409 交替）=====
+# 回执缓存与既有 `redispatch:{seq}` meta 时间戳同源：只有 30s 窗口内（meta 有值）
+# 才回放，窗口外照常重新执行。meta 读取失败 / 无值（历史库、测试桩）→ 不回放，
+# 行为与旧版一致，避免把一次失败永久钉死。
+_REDISPATCH_REPLAY_TTL = 30.0
+_REDISPATCH_REPLAY_MAX = 256
+_redispatch_replay: dict[int, tuple[float, int, object]] = {}
+# 通道不可用类失败才回放：入口幂等 / 接管 / 自循环闸的 409 语义保持不变（每次重新判定）。
+_REDISPATCH_REPLAY_STATUSES = (422, 502, 503)
+
+
+def _redispatch_replay_lookup(seq: int, local_only: bool = False):
+    """30s 窗口内命中的上一次回执 → (status_code, body)；否则 None。"""
+    if not seq:
+        return None
+    try:
+        from src.domains.mgmt.public import get_meta_value
+        last = get_meta_value(f"redispatch:{seq}") or ""
+    except Exception:
+        return None
+    if not last:
+        return None
+    import time as _time
+    try:
+        if _time.time() - float(last) >= _REDISPATCH_REPLAY_TTL:
+            return None
+    except (TypeError, ValueError):
+        return None
+    hit = _redispatch_replay.get(int(seq))
+    if not hit:
+        return None
+    expires, code, body = hit
+    if _time.time() >= expires:
+        _redispatch_replay.pop(int(seq), None)
+        return None
+    return code, body
+
+
+def _redispatch_replay_store(seq: int, status_code: int, body, local_only: bool = False):
+    """缓存上一次回执并刷新 meta 时间戳（30s 窗口内重复点击直接回放）。"""
+    if not seq:
+        return
+    import time as _time
+    now = _time.time()
+    if len(_redispatch_replay) >= _REDISPATCH_REPLAY_MAX:
+        for _k in list(_redispatch_replay.keys())[: _REDISPATCH_REPLAY_MAX // 2]:
+            _redispatch_replay.pop(_k, None)
+    _redispatch_replay[int(seq)] = (now + _REDISPATCH_REPLAY_TTL, int(status_code), body)
+    try:
+        from src.domains.mgmt.public import set_meta_value
+        set_meta_value(f"redispatch:{seq}", str(now))
+    except Exception as _e:
+        log.debug(f"[redispatch] seq={seq} replay meta write skipped: {_e}")
+
+
+def _redispatch_log_failure(seq: int, detail) -> None:
+    """Issue #4345：redispatch 失败 error 行单点 emit（seq 为空不落行）。
+
+    同一请求只允许一条 error/error 级日志承载失败原因（附候选基址），杜绝
+    「一条 seq=N、一条 seq=''」的幽灵双写与 5xx 计数翻倍。
+    """
+    if not seq:
+        return
+    if isinstance(detail, dict):
+        reason = str(detail.get("reason") or detail.get("message") or "")
+        cand = str(detail.get("candidate_base_url") or "")
+        up = detail.get("upstream_status") or 0
+        try:
+            from src.kernel.prompt_builder import format_base_url_candidates
+            cands = format_base_url_candidates("/api/a2a")
+        except Exception:
+            cands = ""
+        log.warning(f"[redispatch] seq={seq} failed: {reason} "
+                    f"(candidate_base_url={cand or '-'}, upstream_status={up}); {cands}")
+    else:
+        log.warning(f"[redispatch] seq={seq} failed: {str(detail)[:300]}")
+
+
+def _redispatch_audit_fields(detail) -> dict:
+    """从失败回执 detail 抽取审计决策字段（dispatch/reason/candidate_base_url）。"""
+    if not isinstance(detail, dict):
+        return {"dispatch": "failed", "reason": str(detail)[:200]}
+    fields = {"dispatch": "failed"}
+    reason = detail.get("reason") or detail.get("message") or ""
+    if reason:
+        fields["reason"] = str(reason)[:300]
+    if detail.get("candidate_base_url"):
+        fields["candidate_base_url"] = str(detail["candidate_base_url"]).rstrip("/")[:300]
+    if detail.get("source"):
+        fields["base_source"] = str(detail["source"])[:64]
+    if detail.get("upstream_status"):
+        fields["upstream_status"] = int(detail["upstream_status"])
+    return fields
+
+
+def _run_redispatch(seq: int, *, local_only: bool, user: dict, skip_debounce: bool):
+    """重派公共执行体（公共路由 / 内部通道共用）：回放 → 执行 → 单点审计 + 单点日志。"""
+    if not skip_debounce:
+        _replay = _redispatch_replay_lookup(seq, local_only=local_only)
+        if _replay:
+            _code, _body = _replay
+            if _code >= 400:
+                raise HTTPException(status_code=_code, detail=_body)
+            return _body
+    _repo_key = ""
+    try:
+        _repo_key = _redispatch_audit_repo_key(seq)
+        _result = _redispatch_event(seq=seq, local_only=local_only, user=user,
+                                    skip_debounce=skip_debounce)
+    except HTTPException as _he:
+        _detail = _he.detail
+        _audit_admin_action(_repo_key or _redispatch_audit_repo_key(seq), seq,
+                            "redispatch_failed", user,
+                            error=str(_detail)[:200],
+                            extra=_redispatch_audit_fields(_detail))
+        if _he.status_code in _REDISPATCH_REPLAY_STATUSES and not skip_debounce:
+            _redispatch_replay_store(seq, _he.status_code, _detail, local_only=local_only)
+            _redispatch_log_failure(seq, _detail)
+        raise
+    except Exception as _e:
+        _detail = {"code": 500, "message": f"重派异常: {type(_e).__name__}: {str(_e)[:200]}",
+                   "reason": f"重派内部异常：{type(_e).__name__}: {str(_e)[:200]}"}
+        _audit_admin_action(_repo_key or _redispatch_audit_repo_key(seq), seq,
+                            "redispatch_failed", user,
+                            error=str(_detail["message"])[:200],
+                            extra=_redispatch_audit_fields(_detail))
+        if not skip_debounce:
+            _redispatch_replay_store(seq, 500, _detail, local_only=local_only)
+            _redispatch_log_failure(seq, _detail)
+        # 转成 HTTPException：避免裸异常冒泡到 ASGI 再落一条无 seq 的 error 行（幽灵双写）。
+        raise HTTPException(status_code=500, detail=_detail) from _e
+    _audit_admin_action(_repo_key or _redispatch_audit_repo_key(seq), seq,
+                        "redispatch", user,
+                        task_id=str((_result or {}).get("task_id") or ""),
+                        extra={"dispatch": "ok"})
+    if not skip_debounce:
+        _redispatch_replay_store(seq, 200, _result, local_only=local_only)
+    return _result
+
 
 @router.post("/{seq}/redispatch", operation_id="events_redispatch", summary="Redispatch event", description="Manually redispatches an event task (for tasks stuck running>10min or failed). Non-terminal tasks are requeued; terminal/missing tasks are marked failed and re-enqueued. local_only forces the original runtime.")
 def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(require_no_session_token)):
@@ -865,31 +1036,17 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     见 event-redispatch-design.md §4.1.2：
     - 关联任务非终态（dispatched/running）→ requeue 置回 queued；
     - 关联任务终态/缺失（含事件 failed）→ 复用原 task 快照参数重新 enqueue_task；
-    - 事件状态回写 running。30s 内重复调用幂等拒绝。
+    - 事件状态回写 running。30s 内重复调用回放上一次回执（Issue #4345）。
 
     local_only=True（本机重试）：强制使用原 task.runtime_id 同机重跑，
     跳过 pick_engine，不换机器。原 runtime_id 不可用（下线/不健康）→ 返回 4xx 错误，不切换。
 
     Issue #2547：入队失败一律显式 409/500（事件留可读失败原因），回执 task_id
     只为真实任务 id 或 null（附 note），不再用 "(new)" 占位冒充成功。
+    Issue #4345：失败审计记 redispatch_failed + dispatch=failed（附 reason/
+    candidate_base_url），成功仅在真正派发成功时记 dispatch=ok；失败日志单点 emit。
     """
-    # Issue #587：重派操作强制审计留痕；Issue #2547：留痕点移至出口并与主流程结果
-    # 对齐——成功记 redispatch（带真实 task_id），失败记 redispatch_failed（附原因），
-    # 不再把失败重派记为成功。主流程任何失败（含入队失败/引擎不可用/被拦）也必须留痕。
-    # QA 复审 Spec-3：非 HTTP 异常裸抛同样兜底记审计后原样抛出。
-    try:
-        _result = _redispatch_event(seq=seq, local_only=local_only, user=user, skip_debounce=False)
-    except HTTPException as _he:
-        _audit_admin_action(_redispatch_audit_repo_key(seq), seq, "redispatch_failed", user,
-                            error=str(_he.detail)[:200])
-        raise
-    except Exception as _e:
-        _audit_admin_action(_redispatch_audit_repo_key(seq), seq, "redispatch_failed", user,
-                            error=f"{type(_e).__name__}: {_e}"[:200])
-        raise
-    _audit_admin_action(_redispatch_audit_repo_key(seq), seq, "redispatch", user,
-                        task_id=str((_result or {}).get("task_id") or ""))
-    return _result
+    return _run_redispatch(seq, local_only=local_only, user=user, skip_debounce=False)
 
 
 def redispatch_event_internal(seq: int, user: dict):
@@ -898,19 +1055,7 @@ def redispatch_event_internal(seq: int, user: dict):
     HTTP 路由不暴露 skip_debounce，公共 API 的防抖行为不变（Issue #2517）。
     Issue #2547：出口审计与公共通道同款（成功/失败留痕对齐主流程结果）。
     """
-    try:
-        _result = _redispatch_event(seq=seq, local_only=False, user=user, skip_debounce=True)
-    except HTTPException as _he:
-        _audit_admin_action(_redispatch_audit_repo_key(seq), seq, "redispatch_failed", user,
-                            error=str(_he.detail)[:200])
-        raise
-    except Exception as _e:
-        _audit_admin_action(_redispatch_audit_repo_key(seq), seq, "redispatch_failed", user,
-                            error=f"{type(_e).__name__}: {_e}"[:200])
-        raise
-    _audit_admin_action(_redispatch_audit_repo_key(seq), seq, "redispatch", user,
-                        task_id=str((_result or {}).get("task_id") or ""))
-    return _result
+    return _run_redispatch(seq, local_only=False, user=user, skip_debounce=True)
 
 
 def _redispatch_audit_repo_key(seq: int) -> str:
@@ -919,6 +1064,100 @@ def _redispatch_audit_repo_key(seq: int) -> str:
         return (_load_event(seq) or {}).get("repo_key", "") or ""
     except Exception:
         return ""
+
+
+def _redispatch_a2a_event(seq: int, evt: dict):
+    """Issue #4345：A2A 事件重派（候选探测 → 派发 → 错误逐档映射）。
+
+    - 基址走 ``a2a_dispatch.resolve_a2a_dispatch_target``（与 takeover finish 同源）；
+      回退基址命中且候选均不可派发时短路，不发 POST；
+    - 上游 4xx → 422（detail 带 candidate_base_url/source/upstream_status/reason）；
+      上游 5xx / 传输异常 → 502（本端 5xx，原因标注传输层）；
+    - 入口幂等/接管/自循环闸的 409 由更早的守卫维护，本函数只保留
+      「A2A 返回非 ok」的 409 语义（既有行为不变）。
+    """
+    import json as _json
+    from src.api import a2a_dispatch as _a2ad
+    _target: dict = {}
+    try:
+        _payload = evt.get("payload") or evt.get("payload_raw") or "{}"
+        if isinstance(_payload, str):
+            _payload = _json.loads(_payload)
+        _repo_key = evt.get("repo_key", "") or ""
+        _bot_token = ""
+        try:
+            from src.domains.mgmt.public import get_repo_bot_token_no_global
+            _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
+        except Exception:
+            pass
+        _target = _a2ad.resolve_a2a_dispatch_target(0)
+        _a2a_base = (_target.get("base") or "").rstrip("/")
+        _source = _target.get("source") or ""
+        _candidates = [c.get("base_url") if isinstance(c, dict) else c
+                       for c in (_target.get("candidates") or [])]
+        _candidate_base = _target.get("candidate_base_url") or _a2a_base
+        if not _a2a_base:
+            raise _a2ad.A2AUnavailable(
+                "A2A base_url unresolved",
+                reason=_target.get("reason") or "A2A base_url unresolved",
+                source=_source, candidates=_candidates)
+        if not _target.get("verified"):
+            # 回退命中且候选均不可派发：短路（不发 POST），回执 422 +
+            # candidate_base_url/source/upstream_status/reason。
+            raise _a2ad.A2AUnavailable(
+                f"A2A 候选基址不可派发：{_a2a_base}",
+                base_url=_candidate_base or _a2a_base, source=_source,
+                reason=_target.get("reason") or "候选基址双重校验未通过",
+                candidates=_candidates,
+                hint="请显式指定可用的 A2A base_url（--base-url）后重试")
+        _a2a_result = _a2ad.dispatch_a2a(
+            _a2a_base,
+            {"agent": evt.get("agent_type", ""), "payload": _payload},
+            headers={"X-Bot-Token": _bot_token},
+            timeout=30.0,
+        )
+        if _a2a_result.get("status") == "ok":
+            _new_seq = _a2a_result.get("seq", 0)
+            log.info(f"[redispatch] seq={seq} a2a re-dispatch ok, new seq={_new_seq}")
+            # Issue #600：原事件标记 cancelled（被新事件接管，非失败态），
+            # 避免流水线卡片/segments 长期残留失败红卡片
+            _mark_event_redispatched(seq, _new_seq, "A2A")
+            try:
+                from src.domains.mgmt.public import set_meta_value as _smv  # 跨域走 owner public
+                import time as _tm
+                _smv(f"redispatch:{seq}", str(_tm.time()))
+            except Exception:
+                pass
+            from src.api.event_store import mark_event_redispatch_of as _mark_redisp
+            _mark_redisp(_new_seq, seq)
+            return _redispatch_success(None, _new_seq, original_seq=seq,
+                                       note="重派走 A2A 事件重建（新 seq 接管），无新 agent 任务")
+        raise HTTPException(status_code=409, detail={"code": 409,
+            "message": f"重派失败：A2A 重新交办未成功（{_a2a_result.get('status', 'unknown')}）"})
+    except HTTPException:
+        raise
+    except _a2ad.A2ADispatchError as _de:  # noqa: BLE001 — 已分类，逐档映射
+        _code = _a2ad.classify_dispatch_http_status(_de)
+        _detail = _de.as_detail(_code)
+        # 补齐候选基址 / 来源（异常自身可能没带，回落到解析结果）。
+        if not _detail.get("candidate_base_url"):
+            _detail["candidate_base_url"] = (_target.get("candidate_base_url")
+                                             or _de.base_url or "")
+        if not _detail.get("source"):
+            _detail["source"] = _target.get("source") or _de.source or ""
+        if _code == 422:
+            _detail.setdefault("hint", "重派通道不可用，请显式指定可用的 A2A "
+                                       "base_url（--base-url）后重试")
+        # 单点 error 行由出口包装 _run_redispatch 统一 emit（避免 seq='' 幽灵行）。
+        raise HTTPException(status_code=_code, detail=_detail) from _de
+    except Exception as _e:  # noqa: BLE001 — 未分类异常归本端 5xx（传输层）
+        _reason = f"重派派发异常（传输层）：{type(_e).__name__}: {str(_e)[:200]}"
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "message": _reason[:300], "reason": _reason,
+            "candidate_base_url": _target.get("candidate_base_url") or "",
+            "source": _target.get("source") or "",
+            "upstream_status": 0,
+        }) from _e
 
 
 def _enqueue_task_verified(seq: int, **enqueue_kwargs) -> str:
@@ -1123,6 +1362,46 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
     except Exception as _e:
         log.warning(f"[redispatch] ledger/skip check failed (allow-through): {_e}")
 
+    # 1.0b）Issue #4088：评论族事件重派的派发幂等守卫——(repo, agent, comment_id)
+    # 命中且 event_seq 不同（跨 seq 重放）→ 拒绝重派并回显命中事件 seq（该评论
+    # 已有首派事件，重复重派会再次送达同一 Agent 产生重复回执）；同 seq（本事件
+    # 自身恢复）放行。无 cid / 非评论事件不拦截。
+    try:
+        _evt_type_4088 = evt.get("event_type", "") or ""
+        from src.domains.runtime.pipeline.event_pipeline import (
+            _COMMENT_EVENT_TYPES as _comment_evt_types_4088,
+        )
+        if _evt_type_4088 in _comment_evt_types_4088:
+            _pl_4088 = evt.get("payload") or {}
+            if isinstance(_pl_4088, str):
+                try:
+                    import json as _pj4088
+                    _pl_4088 = _pj4088.loads(_pl_4088)
+                except Exception:
+                    _pl_4088 = {}
+            if isinstance(_pl_4088, dict):
+                from src.kernel.repo_key import parse_repo_key as _prk4088
+                from src.kernel.outbound_ledger import extract_event_content_id as _xid4088
+                from src.api.event_store import comment_dispatch_guard_allows_redispatch
+                _prov4088 = _prk4088(evt.get("repo_key", "") or "")[0]
+                _cid4088 = extract_event_content_id(_prov4088, _pl_4088)
+                if _cid4088:
+                    _gate4088 = comment_dispatch_guard_allows_redispatch(
+                        evt.get("repo_key", "") or "",
+                        evt.get("agent_type", "") or "", _cid4088, seq)
+                    if not _gate4088.get("allowed"):
+                        _hit4088 = int(_gate4088.get("hit_seq") or 0)
+                        log.info(f"[redispatch] seq={seq} blocked: comment_id={_cid4088} "
+                                 f"already dispatched at seq={_hit4088} (duplicate_comment_dispatch)")
+                        raise HTTPException(status_code=409, detail={"code": 409,
+                            "message": f"重复评论派发：comment_id={_cid4088} 已有派发事件 "
+                                       f"seq={_hit4088}，请改为重派该事件",
+                            "idempotent": True, "idempotent_hit_seq": _hit4088})
+    except HTTPException:
+        raise
+    except Exception as _e4088:
+        log.warning(f"[redispatch] comment dispatch guard check failed (allow-through): {_e4088}")
+
     # 1.5）onboarding 主事件重派 → 任务级自愈（Issue #46 重构后兼容）：
     #     历史 onboarding_exp/onboarding_explore 事件仍可能被 redispatch；onboarding 后端已改为「按模板创建标准任务」，
     #     旧事件映射到新任务 type（onboarding_exp→experience，onboarding_explore→dev）后走 retry_onboarding_task 补建。
@@ -1213,7 +1492,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
                 # 本机 direct 引擎 → 直接触发执行（复用原行，task_id 不变）
                 if _cid == 0:
                     try:
-                        from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
+                        from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
                         from src.domains.runtime.engine.engine_select import engine_name as _en
                         from src.kernel.repo_key import from_repo_key as _frk
                         _be = _en(_orig_rid) or ""
@@ -1256,7 +1535,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
         try:
             from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
             _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
-                                    old.get("issue_id") or "")
+                                    old.get("issue_id") or "", _task_pr_number(old))
         except Exception:
             _cwd = old.get("cwd") or ""
         _is_local_direct = (_cid == 0)
@@ -1288,7 +1567,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
         # 本机 direct 引擎 → 触发直接执行
         if _is_local_direct and _new_task_id:
             try:
-                from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
+                from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
                 from src.domains.runtime.engine.engine_select import engine_name as _en
                 from src.kernel.repo_key import from_repo_key as _frk
                 _be = _en(_orig_rid) or ""
@@ -1430,7 +1709,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
                     from src.domains.runtime.engine.service import runtime_credential_id
                     _cid = runtime_credential_id(_new_rid) or 0
                     if _cid == 0:
-                        from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
+                        from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
                         from src.domains.runtime.engine.engine_select import engine_name
                         from src.kernel.repo_key import from_repo_key as _frk2
                         _be = engine_name(_new_rid) or ""
@@ -1589,7 +1868,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
             try:
                 from src.domains.runtime.engine.service import runtime_credential_id
                 if (runtime_credential_id(_q_rid) or 0) == 0:
-                    from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
+                    from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
                     from src.domains.runtime.engine.engine_select import engine_name as _en
                     from src.kernel.repo_key import from_repo_key as _frk
                     _q_be = _en(_q_rid) or ""
@@ -1790,7 +2069,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
                 try:
                     from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
                     _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
-                                            old.get("issue_id") or "")
+                                            old.get("issue_id") or "", _task_pr_number(old))
                 except Exception:
                     _cwd = old.get("cwd") or ""
 
@@ -1831,7 +2110,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
                 # 现贴证广播下 _rid=0 是合法结局（等绑定引擎认领），必须只入队不直跑。
                 if _is_local_direct and _new_task_id and _rid > 0:
                     try:
-                        from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
+                        from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
                         from src.domains.runtime.engine.engine_select import engine_name as _en
                         from src.kernel.repo_key import from_repo_key as _frk
                         _be = _en(_rid) or ""
@@ -1896,63 +2175,8 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
                     raise HTTPException(status_code=500, detail={"code": 500, "message": f"重派异常: {str(e)[:100]}"})
 
             if _event_type == "a2a_event":
-                try:
-                    _payload = evt.get("payload") or evt.get("payload_raw") or "{}"
-                    if isinstance(_payload, str):
-                        _payload = _json.loads(_payload)
-                    _repo_key = evt.get("repo_key", "") or ""
-                    _bot_token = ""
-                    try:
-                        from src.domains.mgmt.public import get_repo_bot_token_no_global
-                        _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
-                    except Exception:
-                        pass
-                    import urllib.request as _url_req
-                    _a2a_body = _json.dumps({"agent": evt.get("agent_type", ""), "payload": _payload}).encode()
-                    # Issue #1858：A2A 派发改用 A2A 控制面基址（含可选网关 /a2a 前缀），
-                    # 不再复用业务/runtime 网关地址。
-                    from src.kernel.prompt_builder import resolve_a2a_base
-                    _a2a_base = resolve_a2a_base()
-                    if not _a2a_base:
-                        raise RuntimeError("A2A base_url unresolved")
-                    _a2a_req = _url_req.Request(
-                        f"{_a2a_base}/api/a2a",
-                        data=_a2a_body,
-                        headers={"Content-Type": "application/json", "X-Bot-Token": _bot_token},
-                        method="POST"
-                    )
-                    with _url_req.urlopen(_a2a_req, timeout=30) as _a2a_resp:
-                        _a2a_result = _json.loads(_a2a_resp.read().decode())
-                    if _a2a_result.get("status") == "ok":
-                        _new_seq = _a2a_result.get("seq", 0)
-                        log.info(f"[redispatch] seq={seq} a2a re-dispatch ok, new seq={_new_seq}")
-                        # Issue #600：原事件标记 cancelled（被新事件接管，非失败态），
-                        # 避免流水线卡片/segments 长期残留失败红卡片
-                        _mark_event_redispatched(seq, _new_seq, "A2A")
-                        try:
-                            from src.domains.mgmt.public import set_meta_value as _smv  # 跨域走 owner public
-                            import time as _tm
-                            _smv(f"redispatch:{seq}", str(_tm.time()))
-                        except Exception:
-                            pass
-                        from src.api.event_store import mark_event_redispatch_of as _mark_redisp
-                        _mark_redisp(_new_seq, seq)
-                        return _redispatch_success(None, _new_seq, original_seq=seq,
-                                                   note="重派走 A2A 事件重建（新 seq 接管），无新 agent 任务")
-                    else:
-                        raise HTTPException(status_code=409, detail={"code": 409,
-                            "message": f"重派失败：A2A 重新交办未成功（{_a2a_result.get('status', 'unknown')}）"})
-                except HTTPException:
-                    raise
-                except Exception as e:
-                    from src.kernel.prompt_builder import format_base_url_candidates
-                    try:
-                        _candidates = format_base_url_candidates("/api/a2a")
-                    except Exception:
-                        _candidates = ""
-                    log.warning(f"[redispatch] seq={seq} a2a re-dispatch failed: {e}; {_candidates}")
-                    raise HTTPException(status_code=500, detail={"code": 500,
-                        "message": f"重派异常: {str(e)[:100]}；{_candidates}"})
+                # Issue #4345：候选探测 + 错误逐档映射已收敛到 _redispatch_a2a_event。
+                return _redispatch_a2a_event(seq, evt)
 
             # 非 A2A 事件：从 events 表恢复参数重走 run_pipeline
             # 构建最小 webhook evt，复用 run_pipeline 路由+引擎选择+入队/执行
@@ -3053,15 +3277,16 @@ def list_events(owner: str, repo: str,
                       page_size: int = Query(20, ge=1, le=100),
                       status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
                       user: dict = Depends(get_current_user_or_api_key)):
-    from src.kernel.repo_key import to_repo_key, repo_key_candidates
+    from src.kernel.repo_key import to_repo_key, repo_key_candidates_ci, same_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
-    # 候选键卡派生（原写死 gitcode/github 两家 → gitee/gitlab 仓的事件恒不可见）
-    _cand = set(repo_key_candidates(f"{owner}/{repo}"))
+    # 候选键卡派生 + 仓登记实际大小写（Issue #3397：全小写路径也要命中实际大小写行）
+    _cand = set(repo_key_candidates_ci(f"{owner}/{repo}"))
 
     # tk_ 会话 token：限定其绑定仓库（防 Agent 跨仓库读事件列表）
+    # Issue #3397：token 签发写法与请求路径大小写可能不同 → 大小写不敏感比对。
     if user.get("auth_type") == "session_token":
         _tok_repo = user.get("repo_key") or ""
-        if _tok_repo and _tok_repo not in _cand:
+        if _tok_repo and not any(same_repo_key(_tok_repo, _k) for _k in _cand):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 无权访问该仓库事件"})
 
     # 权限校验：用户必须有权访问该仓库

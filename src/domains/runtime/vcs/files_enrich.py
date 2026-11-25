@@ -30,13 +30,17 @@ def _pr_number(payload: dict) -> str:
             return str(n)
     oa = payload.get("object_attributes") or {}
     if isinstance(oa, dict):
+        # Issue #3375：GitCode Note Hook 仅带 noteable_iid/url，无 PR 对象；
+        # noteable_type=Issue 时该字段是 Issue 号，不能当 PR 号。
         n = oa.get("iid") or oa.get("number") or ""
+        if not n and oa.get("noteable_type") != "Issue":
+            n = oa.get("noteable_iid") or ""
         if n:
             return str(n)
     return str(payload.get("pr_number") or "")
 
 def fetch_files_via_api(source: str, payload: dict, repo_key: str, token: str,
-                        provider: str = "") -> list:
+                        provider: str = "", pr_number="") -> list:
     """调 provider API 取事件变更文件原始列表（供 normalize_files 归一）。
 
     - PR 事件：/pulls/{number}/files 全量翻页（与 merge gate 同源能力）；
@@ -51,7 +55,9 @@ def fetch_files_via_api(source: str, payload: dict, repo_key: str, token: str,
     if not owner or not repo:
         return []
 
-    pr_num = _pr_number(payload)
+    # Issue #3375：调用方已知 PR 号时优先使用，避免 payload 形态差异导致解析失败。
+    from src.kernel.pr_scope import normalize_pr_number
+    pr_num = normalize_pr_number(pr_number) or _pr_number(payload)
     if pr_num:
         files: list = []
         for page in range(1, _MAX_PAGES + 1):

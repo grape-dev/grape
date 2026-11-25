@@ -1,6 +1,6 @@
 """Webhook & A2A 端点 — 集成事件管道"""
-import hashlib
 import json, os, time
+from typing import Optional
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -124,11 +124,34 @@ def _token_fingerprint(value: str) -> str:
     是「平台端 Secret 与 Grape 端配置不同」还是「请求根本没带 token」。两端各打指纹后，
     看一眼日志即可区分（相同 = 配置一致但比对失败的另一类问题；不同 = Secret 不一致；
     absent = 平台没带）。绝不打印明文（验收 C-3）。
+
+    Issue #3750：指纹实现收敛到 `insight.webhook_rejects.token_fingerprint`——日志与落库
+    （`grape_t_obs_webhook_rejects.token_fp/expected_fp`）必须是**同一套**口径，否则按日志查表会错配。
+    本函数只保留薄包装（#3897 源级用例断言的是这个名字）。
     """
-    _v = str(value or "")
-    if not _v:
-        return "absent"
-    return "sha256:" + hashlib.sha256(_v.encode("utf-8")).hexdigest()[:12]
+    from src.domains.insight.public import token_fingerprint
+    return token_fingerprint(value)
+
+
+def _reject_reason(token: str) -> str:
+    """403 拒绝原因（`absent`/`mismatch`）：与落库口径共用 insight 侧唯一实现（Issue #3750）。"""
+    from src.domains.insight.public import reject_reason
+    return reject_reason(token)
+
+
+def _record_webhook_reject(repo: str, provider: str, event: str, ip: str,
+                           token: str, expected: str) -> None:
+    """落一条拒绝事实（Issue #3750）。诊断链路任何异常都不得影响 403 返回。
+
+    指纹/理由由 insight 侧统一计算（`record_webhook_reject`），本处只传原始值——
+    避免「日志里算一套、落库里算另一套」导致按日志查表错配。
+    """
+    try:
+        from src.domains.insight.public import record_webhook_reject
+        record_webhook_reject(repo_key=f"{provider}:{repo}", provider=provider,
+                              event=event, ip=ip, token=token, expected=expected)
+    except Exception as e:  # noqa: BLE001 - 拒绝事实是诊断数据，403 语义优先
+        log.debug(f"webhook reject ledger skipped repo={repo}: {e}")
 
 
 def _is_repo_delete_event(event_header: str, payload: dict) -> bool:
@@ -1061,7 +1084,7 @@ async def gitcode_webhook(request: Request):
     gh_event = request.headers.get("X-GitHub-Event", "")
     if gh_event:
         log.info(f"GitCode webhook: GitHub event detected ({gh_event}), processing as GitHub webhook")
-        return await _process_github_webhook(body, request.headers)
+        return await _process_github_webhook(body, request.headers, request)
 
     token = request.headers.get("X-GitCode-Token", "")
     event_header = request.headers.get("X-Gitcode-Event", "unknown")
@@ -1080,15 +1103,24 @@ async def gitcode_webhook(request: Request):
         log.warning("Webhook: invalid JSON body")
         return JSONResponse(status_code=400, content={"code": 400, "message": "invalid body"})
 
+    # Issue #3397：优先 repository.full_name（VCS 实际路径，大小写权威），
+    # project.path_with_namespace 仅在缺失时回退（webhook 该字段可能被归一为全小写）。
     repo = ""
-    if "project" in payload and isinstance(payload["project"], dict):
-        repo = payload["project"].get("path_with_namespace", "")
-    if not repo and "repository" in payload and isinstance(payload["repository"], dict):
-        repo = payload["repository"].get("full_name", "")
+    if isinstance(payload.get("repository"), dict):
+        repo = payload["repository"].get("full_name", "") or ""
+    if not repo and isinstance(payload.get("project"), dict):
+        repo = payload["project"].get("path_with_namespace", "") or ""
 
     if not repo:
         log.warning("Webhook: could not extract repo from payload")
         return JSONResponse(status_code=400, content={"code": 400, "message": "missing repository"})
+
+    # Issue #3397：按已存登记回填权威大小写，避免全小写路径导致 managed_repos 查不到
+    try:
+        from src.kernel.repo_key import canonicalize_repo_full_name
+        repo = canonicalize_repo_full_name(repo, "gitcode") or repo
+    except Exception as e:
+        log.warning(f"Webhook: canonicalize repo path failed (repo={repo}): {e}")
 
     log.info(f"Webhook: extracted repo={repo}")
 
@@ -1100,17 +1132,27 @@ async def gitcode_webhook(request: Request):
 
     # 3. 未托管仓库拒绝：不在 managed_repos 的仓库不接收事件（防止幽灵 webhook / 无主事件 / 绕过校验）
     if not expected:
-        log.warning(f"Webhook rejected: unmanaged repo={repo}")
+        # Issue #3750：与 403 同口径带 event/ip——unmanaged 404 同样要能脱离 request_id 定位来源
+        log.warning(f"Webhook rejected: unmanaged repo={repo} event={event_header} "
+                    f"ip={client_host} xff={xff or 'none'}")
         return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
 
     # 4. token 对比验证（Issue #860：hmac.compare_digest 恒定时间比较，防时序侧信道）
     import hmac
     if not hmac.compare_digest(str(token), str(expected)):
         # Issue #3897：带两端指纹与来源 IP（不含明文），运维可直接定位 Secret 不一致。
+        # Issue #3750：再补 event/reason（absent=平台没带 token，mismatch=Secret 不一致），
+        # 并落一条拒绝事实（速率告警 + (ip, token_fp) 反查残留旧 secret）。
+        _reason = _reject_reason(token)
+        # 字段名对齐 Issue #3750 验收（token_fp=实收 / expected_fp=期望）；值仍是
+        # #3897 的 `sha256:<12>` 短指纹（不可逆、不含任何前缀）。
         log.warning(f"Webhook rejected: token mismatch for repo={repo} "
-                    f"expected={_token_fingerprint(expected)} "
-                    f"actual={_token_fingerprint(token)} "
+                    f"event={event_header} "
+                    f"token_fp={_token_fingerprint(token)} "
+                    f"expected_fp={_token_fingerprint(expected)} "
+                    f"reason={_reason} "
                     f"ip={client_host} xff={xff or 'none'}")
+        _record_webhook_reject(repo, "gitcode", event_header, client_host, token, expected)
         return JSONResponse(status_code=403, content={"code": 403, "message": "invalid webhook token"})
 
     log.info(f"Webhook: token OK, repo={repo}, event={event_header}")
@@ -1143,14 +1185,23 @@ async def gitcode_webhook(request: Request):
 async def github_webhook(request: Request):
     """接收 GitHub Webhook 事件"""
     body = await request.body()
-    return await _process_github_webhook(body, request.headers)
+    return await _process_github_webhook(body, request.headers, request)
 
 
-async def _process_github_webhook(body: bytes, headers) -> dict:
-    """GitHub Webhook 核心处理逻辑（body 已消费，直接传入）。"""
+async def _process_github_webhook(body: bytes, headers, request: Optional[Request] = None) -> dict:
+    """GitHub Webhook 核心处理逻辑（body 已消费，直接传入）。
+
+    `request` 可选：路由入口传入后即可拿到 `client.host`，使 403/404 日志与
+    `grape_t_obs_webhook_rejects.ip` 与 GitCode 入口同口径（否则该列恒空、无法按来源反查残留 hook）。
+    直接调用的测试/内部路径不传时退化为空 IP（行为与改造前一致）。
+    """
     event_header = headers.get("X-GitHub-Event", "unknown")
 
-    client_host = ""  # 转发场景下无 client 信息
+    client_host = ""
+    xff = ""
+    if request is not None:
+        client_host = request.client.host if request.client else "unknown"
+        xff = request.headers.get("X-Forwarded-For", "") or ""
     log.info(f"GitHub Webhook: event={event_header}, body_size={len(body)}")
 
     try:
@@ -1171,7 +1222,9 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
     expected = _expected_webhook_token(repo, "github")
 
     if not expected:
-        log.warning(f"GitHub Webhook rejected: unmanaged repo={repo}")
+        # Issue #3750：404 与 403 同口径带 event/ip（request 传入后本入口同样有来源 IP）
+        log.warning(f"GitHub Webhook rejected: unmanaged repo={repo} event={event_header} "
+                    f"ip={client_host} xff={xff or 'none'}")
         return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
 
     # GitHub webhook 验证（安全加固）：至少提供一种凭据且校验通过才放行。
@@ -1187,13 +1240,22 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
     if signature:
         computed = hmac.new(expected.encode(), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(f"sha256={computed}", signature):
-            log.warning(f"GitHub Webhook rejected: signature mismatch for repo={repo}, body_size={len(body)}")
+            # Issue #3750：签名类拒绝不是 token 比对，不落 token 指纹行，但同样要能定位事件来源
+            log.warning(f"GitHub Webhook rejected: signature mismatch for repo={repo}, "
+                        f"event={event_header}, ip={client_host}, body_size={len(body)}")
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid signature"})
     else:
         if not hmac.compare_digest(str(token_header), str(expected)):
+            # Issue #3750：补 event/reason 并落拒绝事实（与 GitCode 同口径，ip 本入口不可得）
+            _reason = _reject_reason(token_header)
             log.warning(f"GitHub Webhook rejected: token mismatch for repo={repo} "
-                        f"expected={_token_fingerprint(expected)} "
-                        f"actual={_token_fingerprint(token_header)}")
+                        f"event={event_header} "
+                        f"token_fp={_token_fingerprint(token_header)} "
+                        f"expected_fp={_token_fingerprint(expected)} "
+                        f"reason={_reason} "
+                        f"ip={client_host} xff={xff or 'none'}")
+            _record_webhook_reject(repo, "github", event_header, client_host,
+                                   token_header, expected)
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid token"})
 
     log.info(f"GitHub Webhook: verified, repo={repo}, event={event_header}")
@@ -1268,7 +1330,8 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
     _raw_session_info = verify_session_token(_auth)
     if _raw_session_info and _raw_session_info.get("repo_key"):
         _session_repo = _raw_session_info["repo_key"]
-        if _session_repo != repo_key:
+        from src.kernel.repo_key import same_repo_key as _same_session_repo
+        if not _same_session_repo(_session_repo, repo_key):
             # 检查 1: 两仓 bot token 相同（同一运维主体）
             _session_bot_token = get_repo_bot_token_no_global(_session_repo) or ""
             if _session_bot_token and _session_bot_token == _expected:
@@ -1436,6 +1499,33 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     }
 
 
+def _handoff_target_scene_owner_uid(repo_key: str, scene_id: str) -> int | None:
+    """目标场景归属人（账号 id）；解析不出返回 None（调用方保持 Issue 原归属人）。
+
+    为什么需要：交办把 Issue 绑定场景切到目标场景时，原实现调 `set_issue_scene`
+    不传归属人 → 写 0，把原场景时期已绑定的归属人冲成 0；此后 a2a listener 按
+    Issue 场景取 task.user_id=0，scope=user 的个人引擎在 claim_by_tag 的 scope
+    过滤里永远领不到（任务永久 queued，且无任何日志）。这里用场景 created_by
+    （平台账号名）→ 账号 id 回填，取不到就传 None 让 set_issue_scene 保留旧值，
+    绝不写 0。
+    """
+    from src.kernel.config import log
+    try:
+        from src.domains.mgmt import public as _mg_pub
+        _creator = _mg_pub.scene_created_by_any(scene_id, repo_key)
+        if not _creator:
+            log.info(f"A2A #568: target scene {scene_id} has no created_by, keep issue scene_user_id unchanged")
+            return None
+        _uid = _mg_pub.account_id_by_username_ci_any(_creator)
+        if _uid:
+            return int(str(_uid).strip())
+        log.info(f"A2A #568: target scene {scene_id} created_by={_creator} 未注册平台账号, "
+                 f"keep issue scene_user_id unchanged")
+    except Exception as _e:
+        log.warning(f"A2A #568: resolve target scene owner failed (scene={scene_id}): {_e}")
+    return None
+
+
 def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_scene_id: str) -> str:
     """Issue #568: 跨流水线移交后刷新 issue 绑定场景为目标场景有效 ID。
 
@@ -1443,6 +1533,10 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
     绑定场景刷新为 DB 行 scene_id（有效 ID 归一）；后续 agent 任务经
     `_resolve_scene_id` → `get_issue_scene` 注入的 GRAPE_SCENE_ID 即为该有效 ID，
     且可通过 `scenes detail` 查询且节点有效。
+
+    归属人一并刷新：按目标场景 created_by 解析账号 id
+    写入 Issue 的 scene_user_id；解析不出时传 None → set_issue_scene 保留旧值，
+    不再把已绑定的归属人冲成 0。
 
     返回刷新后的有效 scene_id；目标场景 DB 行不存在时返回空串（软失败——
     移交主流程已通过 get_pipeline_config 兜底口径校验节点，这里仅收紧
@@ -1461,8 +1555,10 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
         return ""
     try:
         from src.api.session_store import set_issue_scene
-        set_issue_scene(repo_key, f"#{issue_number}", effective_scene_id)
-        log.info(f"A2A #568: issue scene refreshed to effective scene={effective_scene_id} (issue=#{issue_number})")
+        _owner_uid = _handoff_target_scene_owner_uid(repo_key, effective_scene_id)
+        set_issue_scene(repo_key, f"#{issue_number}", effective_scene_id, scene_user_id=_owner_uid)
+        log.info(f"A2A #568: issue scene refreshed to effective scene={effective_scene_id} "
+                 f"(issue=#{issue_number}, uid={_owner_uid if _owner_uid is not None else 'preserve'})")
     except Exception as _e:
         log.warning(f"A2A #568: issue scene refresh failed: {_e}")
     return effective_scene_id
@@ -2416,7 +2512,12 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             from src.domains.mgmt.public import get_managed_repos
             managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
             if repo_key not in managed:
-                raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
+                # Issue #3427：a2a 403 与 token 类错误解耦——此处失败与凭据无关，
+                # 是 user_repos 未关联（未同步/未加入该仓库），文案指向关联动作。
+                raise HTTPException(status_code=403, detail={
+                    "code": 403, "error_code": "REPO_NOT_BOUND_TO_USER",
+                    "message": "当前用户未关联该仓库（user_repos 无关联记录，与凭据无关）："
+                                "请先在仓库列表同步/加入该仓库，或由托管人在仓库成员中添加后再发起 A2A"})
         else:
             # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
             _a2a_session_info = _authorize_a2a(request, repo_key)
@@ -2564,6 +2665,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
 
         # 鉴权：用户级身份（JWT/API Key，校验托管仓库）或内部 bot/会话 token（_authorize_a2a）
 
+        import asyncio as _aio  # Issue #3349：本端点内同步 VCS 调用统一经它卸载到线程
+
         # Issue #671：注册表未命中 → GitCode 可达性回退（鉴权之后执行，
         # 未认证调用方不触发外呼，维持原 400 not hosted 拒绝语义）。
         # 仅以下认证形态触发回退：JWT/API Key 用户、或会话 token 有效
@@ -2576,7 +2679,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 _fb_hint = {"user_id": _a2a_session_info.get("user_id") or 0,
                             "username": _a2a_session_info.get("username") or ""}
             if _fb_hint is not None:
-                _verdict = _a2a_repo_fallback_check(repo_key, _fb_hint)
+                # Issue #3349：可达性回退是同步 VCS 调用（get_repo_info），卸载到线程，
+                # 避免 async 端点在上游变慢时独占事件循环。
+                _verdict = await _aio.to_thread(_a2a_repo_fallback_check, repo_key, _fb_hint)
                 if _verdict == "ok":
                     # 放行 + 幂等补录（自愈注册缺口，重复调用不产生重复行）
                     _a2a_register_repo(repo_key)
@@ -2596,7 +2701,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # DB 快查命中（平台已知 Issue）→ 放行不外呼；VCS 明确 404 → 400；
         # 网络/无 token（unknown）→ 放行，不误杀正常链路。
         if issue_number and not _issue_exists_in_db(repo_key, issue_number):
-            _issue_verdict = _issue_vcs_verdict_cache or _a2a_issue_vcs_check(repo_key, issue_number)
+            # Issue #3349：存在性校验同样是同步 VCS 调用（get_issue），卸载到线程。
+            _issue_verdict = _issue_vcs_verdict_cache or await _aio.to_thread(
+                _a2a_issue_vcs_check, repo_key, issue_number)
             if _issue_verdict == "not_found":
                 log.info(f"A2A #755: rejected — issue #{issue_number} not found in target repo {repo_key}")
                 raise HTTPException(status_code=400, detail={
@@ -2739,8 +2846,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             "hint": "retry with the same idempotency_key, or verify via GET /api/a2a/status",
         }), _a2a_degraded)
     try:
-        from src.domains.runtime.pipeline.event_pipeline import _execute_agent
-        from src.kernel.session_manager import db_lock
+        from src.domains.runtime.engine.direct_executor import _execute_agent
+        from src.kernel.session_manager import db, db_lock
         backend = ""
         # payload.runtime_id 优先（接管场景：指定路由到本机 worker）
         runtime_id = int(payload.get("runtime_id", 0) or 0)
@@ -3408,7 +3515,10 @@ async def generic_vcs_webhook(provider: str, request: Request):
     # Issue #699 四进程：经 GSB 读 mgmt 域
     expected = _expected_webhook_token(repo, str(provider or "").lower())
     if not expected:
-        log.warning(f"generic webhook rejected: unmanaged repo={repo} provider={provider}")
+        # Issue #3750：unmanaged 拒绝补齐 event/来源 IP（与专用端点同口径）
+        _gip = request.client.host if request.client else "unknown"
+        log.warning(f"generic webhook rejected: unmanaged repo={repo} provider={provider} "
+                    f"event={event_header} ip={_gip}")
         return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
 
     # 验签策略分派（D12/S16）：hmac / token_compare

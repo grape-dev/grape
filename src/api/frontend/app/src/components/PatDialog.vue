@@ -24,12 +24,21 @@
           <input v-model="token" type="password" class="kb-input" :placeholder="t('paste_token')" />
         </div>
         <div v-if="error" class="pd__err">{{ error }}</div>
+        <div v-if="warning" class="pd__warn">
+          {{ warning }}
+          <a v-if="effectivePatUrl" :href="effectivePatUrl" target="_blank" rel="noopener noreferrer">{{
+            t('open_token_page')
+          }}</a>
+        </div>
         <details class="pd__help">
           <summary>{{ t('how_to_get_token') }}</summary>
           <div>{{ helpSteps }}</div>
         </details>
-        <button class="bt bt-p pd__wide" :disabled="busy || betaHint" @click="save()">
+        <button v-if="!warning" class="bt bt-p pd__wide" :disabled="busy || betaHint" @click="save()">
           {{ busy ? t('verifying') : t('save') }}
+        </button>
+        <button v-else class="bt bt-o pd__wide" @click="ackWarning()">
+          {{ t('close') }}
         </button>
       </div>
     </div>
@@ -61,9 +70,7 @@ const icon = computed(function () {
 })
 // 官方实测过的预选参数链接优先（与 BindDialog 同源），其余取平台卡 pat_create_url
 const PAT_CREATE_URLS = {
-  // Issue #4301：经典 PAT 必勾 repo / admin:repo_hook / workflow（缺 workflow 会被拒绝推送 .github/workflows）
-  github:
-    'https://github.com/settings/tokens/new?scopes=repo%2Cadmin%3Arepo_hook%2Cworkflow&description=Grape%20DevOps',
+  github: 'https://github.com/settings/tokens/new?scopes=repo,workflow,admin:repo_hook&description=Grape%20DevOps',
   gitcode: 'https://gitcode.com/setting/token-classic/create',
 }
 const effectivePatUrl = computed(function () {
@@ -85,6 +92,7 @@ const helpSteps = computed(function () {
 
 const token = ref('')
 const error = ref('')
+const warning = ref('')
 const busy = ref(false)
 
 function openBetaApply() {
@@ -103,10 +111,16 @@ watch(
     if (v) {
       token.value = ''
       error.value = ''
+      warning.value = ''
       busy.value = false
     }
   }
 )
+
+function ackWarning() {
+  warning.value = ''
+  emit('saved', props.provider)
+}
 
 function save() {
   const val = (token.value || '').trim()
@@ -118,20 +132,19 @@ function save() {
   error.value = ''
   const body = { platform_tokens: {} }
   body.platform_tokens[props.provider] = val
-  // Issue #4301（PR#2135 复审 R-2）：后端 verify_token 网络预算 30s（预检已
-  // 复用同一次 /user 响应、无第二次请求），前端预算必须覆盖它——15000 会在
-  // 慢网下误判失败而服务端已落库。
+  // Issue #4301: backend verify budget is 30s; a 15s client timeout reports
+  // failure while the server has already stored the credential.
   G.API.put('/settings/credentials', body, 35000)
-    .then(function (r) {
+    .then(function (resp) {
       busy.value = false
-      // Issue #4301：后端绑定期做 workflow 权限预检，缺权限/细粒度未知时回传
-      // scope_warnings；这里逐条提示，避免用户直到 push 被拒才发现。
-      // showToast 第二参是副标题而非类型（PR#2135 复审 O-4）：传 '' 不出
-      // 多余副标题，第三参给足阅读时长。
-      if (r && r.scope_warnings && r.scope_warnings.length) {
-        r.scope_warnings.forEach(function (w) {
-          if (G.app && G.app.showToast) G.app.showToast(w, '', 8000)
-        })
+      const warnings = (resp && resp.scope_warnings) || []
+      warnings.forEach(function (w) {
+        if (G.app && G.app.showToast) G.app.showToast(w, 'warning')
+      })
+      const missing = (resp && resp.missing_scopes && resp.missing_scopes[props.provider]) || []
+      if (missing.indexOf('workflow') >= 0) {
+        warning.value = t('github_workflow_scope_missing')
+        return
       }
       emit('saved', props.provider)
     })
@@ -217,6 +230,20 @@ function save() {
   padding: 4px 0;
   color: var(--r);
   font-size: 12px;
+}
+.pd__warn {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--c-warning);
+  border-radius: 8px;
+  background: var(--c-warning-soft);
+  color: var(--c-warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.pd__warn a {
+  margin-left: 6px;
+  text-decoration: underline;
 }
 .pd__help {
   margin: 8px 0;

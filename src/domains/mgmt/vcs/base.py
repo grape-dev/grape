@@ -59,20 +59,6 @@ class TokenCapability(ABC):
         """
         return {}
 
-    def verify_token_scopes(self, token: str) -> "tuple[dict, 'str | None']":
-        """Issue #4301：verify_token + 同一次请求响应里的 x-oauth-scopes 头。
-
-        绑定期 workflow 权限预检用（PR#2135 复审 R-2）：单次网络往返，不再
-        串行第二次 GET /user（30s + 15s 叠加会超出前端 PUT 绑定预算，慢网下
-        出现「前端判失败、服务端已落库」）。返回 (用户信息, scopes 头值)：
-        平台不返回该头（如 GitHub 细粒度 PAT）→ None（未知态，不阻断绑定）；
-        verify_token 覆写未走 _http 捕获 → 同样 None。
-        """
-        info = self.verify_token(token)
-        headers = getattr(self, "last_response_headers", None)
-        scopes = headers.get("x-oauth-scopes") if headers is not None else None
-        return info, scopes
-
     @abstractmethod
     def token_storage_field(self) -> str:
         """仓库级 bot token 存储列名。"""
@@ -216,15 +202,14 @@ class GenericVcsProvider(VCSProvider):
 
     def __init__(self, card):
         self._card = card
-        # Issue #4301：最近一次 _http 响应头（供 verify_token_scopes 复用）。
-        self.last_response_headers = None
 
     @property
     def provider_name(self) -> str:
         return self._card.provider
 
-    def _http(self, method: str, path: str, token: str, data: dict | None = None,
-              form: bool = False) -> dict:
+    def _http_with_headers(self, method: str, path: str, token: str,
+                           data: dict | None = None, form: bool = False,
+                           ) -> "tuple[dict, dict]":
         import json as _json
         import urllib.request
         import urllib.error
@@ -259,15 +244,13 @@ class GenericVcsProvider(VCSProvider):
                     ca_bundle=str(getattr(self._card, "ca_bundle", "") or ""),
                     allow_redirects=self._card.dialect != "gitlab",
             ) as resp:
-                # Issue #4301（PR#2135 复审 R-2）：捕获本次响应头——verify_token
-                # 的 /user 响应头里有 x-oauth-scopes，绑定期 workflow 预检直接
-                # 复用（单次网络往返），不再串行第二次 GET /user 叠加超时。
-                self.last_response_headers = getattr(resp, "headers", None)
                 _payload = _json.loads(resp.read().decode("utf-8"))
                 log.info(f"vcs upstream {self._card.provider} {method} "
                          f"{self._card.api_base}{_log_path} -> {getattr(resp, 'status', 200)} "
                          f"{( _time.monotonic() - _t0) * 1000:.0f}ms")
-                return _payload
+                # Issue #3386：响应头一并带出（X-OAuth-Scopes 等），调用方可复用
+                # 校验响应解析 scope，不再重复打一次 /user。
+                return _payload, dict(getattr(resp, "headers", {}) or {})
         except urllib.error.HTTPError as e:
             # 带上游响应体：4xx 的 {"message": ...} 才是可行动的诊断（建仓被拒等）
             try:
@@ -281,11 +264,19 @@ class GenericVcsProvider(VCSProvider):
                 f"{self._card.name} API {method} {path} failed ({e.code}): {e}"
                 + (f" | {_detail}" if _detail else "")) from e
 
-    def verify_token(self, token: str) -> dict:
-        info = self._http("GET", "/user", token)
+    def _http(self, method: str, path: str, token: str, data: dict | None = None,
+              form: bool = False) -> dict:
+        return self._http_with_headers(method, path, token, data=data, form=form)[0]
+
+    def verify_token_with_headers(self, token: str) -> "tuple[dict, dict]":
+        """校验 token 并带出响应头（Issue #3386：X-OAuth-Scopes 复用，免二次 /user）。"""
+        info, headers = self._http_with_headers("GET", "/user", token)
         if not isinstance(info, dict) or not info:
             raise RuntimeError(f"{self._card.name} token verify: empty user info")
-        return info
+        return info, headers
+
+    def verify_token(self, token: str) -> dict:
+        return self.verify_token_with_headers(token)[0]
 
     def resolve_repo_token(self, repo_key: str) -> str:
         """仓库 token 统一读链（2026-11-13 if/else 收口，基类能力）：
@@ -328,12 +319,15 @@ class GenericVcsProvider(VCSProvider):
         try:
             acc = _accounts.get_grape_account_by_username(owner)
             if acc:
-                for ident in _accounts.get_user_identities_with_tokens(acc["id"]):
+                # strict=True（Issue #3732）：mgmt 域读失败必须显式进入本分支并
+                # 标注原因——token 解析失败不得无声回落仓库 bot token。
+                for ident in _accounts.get_user_identities_with_tokens(acc["id"], strict=True):
                     if ident.get("provider") == self.provider_name and ident.get("access_token"):
                         return ident["access_token"]
         except Exception as e:
-            log.warning(f"fetch_owner_identity_token failed (provider={self.provider_name}, "
-                        f"owner={owner}): {e}")
+            log.warning(f"fetch_owner_identity_token failed "
+                        f"(credential_unavailable: mgmt_read_failed, "
+                        f"provider={self.provider_name}, owner={owner}): {e}")
         return ""
 
     def get_user_login(self, token: str) -> str:

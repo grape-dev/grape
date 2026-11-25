@@ -61,12 +61,22 @@
               />
             </div>
             <div v-if="patError" class="bd__err">{{ patError }}</div>
+            <div v-if="patWarning" class="bd__warn">
+              {{ patWarning }}
+              <a v-if="patUrl" :href="patUrl" target="_blank" rel="noopener noreferrer">{{
+                t('open_token_page')
+              }}</a>
+            </div>
             <details class="bd__help">
               <summary>{{ t('how_to_get_token') }}</summary>
               <div>{{ helpSteps }}</div>
             </details>
-            <button class="bt bt-p bd__wide" :disabled="busy" @click="savePat()">
+            <button v-if="!patWarning" class="bt bt-p bd__wide" :disabled="busy" @click="savePat()">
               {{ busy ? t('verifying') : t('confirm_bind') }}
+            </button>
+            <!-- 缺 workflow：保留弹窗展示预警与重新创建令牌入口，确认后再关闭/emit（Spec） -->
+            <button v-else class="bt bt-o bd__wide" @click="ackPatWarning()">
+              {{ t('close') }}
             </button>
           </div>
         </template>
@@ -154,6 +164,7 @@ const visible = ref(false)
 const tab = ref('oauth')
 const token = ref('')
 const patError = ref('')
+const patWarning = ref('')
 const busy = ref(false)
 const transferTicket = ref('')
 const transferError = ref('')
@@ -169,7 +180,7 @@ function openBetaApply() {
 
 // 官方实测过的预选参数链接优先；其余平台取平台卡 pat_create_url；都没有就不渲染按钮
 const PAT_CREATE_URLS = {
-  github: 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps',
+  github: 'https://github.com/settings/tokens/new?scopes=repo,workflow,admin:repo_hook&description=Grape%20DevOps',
   gitcode: 'https://gitcode.com/setting/token-classic/create',
 }
 const patUrl = computed(function () {
@@ -199,6 +210,7 @@ watch(
       tab.value = oauthConfigured.value ? 'oauth' : 'pat'
       token.value = ''
       patError.value = ''
+      patWarning.value = ''
       transferTicket.value = ''
       transferError.value = ''
       busy.value = false
@@ -356,24 +368,25 @@ function savePat() {
   patError.value = ''
   const body = { platform_tokens: {} }
   body.platform_tokens[props.provider] = val
-  // Issue #4301（PR#2135 复审 R-2）：后端 verify_token 网络预算 30s（预检已
-  // 复用同一次 /user 响应、无第二次请求），前端预算必须覆盖它——15000 会在
-  // 慢网下误判失败而服务端已落库。
+  // Issue #4301: backend verify budget is 30s; a 15s client timeout reports
+  // failure while the server has already stored the credential.
   G.API.put('/settings/credentials', body, 35000)
-    .then(function (r) {
+    .then(function (resp) {
       busy.value = false
-      // Issue #4301：绑定期 workflow 权限预检结果经 scope_warnings 返回，逐条提示。
-      // showToast 第二参是副标题而非类型（PR#2135 复审 O-4）：传 '' 不出
-      // 多余副标题，第三参给足阅读时长。
-      if (r && r.scope_warnings && r.scope_warnings.length) {
-        r.scope_warnings.forEach(function (w) {
-          if (G.app && G.app.showToast) G.app.showToast(w, '', 8000)
-        })
+      const warnings = (resp && resp.scope_warnings) || []
+      warnings.forEach(function (w) {
+        if (G.app && G.app.showToast) G.app.showToast(w, 'warning')
+      })
+      const missing = (resp && resp.missing_scopes && resp.missing_scopes[props.provider]) || []
+      if (missing.indexOf('workflow') >= 0) {
+        // Spec：缺 workflow 不立即 emit('bound')（父组件会立刻关弹窗/跳转，预警
+        // 与重新创建令牌入口不可达）。仿 PatDialog：保留弹窗，用户确认后再关闭。
+        patWarning.value = t('github_workflow_scope_missing')
+        return refreshRelations()
       }
-      return refreshRelations()
-    })
-    .then(function () {
-      bindOk()
+      return refreshRelations().then(function () {
+        bindOk()
+      })
     })
     .catch(function (e) {
       busy.value = false
@@ -384,6 +397,13 @@ function savePat() {
       }
       patError.value = translateError(e)
     })
+}
+
+function ackPatWarning() {
+  patWarning.value = ''
+  refreshRelations().then(function () {
+    bindOk()
+  })
 }
 
 function confirmTransfer() {
@@ -497,6 +517,20 @@ function confirmTransfer() {
   padding: 4px 0;
   color: var(--r);
   font-size: 12px;
+}
+.bd__warn {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--c-warning);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--c-warning) 8%, transparent);
+  color: var(--c-warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.bd__warn a {
+  margin-left: 6px;
+  text-decoration: underline;
 }
 .bd__help {
   margin: 8px 0;

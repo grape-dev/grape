@@ -96,7 +96,7 @@ from src.domains.runtime.im.channel.card import self_check_card_capabilities  # 
 from src.domains.runtime.im.channel.channel import ChannelConfig
 from src.domains.runtime.im.channel.message import InboundMessage
 from src.domains.runtime.im.channel.registry import ChannelRegistry, default_registry
-from src.domains.runtime.im.channel.types import MsgType, Scope, Type
+from src.domains.runtime.im.channel.types import ChatType, MsgType, Scope, Type
 
 from src.domains.runtime.im.engine.dedup import InboundDedup
 from src.domains.runtime.im.engine.egress import EGRESS_ENV, HandlerEgress, egress_mode, legacy_send_card_reply
@@ -483,6 +483,59 @@ def _legacy_installation_key(scope: str, owner_user_id: str, repo_key: str) -> s
 
 _feishu_api_cache: dict = {}
 
+# Issue #3735：无运行 loop 时不能当场调度关闭的 api 暂存于此，由 `ImEngine.stop()`
+# 统一收尾——调用点已经把它从缓存 pop 掉了，直接丢弃 = session 永久泄漏（契约 1）。
+_pending_api_closes: list = []
+
+# 调度出去的关闭 task 必须保留引用：否则可能在跑完前被 GC（关闭静默丢失、只剩
+# Unclosed warning），同时给测试提供确定性等待点（不必 sleep 猜时序）。
+_api_close_tasks: set = set()
+
+
+async def _close_api_quietly(api, app_id: str = "") -> None:
+    """关闭装配层持有的平台 api（FeishuAsync 等）——失败只 WARNING，绝不抛。
+
+    Issue #3735：FeishuAsync 懒建 `aiohttp.ClientSession`，装配层丢弃引用而不 close
+    时 session 只能等 GC，由 aiohttp 在回收时打 `Unclosed client session`（fd /
+    连接池随渠道重建次数累积）。收尾关闭属「关灯动作」，不能反向影响渠道切换与主流程。
+    """
+    close = getattr(api, "close", None)
+    if close is None:
+        return
+    try:
+        result = close()
+        if hasattr(result, "__await__"):
+            await result
+    except Exception as e:
+        log.warning("[im-engine] im api close failed app=%s: %r", app_id, e)
+
+
+def _schedule_api_close(api, app_id: str = "") -> None:
+    """在运行中的 loop 上异步关闭 api（同步装配点用，不阻塞扫描/建连）。
+
+    无运行 loop（如 UI 线程直改缓存）→ 不在此处 await（跨 loop await aiohttp session
+    会报 "attached to a different loop"），但**保留引用**挂进 `_pending_api_closes`，
+    由 `ImEngine.stop()` 在其自己的 loop 上收尾（契约 1：丢弃即必须关闭）。
+    """
+    if api is None or getattr(api, "close", None) is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _pending_api_closes.append((api, app_id))
+        return
+    task = loop.create_task(_close_api_quietly(api, app_id))
+    _api_close_tasks.add(task)
+    task.add_done_callback(_api_close_tasks.discard)
+
+
+async def _drain_pending_api_closes() -> None:
+    """把无 loop 时暂存的 api 在 stop 所在 loop 上收尾关闭（契约 1）。"""
+    pending = list(_pending_api_closes)
+    _pending_api_closes.clear()
+    for api, app_id in pending:
+        await _close_api_quietly(api, app_id)
+
 
 def feishu_api(app_id: str = ""):
     """按 app_id 取（缓存的）FeishuAsync 客户端（旧 IM 下线 A2 M2）。
@@ -746,6 +799,92 @@ def _lookup_user_sync(db_path: str, installation_id: str, open_id: str,
 
 _BIND_WORDS = ("/绑定", "/bind me", "/bindme", "绑定我", "绑定账号")
 
+# 未绑定身份时的帮助词：卡片底部「❓ 帮助」按钮回传的 value 就是 {"cmd": "/help"}。
+# 不认这一条时，未绑定用户点帮助会落进 unbound 分支被吞掉、换回一张一模一样的绑定卡，
+# 观感就是"帮助按钮没生效"。帮助词必须先于绑定词判断。
+_HELP_WORDS = ("/help", "/帮助", "/?", "help", "帮助")
+
+_UNBOUND_HELP_TEXT = (
+    "❓ 帮助\n"
+    "你的飞书账号还没绑定 grape 账号，所以现在只认绑定指令。\n"
+    "· 点卡片上的「绑定我」按钮，或回复 /绑定 —— 绑定到本机器人所属的账号\n"
+    "· 会先回一张确认卡，点「确认绑定」才真正写入绑定关系\n"
+    "· 绑定成功后会回一条确认，再发一条消息就能开始用\n"
+    "· 绑定之后回复 /help 可以看全部命令\n"
+    "· 群里打字回复要先 @我，点按钮不需要\n"
+)
+
+# 两段式绑定的第二步/放弃词：点确认卡上的按钮时，飞书回传的 value 就是 {"cmd": "/确认绑定"}。
+_BIND_CONFIRM_WORDS = ("/确认绑定", "确认绑定", "/confirm bind")
+_BIND_CANCEL_WORDS = ("/取消绑定", "取消绑定", "/cancel bind")
+_WHOAMI_WORDS = ("/我是谁", "我是谁", "/whoami")
+
+_GROUP_HINT = "群里也可以直接点按钮；如果你想用打字的方式，请先 @我 再发命令。"
+
+
+def _identity_card(title: str, body: str,
+                   buttons: "list[tuple[str, str, str]]") -> dict:
+    """构建带按钮的飞书互动卡（v1 schema）：buttons = [(文案, cmd 值, 样式), ...]。"""
+    actions = []
+    for label, cmd, style in buttons:
+        btn: dict = {"tag": "button", "text": {"tag": "plain_text", "content": label},
+                     "value": {"cmd": cmd}}
+        if style:
+            btn["type"] = style
+        actions.append(btn)
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue",
+                   "title": {"tag": "plain_text", "content": title}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": body}},
+            {"tag": "action", "actions": actions},
+        ],
+    }
+
+
+def _binding_guide_card(group: bool = False) -> dict:
+    """未绑定身份的引导卡：把「绑定我 / 我是谁 / 帮助」做成按钮。
+
+    未绑定的人只会被身份层挡住，卡片上不挂按钮就只能靠打字猜命令；群里打字还要 @机器人，
+    所以按钮是唯一稳定可用的入口。
+    """
+    body = "我还没认出你是谁。绑定后我才能用 grape 账号的身份替你干活。"
+    if group:
+        body += "\n" + _GROUP_HINT
+    return _identity_card("需要先绑定你的账号", body, [
+        ("✅ 绑定我", "/绑定", "primary"),
+        ("👤 我是谁", "/我是谁", ""),
+        ("❓ 帮助", "/help", ""),
+    ])
+
+
+def _bind_confirm_card(label: str, group: bool = False) -> dict:
+    """绑定确认卡：先让用户确认要绑到哪个 grape 账号，再落库。"""
+    body = (f"将把你的飞书身份绑定为 grape 用户 **{label}**。\n"
+            "个人机器人没有单独的账号体系，绑定后你的操作都记在这个 grape 账号下。")
+    if group:
+        body += "\n" + _GROUP_HINT
+    return _identity_card("确认绑定这个账号？", body, [
+        ("✅ 确认绑定", "/确认绑定", "primary"),
+        ("❌ 取消", "/取消绑定", ""),
+    ])
+
+
+def _account_label_sync(user_id: str) -> str:
+    """grape 用户 id → 可读标签「昵称(ID)」；查不到名字就只回 ID。"""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return ""
+    name = ""
+    try:
+        row = _mgmt_public.get_grape_account_by_id(uid)
+        if isinstance(row, dict):
+            name = str(row.get("nickname") or row.get("username") or "")
+    except Exception:      # noqa: BLE001 - 取不到名字不影响绑定本身
+        name = ""
+    return f"{name}（ID {uid}）" if name else f"ID {uid}"
+
 
 def _bind_identity_sync(db_path: str, installation_id: str, scope: str,
                         owner_user_id: str, platform_user_id: str,
@@ -963,9 +1102,11 @@ def _inbound_to_parsed(msg: InboundMessage) -> dict:
             image_key = ref.storage_key
         elif ref.type in (MsgType.FILE, MsgType.MEDIA):
             file_key = ref.storage_key
+    _ctype = msg.source.channel_type
     parsed = {
         "type": "message",
         "chat_id": msg.source.chat_id,
+        "channel_type": str(getattr(_ctype, "value", _ctype) or ""),
         "chat_type": msg.source.chat_type.value,
         "sender_open_id": msg.source.sender_id,
         "sender_id": msg.source.sender_id,
@@ -1141,7 +1282,9 @@ class ImEngine:
             await self.supervisor.stop()
             self.supervisor = None
         self._built_apps.clear()
-        self._ctx_cache.clear()
+        # Issue #3735：渠道全停后关闭装配层缓存的 FeishuAsync session（不能只 clear，
+        # 否则 aiohttp 在 GC 时才打 Unclosed client session）。
+        await self._close_cached_apis()
         self._repliers.clear()
         # Issue #2261 A：注销全局注册点（引擎停止后 notify 不得再取到死句柄）
         if get_current_engine() is self:
@@ -1258,6 +1401,44 @@ class ImEngine:
 
     # ---------------- 渠道工厂（per installation Router 六注入点，多平台通用）
 
+    async def _close_cached_apis(self) -> None:
+        """关闭并清空装配层缓存的所有平台 api（Issue #3735 生命周期收尾）。
+
+        覆盖三处：`_ctx_cache`（handler 出站/媒体用的 ctx/api 对，api 可能是
+        FeishuAsync）、进程级 `_feishu_api_cache`（通知/推送共享客户端）、以及无运行
+        loop 时挂起的 `_pending_api_closes`。逐个 await 关闭——关闭失败由
+        `_close_api_quietly` 降级 WARNING，不阻断 stop。
+
+        进程级缓存一并关闭是刻意的：它属于**引擎生命周期**（session 绑定建连时的
+        loop，引擎停后旧 loop 上的 session 再被复用会 `attached to a different
+        loop`）。使用方约定只经 `feishu_api(app_id)` 取用、**不跨引擎生命周期持有实例**
+        ——缓存清空后下一次调用会懒建绑定当前 loop 的新客户端，不会拿到已关闭死句柄。
+        """
+        pairs = list(self._ctx_cache.values())
+        self._ctx_cache.clear()
+        for pair in pairs:
+            if not (isinstance(pair, tuple) and len(pair) > 1):
+                continue
+            ctx, api = pair[0], pair[1]
+            await _close_api_quietly(api, str(getattr(ctx, "app_id", "") or ""))
+        for app_id, api in list(_feishu_api_cache.items()):
+            _feishu_api_cache.pop(app_id, None)
+            await _close_api_quietly(api, app_id)
+        # 无运行 loop 的装配点（UI 线程直改缓存）无法当场调度，挂起到这里收尾。
+        await _drain_pending_api_closes()
+
+    def _drop_cached_ctx(self, app_id: str) -> None:
+        """丢掉某 app 的 (ctx, api) 缓存并收尾关闭其 session（Issue #3735）。
+
+        调用点都是「凭证覆盖重建」：换新 api 后旧 FeishuAsync 的 session 不再有人用，
+        必须关闭；调度成 task 异步执行（调用点在渠道工厂/扫描 loop 内，不能 await）。
+        """
+        pair = self._ctx_cache.pop(app_id, None)
+        if pair is None:
+            return
+        api = pair[1] if isinstance(pair, tuple) and len(pair) > 1 else None
+        _schedule_api_close(api, app_id)
+
     def _prune_built_apps(self) -> None:
         """把去重表收敛到"当前活着的渠道"：渠道不在 Supervisor 里就释放该 app_id。
 
@@ -1274,6 +1455,9 @@ class ImEngine:
         for app_id, inst_id in list(self._built_apps.items()):
             if inst_id not in live:
                 del self._built_apps[app_id]
+                # Issue #3735：渠道已让渡/重建 → 该 app 缓存的 FeishuAsync session
+                # 不再有人用，必须收尾关闭（否则每次重建漏一个 ClientSession）。
+                self._drop_cached_ctx(app_id)
 
     def _feishu_factory(self, cfg: ChannelConfig):
         from src.domains.runtime.im.adapters.feishu.outbound import FeishuSender
@@ -1326,7 +1510,7 @@ class ImEngine:
             # 主动推送（无回复令牌）也要走同一个发送器：企微没有 card-to-chat 通道，
             # 缺 send_card_to_chat 会让"绑定引导卡/未绑定卡"抛 AttributeError（11-06 实障）。
             engine._api_overrides[app_id] = WecomAdapterApi(media_resolver.cache, sender=sender)
-            engine._ctx_cache.pop(app_id, None)   # 覆盖后重建 ctx/api 对
+            engine._drop_cached_ctx(app_id)   # 覆盖后重建 ctx/api 对（旧 api 收尾关闭）
             return sender
 
         def _build_channel(cfg_, sender):
@@ -1381,7 +1565,7 @@ class ImEngine:
             engine._api_overrides[app_id] = SlackAdapterApi(
                 bot_token, client=client, sender=sender,
                 route_registry=route_registry, media=media, users=users)
-            engine._ctx_cache.pop(app_id, None)   # 覆盖后重建 ctx/api 对
+            engine._drop_cached_ctx(app_id)   # 覆盖后重建 ctx/api 对（旧 api 收尾关闭）
             return sender
 
         def _build_channel(cfg_, sender):
@@ -1431,7 +1615,7 @@ class ImEngine:
             engine._api_overrides[inst_app_id] = TelegramAdapterApi(
                 token, client=client, sender=sender,
                 route_registry=route_registry, media=media, users=users)
-            engine._ctx_cache.pop(inst_app_id, None)
+            engine._drop_cached_ctx(inst_app_id)
             return sender
 
         def _build_channel(cfg_, sender):
@@ -1493,7 +1677,7 @@ class ImEngine:
             engine._api_overrides[inst_app_id] = WechatAdapterApi(
                 token, client=client, sender=sender, routes=route_registry,
                 users=users, media=media, metrics=engine._metrics)
-            engine._ctx_cache.pop(inst_app_id, None)
+            engine._drop_cached_ctx(inst_app_id)
             return sender
 
         def _build_channel(cfg_, sender):
@@ -1555,18 +1739,58 @@ class ImEngine:
         # ---- ⑤' 身份逃生口：未绑定时先认绑定指令，写 grape_t_channel_sender_identity
         async def identity_bind(inst_view: Installation, msg: InboundMessage) -> bool:
             text = (msg.command_text or msg.text or "").strip().lower()
+            chat_id = msg.source.chat_id
+            group = msg.source.chat_type == ChatType.GROUP
+            # 帮助词先于绑定词：未绑定用户点卡片底部「❓ 帮助」（cmd=/help）时，
+            # 必须回一段可读说明，否则只会再收到那张绑定引导卡。
+            if text in _HELP_WORDS:
+                await _reply_text(chat_id, _UNBOUND_HELP_TEXT)
+                return True
+            if text in _WHOAMI_WORDS:
+                await _reply_text(
+                    chat_id,
+                    "你当前还没有绑定 grape 账号。点「绑定我」或回复 /绑定 来绑定。")
+                return True
+            if text in _BIND_CANCEL_WORDS:
+                await _reply_text(chat_id, "已取消绑定。需要时再点「绑定我」或回复 /绑定。")
+                return True
+            if text in _BIND_CONFIRM_WORDS:
+                # 第二步：用户已确认要绑到这张卡上写明的账号，这里才真正落库。
+                user_id = await asyncio.to_thread(
+                    _bind_identity_sync, engine.db_path, inst_view.installation_id,
+                    inst_view.scope, inst_view.owner_user_id, msg.source.sender_id,
+                    msg.source.sender_stable_id)
+                if not user_id:
+                    await _reply_text(
+                        chat_id,
+                        "绑定失败：这个渠道没开个人身份绑定，或安装没有归属用户。")
+                    return True
+                label = await asyncio.to_thread(_account_label_sync, user_id)
+                await _reply_text(
+                    chat_id,
+                    f"✅ 已绑定：你的飞书账号现在是 grape 用户 {label}。再发一条消息即可开始使用。")
+                return True
             if text not in _BIND_WORDS:
                 return False
-            user_id = await asyncio.to_thread(
-                _bind_identity_sync, engine.db_path, inst_view.installation_id,
-                inst_view.scope, inst_view.owner_user_id, msg.source.sender_id,
-                msg.source.sender_stable_id)
-            if not user_id:
-                await _reply_text(msg.source.chat_id,
-                                  "绑定失败：这个渠道没开个人身份绑定，或安装没有归属用户。")
+            # 第一步：只发确认卡，不立刻写身份行 —— user 轨绑的是机器人归属人，
+            # 点的人如果不是本人，绑错了事后很难发现，所以要他先看一眼账号再确认。
+            if inst_view.scope != "user" or not str(inst_view.owner_user_id):
+                await _reply_text(
+                    chat_id, "绑定失败：这个渠道没开个人身份绑定，或安装没有归属用户。")
                 return True
-            await _reply_text(msg.source.chat_id,
-                              f"✅ 已绑定：你的账号现在是 grape 用户 {user_id}。再发一条消息即可开始使用。")
+            label = await asyncio.to_thread(
+                _account_label_sync, str(inst_view.owner_user_id))
+            card = _bind_confirm_card(label, group=group)
+            sent = ""
+            if inst_view.channel_type == "feishu":
+                sent = await _send_card(chat_id, "确认绑定这个账号？", raw_card=card,
+                                        kind="card")
+            if not sent:
+                # 非飞书渠道没有 raw 卡片通道：退化成文字，照样走两步确认。
+                await _reply_text(
+                    chat_id,
+                    f"将把你的账号绑定为 grape 用户 {label}。\n"
+                    "回复「确认绑定」完成，回复「取消绑定」放弃。")
             return True
 
         # ---- 出站：绑定引导卡（fire-and-forget，chat 定向卡片）
@@ -1650,6 +1874,20 @@ class ImEngine:
         async def _reply_card(chat_id: str, text: str, **kw):
             return await _send_card(chat_id, text, **kw)
 
+        # ---- ⑤'' 未绑定引导卡：把「绑定我 / 我是谁 / 帮助」做成按钮
+        # 群里打字回复必须先 @机器人（应用只有 group_at_msg 权限），按钮回调不需要 ——
+        # 所以未绑定的人唯一稳定可用的入口是按钮，卡片必须自带动作。
+        async def unbound_card(msg: InboundMessage) -> None:
+            group = msg.source.chat_type == ChatType.GROUP
+            card = _binding_guide_card(group=group)
+            text = "请先绑定你的账号以使用 grape（点「绑定我」完成绑定）。"
+            if channel_type == "feishu":
+                sent = await _send_card(msg.source.chat_id, text, raw_card=card,
+                                       kind="card")
+                if sent:
+                    return
+            await replier.send_binding_card(msg)
+
         if sender_factory is not None:
             # 渠道自带发送器（企微：持有长连接 transport，不经 legacy 传输闭包）
             sender = sender_factory(app_id, cfg.raw)
@@ -1665,7 +1903,7 @@ class ImEngine:
             # handler 的下载/身份能力（媒体两跳）走钉钉侧 api，而不是 FeishuAsync
             engine._api_overrides[app_id] = DingtalkAdapterApi(
                 app_id, str(cfg.raw.get("app_secret", "")))
-            engine._ctx_cache.pop(app_id, None)   # 覆盖后重建 ctx/api 对
+            engine._drop_cached_ctx(app_id)   # 覆盖后重建 ctx/api 对（旧 api 收尾关闭）
 
             async def _dt_text(chat_id: str, text: str, **kw):
                 return await send_text_with_fallback(chat_id, text, robot=_robot)
@@ -1739,7 +1977,23 @@ class ImEngine:
                 await engine._dispatch_agent(inst, msg)
                 return None
             text = str(cmd.get("text", ""))
+            # 已绑定用户点旧卡片上的「我是谁 / 绑定我」也要有答复：
+            # 这些是身份类按钮，不进命令表（命中不了就会静默丢弃，用户以为按钮坏了）。
+            _ident = text.strip().lower()
+            if _ident in _WHOAMI_WORDS or _ident in _BIND_WORDS or _ident in _BIND_CONFIRM_WORDS:
+                uid = await asyncio.to_thread(
+                    _lookup_user_sync, engine.db_path, inst_view.installation_id,
+                    msg.source.sender_id, inst_view.channel_type)
+                if uid:
+                    label = await asyncio.to_thread(_account_label_sync, uid)
+                    await _reply_text(chat_id, f"你已经绑定为 grape 用户 {label}，无需再绑定。")
+                else:
+                    await _reply_text(chat_id, "你当前还没有绑定 grape 账号，请点「绑定我」。")
+                return None
             fn = engine._process_command or engine._legacy_process_command()
+            # Issue #3475 复审修复：真实命令路径必须透传渠道，否则微信等新引擎渠道的
+            # 命令提示会退回飞书文案（BotContext 无 channel_type 属性可兜底）
+            _ctype = msg.source.channel_type
             try:
                 # 本文件属 runtime 域、由 mgmt 进程执行：命令处理用到的
                 # repo_im_group_binding / issue / chat_agent_session 都是 runtime 基表，
@@ -1753,6 +2007,7 @@ class ImEngine:
                 account=ctx.app_id, msg_id=msg_id,
                 sender_open_id=msg.source.sender_id,
                 card_value=_card_value_of(msg), action_token=_action_token_of(msg),
+                channel_type=str(getattr(_ctype, "value", _ctype) or ""),
             )
             if result:
                 await eg.reply_text(ctx, msg_id, result)
@@ -1790,6 +2045,7 @@ class ImEngine:
             bindings=bindings,
             dedup=dedup,
             replier=replier,
+            unbound_card=unbound_card,
             append_message=append_message,
             parse_command=parse_command,
             apply_command=apply_command,

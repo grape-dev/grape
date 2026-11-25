@@ -184,7 +184,8 @@ def verify_repo_scenes_without_user_skill(conn=None) -> None:
     for row_id, repo_key, nodes_json in rows:
         try:
             nodes = json.loads(nodes_json or "[]")
-        except Exception:  # noqa: BLE001 - 坏 JSON 不参与判定（回填已记日志）
+        except Exception as e:  # noqa: BLE001 - 坏 JSON 不参与判定（回填已记日志）
+            log.debug(f"202611240002: bad nodes_json kept out of post_check (scene row={row_id}): {e}")
             continue
         for node in nodes if isinstance(nodes, list) else []:
             # 与回填同口径：未启用节点不参与判定（也不会被派发）

@@ -15,7 +15,10 @@ CREATE TABLE IF NOT EXISTS events (
     title TEXT DEFAULT '',
     summary TEXT DEFAULT '',
     actor TEXT DEFAULT '',
-    payload TEXT DEFAULT '{}',
+    -- Issue #4339：payload 与同表 agent_logs/result/structured_output 对齐为 MEDIUMTEXT。
+    -- 原 TEXT(65,535) 在 MySQL 非严格 sql_mode 下会静默截断超长 issue/PR 事件 payload，
+    -- 落库成半截 JSON（生产 seq 107279/107291 均恰好 65,535 字节且 JSON_VALID=0）。
+    payload MEDIUMTEXT DEFAULT '{}',
     agent_type TEXT DEFAULT '',
     backend TEXT DEFAULT '',
     skill TEXT DEFAULT '',
@@ -34,7 +37,8 @@ CREATE TABLE IF NOT EXISTS events (
     report_missing INTEGER DEFAULT 0,
     triggered_by TEXT DEFAULT '',
     cascade_task_status TEXT DEFAULT '',
-    cascade_prev_event_status TEXT DEFAULT ''
+    cascade_prev_event_status TEXT DEFAULT '',
+    failure_info TEXT DEFAULT ''
 )
 """
 
@@ -180,6 +184,25 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     model_name TEXT DEFAULT '',          -- Issue #865：配置模型（worker 注册上报的本机配置模型名）
     model_source TEXT DEFAULT '',        -- Issue #865：配置模型来源（worker_report=worker 上报 / local_config=服务端本机解析）
     model_reported_at TEXT DEFAULT '',   -- Issue #865：配置模型上报时间（UTC ISO）
+    -- Issue #3928：后端 CLI 能力 + runtime 熔断（认领前准入 / spawn 失败重派）
+    backend_status VARCHAR(32) DEFAULT '',      -- available/degraded/unavailable/unknown
+    backend_reason TEXT DEFAULT '',             -- 最近一次探测原因（缺 CLI / spawn 失败）
+    backend_checked_at VARCHAR(64) DEFAULT '',  -- 最近一次能力探测时间（UTC ISO）
+    circuit_open_until VARCHAR(64) DEFAULT '',  -- 熔断截止（空=未熔断；到期后半开试探）
+    circuit_fail_count INTEGER DEFAULT 0,       -- 连续 spawn 失败次数（冷却指数退避用）
+    circuit_half_open INTEGER DEFAULT 0,        -- 半开试探占位（0=无在飞试探）
+    -- Issue #4346：session 通道熔断（session/new 连续超时）+ LLM provider 注册校验。
+    -- 与上面的 backend 熔断列相互独立：backend 列由 backend_health 独占，
+    -- session 列只反映「建会话」通道健康度，不改写 ENGINE_OFFLINE 语义。
+    session_fail_streak INTEGER DEFAULT 0,          -- 连续 session/new 失败次数
+    session_fail_total INTEGER DEFAULT 0,           -- 累计 session 失败次数（排障）
+    session_circuit_until VARCHAR(64) DEFAULT '',   -- session 熔断截止（空=未熔断）
+    session_circuit_half_open INTEGER DEFAULT 0,    -- session 半开探测占位
+    session_last_error_code VARCHAR(48) DEFAULT '', -- 最近一次 session 失败分类
+    session_last_failure_at VARCHAR(64) DEFAULT '', -- 最近一次失败时间（UTC ISO）
+    session_last_success_at VARCHAR(64) DEFAULT '', -- 最近一次建会话成功时间
+    llm_provider_ok INTEGER DEFAULT 1,              -- 注册/启用期 provider 校验（0=不进池）
+    llm_provider_reason VARCHAR(255) DEFAULT '',    -- provider 缺失原因
     -- 2026-11-18：7794d05ee 的沙箱/引擎改造在 7 处代码里引用了这两列，却没加进表里，
     -- 导致 claim 查询 1054（Unknown column）→ 引擎进程从未 spawn → 任务挂到超时判 failed。
     -- 老库由迁移 202611180002 补列；这里让新库建表即带。
@@ -319,8 +342,10 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     pool_selector      TEXT,                      -- Issue #1208: selector 标签池（JSON {"tags":[...]}，与两池列三列语义互斥；TEXT NULL 无 DEFAULT，#627 MySQL 教训）
     engine_uid         VARCHAR(36) DEFAULT NULL,  -- Issue #646: runtime_id 的 uid 引用（孤儿/历史置 NULL）
     engine_name_snapshot TEXT DEFAULT '',         -- Issue #646: 引擎展示名快照（引擎删除后历史可读）
-    pool_engine_source TEXT DEFAULT '',           -- pool_engine_ids 来源：scene=用户场景绑定 / auto=自动选择 / directed=engine_config.runtime_id 定向锁定（降级判别，local-claimer 设计 + Issue #2791）
+    pool_engine_source TEXT DEFAULT '',           -- pool_engine_ids 来源：scene=用户场景绑定 / auto=自动选择 / directed=engine_config.runtime_id 定向锁定 / scene_missing=场景未在仓内 scene pool 登记（Issue #3790，与 agent_tasks 降级判别、事件 payload 共用，local-claimer 设计 + Issue #2791）
+    engine_priorities  TEXT DEFAULT '',           -- Issue #3564：实例绑定优先级映射（JSON {"<engine_id>":1..9}，1 最高；空=未配置=旧行为）
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/pending_self_report/completed/failed/timeout_failed/cancelled（Issue #537 新增 pending_self_report 中间态 + timeout_failed 终态）
+    session_retry_count INTEGER DEFAULT 0,   -- Issue #4346：session/new 超时「换引擎重试」专用计数（与 #403 瞬时重试共用的 attempts 解耦，历史 attempts 不再吞掉重试）
     exit_code         INTEGER DEFAULT NULL,
     result_text       MEDIUMTEXT DEFAULT '',
     errors            MEDIUMTEXT DEFAULT '',
@@ -706,3 +731,23 @@ _WEBHOOK_INBOX_INDEXES = (
     ("grape_t_webhook_inbox_archive", "idx_webhook_inbox_archived",
      "(archived_at)", "(archived_at)"),
 )
+
+# Issue #3818：autopilot 同一载荷重复投递熔断 + 死信台账（归属 runtime）。
+# 调度器在「建 execution 之前」按归一化 payload hash 计数，超阈值停派并告警；
+# fake completion 降级 failed 也写同一行（failure_count），避免拒绝被无限重试放大。
+_AUTOPILOT_PAYLOAD_GUARD_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_autopilot_payload_guard (
+    id VARCHAR(32) NOT NULL PRIMARY KEY,
+    payload_hash VARCHAR(64) NOT NULL,
+    task_id INTEGER NOT NULL DEFAULT 0,
+    repo_key VARCHAR(255) NOT NULL DEFAULT '',
+    dispatch_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    status VARCHAR(32) NOT NULL DEFAULT 'active',
+    reason VARCHAR(128) NOT NULL DEFAULT '',
+    first_seen_at VARCHAR(32) NOT NULL DEFAULT '',
+    last_seen_at VARCHAR(32) NOT NULL DEFAULT '',
+    updated_at VARCHAR(32) NOT NULL DEFAULT '',
+    UNIQUE(payload_hash)
+)
+"""

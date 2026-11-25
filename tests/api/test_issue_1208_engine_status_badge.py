@@ -22,7 +22,8 @@ def st_db(monkeypatch):
         is_active INTEGER DEFAULT 1, repo_key TEXT DEFAULT ''
     );
     CREATE TABLE agent_runtimes (
-        id INTEGER PRIMARY KEY, name TEXT DEFAULT '', credential_id INTEGER DEFAULT 0,
+        id INTEGER PRIMARY KEY, name TEXT DEFAULT '', display_name TEXT DEFAULT '',
+        credential_id INTEGER DEFAULT 0,
         scope TEXT DEFAULT 'global', owner_id TEXT DEFAULT '', status TEXT DEFAULT 'online',
         healthy INTEGER DEFAULT 1, installed INTEGER DEFAULT 1, last_seen_at TEXT,
         engine_uid VARCHAR(36) DEFAULT NULL, role_tags TEXT DEFAULT ''

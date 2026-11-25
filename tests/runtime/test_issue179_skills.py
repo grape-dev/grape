@@ -1,7 +1,7 @@
 """Issue #179: Skill 远程同步 + 技能分类表独立化 — 单元测试
 
 覆盖：
-- skill_category 表建表 + seed 15 分类
+- skill_category 表建表 + seed 16 分类（15 条老种子 + Issue #3798 补种的 content-generation）
 - category_id 回填（sub_scene → slug 映射）
 - list_skill_categories / get_skill_category 查询
 - _sync_skills_to_db 写入 category_id + 变更检测
@@ -72,7 +72,8 @@ class TestSkillCategoryTable:
         with db_lock:
             c = db.cursor()
             c.execute("SELECT COUNT(*) FROM skill_category")
-            assert c.fetchone()[0] == 15
+            # 15 条老种子 + Issue #3798 迁移 202611250008 补种的 content-generation
+            assert c.fetchone()[0] == 16
 
     def test_seed_data(self):
         with db_lock:
@@ -96,7 +97,8 @@ class TestSkillCategoryTable:
             c = db.cursor()
             c.execute("SELECT COUNT(DISTINCT slug), COUNT(*) FROM skill_category")
             distinct, total = c.fetchone()
-            assert distinct == total == 15
+            # 同上：16 = 15 条老种子 + content-generation（Issue #3798）
+            assert distinct == total == 16
 
 class TestCategoryBackfill:
     """category_id 回填"""

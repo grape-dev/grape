@@ -78,12 +78,23 @@ def _clear_member_cache():
         clear_user_repos(acc["id"])
 
 
+def _patch_binding(monkeypatch):
+    """当前分支 /member 通过 list_platform_links 判定可列仓平台（旧用例只建身份行）。"""
+    from src.domains.mgmt.auth import grape_account_db as _gadb
+    from src.domains.platform import visibility
+
+    monkeypatch.setattr(_gadb, "list_platform_links",
+                        lambda uid: [{"provider": "gitcode", "token_usable": True}])
+    monkeypatch.setattr(visibility, "is_platform_visible", lambda p: True)
+
+
 class TestMemberProbeDeferred:
 
     @pytest.fixture(autouse=True)
     def _setup(self, monkeypatch):
         uid = _seed_user_and_cache()
         self.uid = uid
+        _patch_binding(monkeypatch)
         # 记录 _probe_stale_repos 是否被触发
         self.probe_called = []
         monkeypatch.setattr("src.domains.mgmt.routes.repos._probe_stale_repos",
@@ -145,6 +156,7 @@ class TestProbeThrottle:
     def _setup(self, monkeypatch):
         uid = _seed_user_and_cache()
         self.uid = uid
+        _patch_binding(monkeypatch)
         _clear_member_cache()  # 强制缓存过期，走探活触发分支
         self.calls = []
         monkeypatch.setattr("src.domains.mgmt.routes.repos._probe_stale_repos",
@@ -173,6 +185,7 @@ class TestCacheTimezoneCompat:
     def _setup(self, monkeypatch):
         uid = _seed_user_and_cache()
         self.uid = uid
+        _patch_binding(monkeypatch)
         monkeypatch.setattr("src.domains.mgmt.routes.repos._probe_stale_repos",
                             lambda *a, **k: None)
         monkeypatch.setattr("src.domains.mgmt.routes.repos._fetch_and_cache",

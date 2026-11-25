@@ -15,6 +15,7 @@ from src.api.deps import (require_no_session_token, require_org_member,
 from src.domains.runtime.engine.health import apply_runtime_state
 from src.kernel.config import log
 from src.kernel.domain_db import cursor as _domain_cursor
+from src.domains.runtime.engine import stale_uid as _stale_uid
 
 # Issue #4082：`/runtimes/{runtime_id}/*` 非法 id 统一 400 的路由类
 from src.domains.runtime.routes.runtime_id_validation import RuntimeIdGuardRoute
@@ -304,15 +305,27 @@ class LogLineBody(BaseModel):
 
 
 class HeartbeatBody(BaseModel):
+    """心跳 body。
+
+    Issue（心跳双写覆盖指标）：worker 有两个心跳循环——完整心跳带 metrics，
+    `_presence_heartbeat_loop` 的最小在线态心跳**不带**。旧模型把缺省值定为 0.0 并
+    无条件 UPDATE，于是最小心跳每 15~20s 就把真实 cpu/mem/disk 刷成 0，看板来回跳
+    「有数据 → 全 0」。现在缺省为 None，服务端只更新**真的上报了**的列。
+    """
+
     runtime_ids: list[int] = []
-    cpu_percent: float = 0.0
-    memory_percent: float = 0.0
-    disk_percent: float = 0.0
-    tmp_percent: float = 0.0
-    bandwidth_percent: float = 0.0
-    bandwidth_mbps: float = 0.0
-    load_avg: str = ""
+    cpu_percent: float | None = None
+    memory_percent: float | None = None
+    disk_percent: float | None = None
+    tmp_percent: float | None = None
+    bandwidth_percent: float | None = None
+    bandwidth_mbps: float | None = None
+    load_avg: str | None = None
     spec: str = ""
+    acp_state_db_bytes: float = 0.0
+    acp_state_db_cleanup_counts: str = ""
+    acp_state_db_bytes_freed_total: float = 0.0
+    acp_resume_skipped_total: int = 0
     log_lines: list[LogLineBody] = []
     probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
 
@@ -512,9 +525,32 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             # 不在此列（向后兼容——旧包误报 True 需 worker 升级后才被此层拦截）。
             _inst_raw = rt.get("installed")
             if _inst_raw is not None and str(_inst_raw).strip().lower() in ("false", "0"):
-                c.execute("UPDATE agent_runtimes SET installed=0 "
-                          "WHERE credential_id=? AND lower(name)=?",
-                          (credential_id, name))
+                # Issue #3928 根因修复：旧实现只写 installed=0 就 continue，既不改
+                # healthy 也不记录后端能力，CLI 被移除后的存量行一直 healthy=1 继续认领
+                #（17641 codearts-cred0 缺 CLI 的注册侧成因）。现在同步标记不可用并熔断。
+                _cap0 = rt.get("backend_capability") if isinstance(rt.get("backend_capability"), dict) else {}
+                _cap0_status = str(_cap0.get("status") or "unavailable").strip().lower()
+                _cap0_reason = str(_cap0.get("reason") or "backend CLI not found / engine not installed")
+                _cap0_checked = str(_cap0.get("checked_at") or datetime.now(timezone.utc).isoformat())
+                _row0 = c.execute(
+                    "SELECT id FROM agent_runtimes WHERE credential_id=? AND lower(name)=? "
+                    "ORDER BY id DESC LIMIT 1", (credential_id, name)).fetchone()
+                if _row0:
+                    _rid0 = _row0[0]
+                    try:
+                        from src.domains.runtime.engine import backend_health as _bh_reg
+                        _bh_reg.observe_capability(c, _rid0, _cap0_status,
+                                                   _cap0_reason, _cap0_checked)
+                    except Exception as _bhe:
+                        log.warning(f"register: capability observe failed for runtime={_rid0}: {_bhe}")
+                    c.execute("UPDATE agent_runtimes SET installed=0, healthy=0, "
+                              "backend_status=?, backend_reason=?, backend_checked_at=? "
+                              "WHERE id=?", (_cap0_status, _cap0_reason, _cap0_checked, _rid0))
+                else:
+                    # 无存量行 = 从未成功注册过，不可能被认领；不告警避免每轮注册刷屏。
+                    log.debug(
+                        f"register: engine {name} not installed/unavailable "
+                        f"(credential={credential_id}); no runtime row to mark")
                 continue
             _ls_json = skills_by_name.get(name, "[]")
             # Issue #646：engine_uid 优先查找（UUIDv5 稳定键，表重建 uid 不漂移）；
@@ -682,6 +718,26 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                          datetime.now(timezone.utc).isoformat() if _model_name else ""))
                 rid = c.lastrowid
                 _row_desired_json = "[]"
+            # Issue #3928：注册上报的后端能力落库（available 清熔断；unavailable
+            # 立即 healthy=0 + 熔断；degraded 仅挡认领，保留 #1982 healthy 语义）。
+            try:
+                _cap = rt.get("backend_capability")
+                if isinstance(_cap, dict) and _cap.get("status"):
+                    from src.domains.runtime.engine import backend_health as _bh_reg2
+                    _bh_reg2.observe_capability(
+                        c, rid, str(_cap.get("status")), str(_cap.get("reason") or ""),
+                        str(_cap.get("checked_at") or ""))
+            except Exception as _cap_e:
+                log.warning(f"register: backend capability apply failed for {name}: {_cap_e}")
+            # Issue #4346：LLM provider 注册/启用期校验——worker 上报的 provider 状态
+            # 落库；明确缺失 → llm_provider_ok=0 + healthy=0（存量行不进调度池，
+            # 派发链路不再产生 `No LLM provider configured` 500）。
+            try:
+                from src.domains.runtime.engine import provider_check as _pc_reg
+                _pc_reg.apply_registration_state(
+                    c, rid, name, rt.get("llm_provider") if isinstance(rt.get("llm_provider"), dict) else None)
+            except Exception as _pc_e:
+                log.warning(f"register: llm provider check failed for {name}: {_pc_e}")
             # Issue #1011：锚快照持久化（engine_type/provider_id/template_id/
             # provider_uid/template_uid 五列，001 迁移加列）——派生源修正后
             # 存量行可离线重算（002 重派派生迁移消费）；未迁移旧库缺列时降级跳过。
@@ -814,13 +870,35 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
     client_ip = _client_ip(request)
     cancelled_tasks = []
     with _runtime_cursor() as c:
+        # 只更新本次真的上报了的指标列：worker 的「最小在线态心跳」只保 last_seen，
+        # 不带 metrics；旧实现无条件写 0.0，会把它之前完整心跳采到的真实值抹成 0
+        # （看板几秒内「有数据 → 全 0 → 有数据」来回跳的根因）。
+        _set = ["last_seen_at=?", "last_ip=?"]
+        _vals: list = [now, client_ip]
+        for _col, _val in (("cpu_percent", body.cpu_percent),
+                           ("memory_percent", body.memory_percent),
+                           ("disk_percent", body.disk_percent),
+                           ("tmp_percent", body.tmp_percent),
+                           ("bandwidth_percent", body.bandwidth_percent),
+                           ("bandwidth_mbps", body.bandwidth_mbps),
+                           ("load_avg", body.load_avg)):
+            if _val is not None:
+                _set.append(f"{_col}=?")
+                _vals.append(_val)
         # spec 为空时不覆盖（兼容旧版 worker 不上报 spec）
         if body.spec:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=?, spec=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, body.spec, credential_id))
-        else:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, credential_id))
+            _set.append("spec=?")
+            _vals.append(body.spec)
+        # ACP 状态库指标（本分支特性，迁移见 runtime/migrations/acp_state_db_metrics_columns.py）：
+        # 模型字段恒有默认值，随心跳一并写回；基线侧的动态 SET 构造未覆盖这四列。
+        for _acp_col, _acp_val in (("acp_state_db_bytes", body.acp_state_db_bytes),
+                                   ("acp_state_db_cleanup_counts", body.acp_state_db_cleanup_counts),
+                                   ("acp_state_db_bytes_freed_total", body.acp_state_db_bytes_freed_total),
+                                   ("acp_resume_skipped_total", body.acp_resume_skipped_total)):
+            _set.append(f"{_acp_col}=?")
+            _vals.append(_acp_val)
+        c.execute(f"UPDATE runtime_credentials SET {', '.join(_set)} WHERE id=?",
+                  _vals + [credential_id])
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
@@ -852,6 +930,22 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
                             (_pstatus, _platency, _plast, _perror, _pname, credential_id)
                         )
                         continue
+                    # Issue #3928：新观测落后端能力态（缺 CLI 立即 healthy=0 + 熔断；
+                    # ok 清熔断；degraded 只挡认领不碰 #1982 healthy 阈值）。
+                    if _prid:
+                        try:
+                            _cap_status = str(_pdata.get("backend_status") or "").strip().lower()
+                            _cap_reason = str(_pdata.get("backend_reason") or _perror or "")
+                            if not _cap_status:
+                                from src.domains.runtime.engine.backend_capability import (
+                                    status_from_probe as _status_from_probe)
+                                _cap_status = _status_from_probe(_pname, _pstatus, _perror)
+                            if _cap_status:
+                                from src.domains.runtime.engine import backend_health as _bh_hb
+                                _bh_hb.observe_capability(c, _prid, _cap_status, _cap_reason, _plast)
+                        except Exception as _cap_e:
+                            log.warning(f"runtime heartbeat capability observe failed "
+                                        f"(runtime={_prid}): {_cap_e}")
                     # 新观测（last_probe 不同 / 旧 Worker 无 last_probe 回退 now 每次不同）：
                     # probe_status 联动 healthy：ok→升级（纠正 --version 误判），fail→降级（实际不能干活）
                     # skip/pending/refused 不动 healthy，保留 --version 的结果
@@ -1681,6 +1775,22 @@ class ProgressBodyV2(ProgressBody):
     engine_uid: str = ""
 
 
+def _lookup_fallback_runtime_id(fallback_runtime_id: int, credential_id: int) -> int:
+    """并存期兜底查询：body.runtime_id 属本凭据则返回该行 id，否则 0（不抛）。
+
+    Issue #4349 从 `_resolve_runtime_by_uid` 的内联查询抽出（uid 命中路径保持
+    单次查询不变，stale/空 uid 路径才查兜底），供 stale 报告的回退行关联复用。
+    """
+    if not fallback_runtime_id:
+        return 0
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT id FROM agent_runtimes WHERE id=? AND credential_id=? LIMIT 1",
+            (fallback_runtime_id, credential_id)).fetchone()
+    return row[0] if row else 0
+
+
 def _resolve_runtime_by_uid(engine_uid: str, fallback_runtime_id: int,
                             credential_id: int) -> int:
     """v2 寻址解析：uid → runtime_id（限本 rta_ 凭据），双失效 404 UNKNOWN_ENGINE_UID。
@@ -1689,6 +1799,12 @@ def _resolve_runtime_by_uid(engine_uid: str, fallback_runtime_id: int,
     - uid 未命中（失效：引擎删除/合流重派生窗口/未迁移 NULL uid）且
       fallback_runtime_id 非 0 且命中本凭据 → 回退该行 id（并存期兜底）；
     - 双失效 → 404（fail-fast，不静默造行；message 含 NULL uid 引擎的重注册提示）。
+
+    Issue #4349（stale 刷屏治理）：uid 失效由「每请求一条 WARNING」改为
+    **一次性 ERROR + 按 (uid, credential_id) 窗口限频**（vod-dev-002 三引擎
+    1 小时曾刷 2,733 条 WARNING，占该小时 worker WARNING 36%）；每次失效
+    照常计入 grape_runtime_v2_stale_uid_total{source="resolve"} 指标，回退
+    命中时把 stale 报告关联到回退行（/runtimes 详情的 stale 标记来源）。
     """
     uid = (engine_uid or "").strip().lower()
     if uid:
@@ -1699,16 +1815,21 @@ def _resolve_runtime_by_uid(engine_uid: str, fallback_runtime_id: int,
                 (uid, credential_id)).fetchone()
         if row:
             return row[0]
-        log.warning(f"v2 resolve: engine_uid not found (stale?): uid={uid} "
-                    f"credential={credential_id} fallback_runtime_id={fallback_runtime_id}")
-    if fallback_runtime_id:
-        with db_lock:
-            c = db.cursor()
-            row = c.execute(
-                "SELECT id FROM agent_runtimes WHERE id=? AND credential_id=? LIMIT 1",
-                (fallback_runtime_id, credential_id)).fetchone()
-        if row:
-            return row[0]
+        fallback_hit = _lookup_fallback_runtime_id(fallback_runtime_id, credential_id)
+        _stale_uid.record_and_log(
+            uid, credential_id, "resolve",
+            f"v2 resolve: engine_uid not found (stale?): uid={uid} "
+            f"credential={credential_id} fallback_runtime_id={fallback_runtime_id}"
+            f"{' (fallback hit)' if fallback_hit else ' (no fallback)'}"
+            f" — rate-limited: one ERROR per {_stale_uid.log_window_s():.0f}s"
+            " per uid+credential; re-register to obtain a fresh uid",
+            runtime_ids=(fallback_hit,) if fallback_hit else ())
+        if fallback_hit:
+            return fallback_hit
+    else:
+        fallback_hit = _lookup_fallback_runtime_id(fallback_runtime_id, credential_id)
+        if fallback_hit:
+            return fallback_hit
     raise HTTPException(status_code=404, detail={
         "code": "UNKNOWN_ENGINE_UID",
         "message": f"engine_uid '{uid or '(empty)'}' not found"
@@ -1847,25 +1968,36 @@ async def runtime_heartbeat_v2(body: HeartbeatBodyV2, request: Request,
         return resolved_ids, stale_uids
 
     resolved_ids, stale_uids = await asyncio.to_thread(_resolve_uids)
+    # Issue #4349（stale 刷屏治理）：stale 段由每 uid 一条 WARNING 改为
+    # 一次性 ERROR + 按 (uid, credential_id) 窗口限频；每次失效照常计入
+    # grape_runtime_v2_stale_uid_total{source="heartbeat"}，同请求携带的
+    # body.runtime_ids 尽力关联到报告（/runtimes 详情的 stale 标记来源）。
     for uid in stale_uids:
-        log.warning(f"heartbeat-v2: engine_uid not found (stale, no row created): "
-                    f"uid={uid} credential={credential_id}")
+        _stale_uid.record_and_log(
+            uid, credential_id, "heartbeat",
+            f"heartbeat-v2: engine_uid not found (stale, no row created): "
+            f"uid={uid} credential={credential_id} — rate-limited: one ERROR per "
+            f"{_stale_uid.log_window_s():.0f}s per uid+credential; re-register to "
+            "obtain a fresh uid",
+            runtime_ids=body.runtime_ids or [])
     merged = list(resolved_ids)
     for rid in (body.runtime_ids or []):
         if rid not in merged:
             merged.append(rid)
-    v1_body = HeartbeatBody(
-        runtime_ids=merged,
-        cpu_percent=body.cpu_percent,
-        memory_percent=body.memory_percent,
-        disk_percent=body.disk_percent,
-        tmp_percent=body.tmp_percent,
-        bandwidth_percent=body.bandwidth_percent,
-        bandwidth_mbps=body.bandwidth_mbps,
-        load_avg=body.load_avg,
-        spec=body.spec,
-        log_lines=body.log_lines,
-        probe_results=body.probe_results)
+    # Issue #4349（心跳丢失可观测）：stale_uids 非空且无 runtime_ids 回退 →
+    # 本次心跳的引擎状态整体丢弃（响应虽回 engine_uids_stale 计数，但此前
+    # 无指标/日志，SRE 只能靠日志行数发现）。显式计数
+    # grape_runtime_v2_heartbeat_uid_lost_total + 按凭据限频 ERROR。
+    if stale_uids and not (body.runtime_ids or []):
+        _stale_uid.record_heartbeat_lost(
+            credential_id,
+            f"heartbeat-v2: {len(stale_uids)} stale engine_uid(s) with no "
+            f"runtime_ids fallback — heartbeat lost (uids={stale_uids} "
+            f"credential={credential_id}); re-register to obtain fresh uids")
+    # 透传 v1 全部字段（含 #3773 的 acp_state_db_bytes / cleanup_counts /
+    # bytes_freed_total / resume_skipped_total）；逐字段重建会静默丢弃这些指标，
+    # 而 worker 默认 v2-first 且 200 即 return，v1 落库分支永远走不到 → /metrics 恒 0。
+    v1_body = HeartbeatBody(**{**body.model_dump(), "runtime_ids": merged})
     resp = await runtime_heartbeat(v1_body, request, credential_id)
     resp["engine_uids_resolved"] = len(resolved_ids)
     resp["engine_uids_stale"] = len(stale_uids)
@@ -2298,12 +2430,16 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
             continue
         try:
             from src.api.event_store import update_event_complete
+            from src.domains.runtime.agents.failure_info import build_failure_info
             _reason = _fail_reason_by_tid.get(tid) or (
                 "recover-orphans attempts cap reached (possible self-restart loop)")
             update_event_complete(
                 _seq, "failed", exit_code=1,
                 completed_at=datetime.now(timezone.utc).isoformat(),
-                result=f"{_reason}, 任务判死")
+                result=f"{_reason}, 任务判死",
+                failure_info=build_failure_info(
+                    error_type="AttemptsExhausted", phase="recover",
+                    message=_reason, exit_code=1))
         except Exception as e:
             log.warning(f"recover-orphans event writeback failed tid={tid}: {e}")
     if recovered or skipped_active or force_failed or skipped_young:
@@ -2334,7 +2470,8 @@ def get_task_status(task_id: str, user: dict = Depends(require_no_session_token)
         "completed_at": task.get("completed_at"),
     }
 
-def _cwd_or_derived(cwd: str, repo_key: str, agent_type: str, issue_id: str, task_id: str) -> str:
+def _cwd_or_derived(cwd: str, repo_key: str, agent_type: str, issue_id: str, task_id: str,
+                    pr_number: str = "") -> str:
     """任务工作目录：原值为空时按平台同一规则推导。
 
     `agent_tasks.cwd` 只有部分入队路径会回填；走 claim 的任务常常留空——worker 执行时
@@ -2345,7 +2482,7 @@ def _cwd_or_derived(cwd: str, repo_key: str, agent_type: str, issue_id: str, tas
         return cwd
     try:
         from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
-        return get_agent_workdir(repo_key, agent_type, issue_id or "")
+        return get_agent_workdir(repo_key, agent_type, issue_id or "", pr_number)
     except Exception as e:
         log.warning(f"cwd fallback failed (task={task_id}): {e}")
         return cwd
@@ -2379,6 +2516,17 @@ def takeover_context(repo_key: str = Query(..., description="Repository key (e.g
     # ② 查最近 200 条消息（必须取"最新"而非"最早"，否则长任务接管时看到的
     #    是几小时前的任务开头，而不是当前进展。先按 seq DESC 取，再反转为正序阅读）
     messages = service.list_task_messages_recent(task_id, limit=200)
+    # Issue #3770（QA 审查 Optional）：env_extra 不再原样返回——信封行返回的是密文
+    # （接管重建实际已失效），明文行则把凭据直接给到 API。改走 decrypt_env_extra：
+    # 两种形态都还原为明文 JSON 串（类型不变，契约无感），顺带对存量明文行就地自愈。
+    try:
+        from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+        _env_ctx = decrypt_env_extra(env_extra, task_id=task_id)
+        env_extra = json.dumps(_env_ctx if isinstance(_env_ctx, dict) else {},
+                               ensure_ascii=False)
+    except Exception as _env_e:
+        log.warning(f"takeover_context: env_extra 解密失败，返回空对象 task={task_id}: {_env_e}")
+        env_extra = "{}"
     return {
         "task_id": task_id,
         "status": status,
@@ -2400,8 +2548,11 @@ def get_task_detail(task_id: str, user: dict = Depends(require_no_session_token)
     task = service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    from src.kernel.pr_scope import pr_number_from_env_extra
+    _pr_cwd = pr_number_from_env_extra(task.get("env_extra"))
     _cwd = _cwd_or_derived(task.get("cwd") or "", task.get("repo_key") or "",
-                           task.get("agent_type") or "", task.get("issue_id") or "", task_id)
+                           task.get("agent_type") or "", task.get("issue_id") or "", task_id,
+                           _pr_cwd)
     return {
         "id": task["id"],
         "status": task["status"],
