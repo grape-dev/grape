@@ -906,9 +906,13 @@ def _is_protected_branch_error(msg: str) -> bool:
 def _is_workflow_scope_error(msg: str) -> bool:
     """Detect the platform refusal caused by a credential without workflow scope (#4301)."""
     m = (msg or "").lower()
-    return ("without `workflow` scope" in m
+    if ("without `workflow` scope" in m
             or "without 'workflow' scope" in m
-            or "without workflow scope" in m)
+            or "without workflow scope" in m):
+        return True
+    # Fallback for reworded platform copy (review I-7): still anchored on "workflow" so an
+    # unrelated hook decline (pre-receive/secret scan) is never relabelled as this failure.
+    return "workflow" in m and ("push declined" in m or "422" in m)
 
 
 def _workflow_scope_hint(msg: str) -> str:
@@ -1494,6 +1498,20 @@ def _login_channel_scope_has(provider: str, name: str) -> "bool | None":
     return name in parts
 
 
+def _has_user_pat(user_id: str, provider: str) -> bool:
+    """Whether a PAT row exists for the user (regardless of its capability declaration).
+
+    Needed because ``credential_workflows_write`` returns None both for "row exists but
+    nothing was declared" and "no row at all"; only the second one may fall back to the
+    login-channel verdict, since ``fetch_user_token`` prefers ``<p>_pat`` over OAuth.
+    """
+    try:
+        from src.kernel.ports import tokens as _tokens
+        return bool(_tokens.get_credential(str(user_id), provider, kind="pat"))
+    except Exception:
+        return False
+
+
 def _repo_bot_workflows_write(repo_key: str) -> "bool | None":
     """Repository bot capability from the rc table (cred_type='workflows_write')."""
     try:
@@ -1550,6 +1568,12 @@ def push_workflows_capability(repo_key: str) -> dict:
         capability = credential_workflows_write(user_id, provider)
         if capability is not None:
             return {"capability": capability, "source": "pat"}
+        # A PAT row can exist while its capability is unknown (fine-grained PAT returns no
+        # X-OAuth-Scopes, so the binding precheck persists nothing). The push then uses that
+        # PAT -- the login channel is never consulted -- so a channel verdict here would be a
+        # false block with a remedy that cannot work (review C-1, PR #2249).
+        if _has_user_pat(user_id, provider):
+            return {"capability": None, "source": "pat"}
     # Only GitHub publishes the workflow flag as an OAuth scope. Other platforms
     # report coarse strings ("all", "user_info", "openid profile email") where the
     # absence of a "workflow" token carries no meaning -- live probe on 276 managed

@@ -59,7 +59,7 @@ FROZEN = {
     },
     'admin.html': {
         'admin-view.css': '3',
-        'admin-view.js': '56',
+        'admin-view.js': '57',
         'pwd-blocklist.js': '3',
         'tokens.css': '2',
     },

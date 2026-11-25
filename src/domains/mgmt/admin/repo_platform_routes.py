@@ -304,6 +304,20 @@ def set_platform_bot(provider: str, body: BotBody, admin: dict = Depends(require
             log.debug(f"repo_platform_routes: invalidate bot cache failed: {e}")
         # D110 R1：轮换传播到 path A 仓库的 webhook 验签 token
         trigger_platform_bot_swap(provider, old_plain, body.token)
+    # Review I-4 (PR #2249): the repo-level bind already writes an audit row; the platform
+    # level did not, so a token rotation at this scope left no trace. Token itself never logged.
+    try:
+        from src.domains.mgmt.auth.audit import log_audit
+
+        log_audit("admin_repo_platform_bot_bind",
+                  user_id=str((admin or {}).get("id") or ""),
+                  operator_id=str((admin or {}).get("id") or ""),
+                  detail={"provider": provider, "token_rotated": token_enc is not None,
+                          "username_set": bool(username),
+                          "scope_warnings": len(scope_warnings)})
+    except Exception as e:  # noqa: BLE001 - audit failure must not roll back the token write
+        log.warning(f"repo_platform_routes: audit platform bot bind failed: {e}")
+
     from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo as _R
 
     return {"ok": True, "provider": provider, "changed": True,

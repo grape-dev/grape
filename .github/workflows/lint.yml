@@ -89,3 +89,12 @@ jobs:
         run: |
           python -m pytest -q tests/kernel/test_issue_4295_*.py \
                             tests/api/test_issue_4295_*.py
+      - name: GitHub workflow capability regression (issue #4301)
+        # PR #2249 复审 Required：本单新增/改动的 4 个能力用例此前只在本地跑过，CI 里没有入口。
+        # 合入后 scope 解析（三态）、绑定期预检与落键、spec 阶段阻断、模板未知态保留四族回归
+        # 都不会变红（删任一条断言 CI 仍绿）。与 PR 描述「测试」段同一组命令，可直接复算用例数。
+        run: |
+          python -m pytest -q tests/mgmt/test_issue4301_push_capability_chain.py \
+                            tests/mgmt/test_issue4301_workflows_scope_precheck.py \
+                            tests/mgmt/test_d105m_workflows_capability.py \
+                            tests/mgmt/test_github_oauth_scope.py

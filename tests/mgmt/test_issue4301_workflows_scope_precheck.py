@@ -24,13 +24,13 @@ NS = "i4301"
 def _clean():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_credentials WHERE CAST(user_id AS TEXT) LIKE ?",
+        c.execute("DELETE FROM user_credentials WHERE CAST(user_id AS CHAR) LIKE ?",
                   (f"{NS}%",))
         db.commit()
     yield
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_credentials WHERE CAST(user_id AS TEXT) LIKE ?",
+        c.execute("DELETE FROM user_credentials WHERE CAST(user_id AS CHAR) LIKE ?",
                   (f"{NS}%",))
         db.commit()
 

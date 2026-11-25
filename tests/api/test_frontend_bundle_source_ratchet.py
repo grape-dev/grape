@@ -58,7 +58,7 @@ AG_AGGREGATE = "ag-ui.css"
 # 页面版本 / 注入版本 / 源指纹 / 源清单任一变，都必须同步改本表与对应页面的 ?v=。
 FROZEN = {
     "account-view.js": ("71", None, "0a7a66651776b725", ["components/BindDialog.vue", "components/CredRepoRow.vue", "components/PatDialog.vue", "views/AccountView.vue", "views/LlmCredManager.vue", "views/entries/account-view.js"]),
-    "admin-view.js": ("56", None, "418712a6f9e09480", ["components/ui/AGHelp.vue", "components/ui/AGPill.vue", "lib/bot-summary.js", "views/AdminChannels.vue", "views/AdminPlatforms.vue", "views/AdminView.vue", "views/entries/admin-view.js"]),
+    "admin-view.js": ("57", None, "88e600afc1ca5a62", ["components/ui/AGHelp.vue", "components/ui/AGPill.vue", "lib/bot-summary.js", "views/AdminChannels.vue", "views/AdminPlatforms.vue", "views/AdminView.vue", "views/entries/admin-view.js"]),
     "agent-view.js": ("53", None, "76441a9f9a240ea1", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "views/AgentView.vue", "views/entries/agent-view.js"]),
     "autopilot-view.js": ("76", '72', "11e973dc45479ca3", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGDrawer.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "lib/pollGuard.js", "lib/repo-key.js", "lib/repo-provider.js", "styles/bridge.css", "views/AutopilotView.vue", "views/entries/autopilot-view.js"]),
     "chat-view.js": ("63", None, "4fdaaae25a10f706", ["lib/features.js", "lib/onboard.js", "views/ChatView.vue", "views/entries/chat-view.js"]),
@@ -90,7 +90,7 @@ FROZEN = {
 # 与 FROZEN 在健康树上逐字段相同；留在这里是为了让「只重冻 FROZEN」这条路径变红。
 SHIPPED = {
     "account-view.js": ("71", None, "0a7a66651776b725", None),
-    "admin-view.js": ("56", None, "418712a6f9e09480", None),
+    "admin-view.js": ("57", None, "88e600afc1ca5a62", None),
     "agent-view.js": ("53", None, "76441a9f9a240ea1", None),
     "autopilot-view.js": ("76", '72', "11e973dc45479ca3", '90e5efeb89bfeac7'),
     "chat-view.js": ("63", None, "4fdaaae25a10f706", None),

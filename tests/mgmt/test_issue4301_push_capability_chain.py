@@ -33,7 +33,7 @@ def _clean(rk: str):
         c = db.cursor()
         c.execute("DELETE FROM managed_repos WHERE repo_key=?", (rk,))
         c.execute("DELETE FROM grape_t_repo_credentials WHERE repo_key=?", (rk,))
-        c.execute("DELETE FROM user_credentials WHERE CAST(user_id AS TEXT) LIKE ?", (f"{NS}%",))
+        c.execute("DELETE FROM user_credentials WHERE CAST(user_id AS CHAR) LIKE ?", (f"{NS}%",))
         db.commit()
 
 
@@ -44,7 +44,7 @@ def _cleanup():
 
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_credentials WHERE CAST(user_id AS TEXT) LIKE ?", (f"{NS}%",))
+        c.execute("DELETE FROM user_credentials WHERE CAST(user_id AS CHAR) LIKE ?", (f"{NS}%",))
         c.execute("DELETE FROM managed_repos WHERE repo_key LIKE ?", (f"github:{NS}/%",))
         c.execute("DELETE FROM managed_repos WHERE repo_key LIKE ?", (f"gitcode:{NS}/%",))
         c.execute("DELETE FROM grape_t_repo_credentials WHERE repo_key LIKE ?", (f"github:{NS}/%",))
@@ -122,16 +122,38 @@ def test_capability_user_pat_preferred_over_login_channel(set_level):
 
 
 def test_capability_login_channel_without_workflow_is_false(set_level, monkeypatch):
-    """User level, no PAT declaration: channel scope without workflow -> definite False."""
+    """User level, NO PAT row at all: channel scope without workflow -> definite False."""
     import src.domains.mgmt.user.repo_manager as rm
 
     rk = _rk()
-    _seed_repo(rk)
+    _seed_repo(rk, host_user_id=f"{NS}u1")   # NS user holds no PAT row (cleanup guarantees)
     monkeypatch.setattr(rm, "_login_channel_scope", lambda p: "read:user user:email repo")
     set_level("user")
     got = rm.push_workflows_capability(rk)
     _clean(rk)
     assert got == {"capability": False, "source": "login_channel"}, got
+
+
+def test_capability_pat_unknown_does_not_fall_back_to_login_channel(set_level, monkeypatch):
+    """A PAT row without a workflows_write declaration must stay unknown/pat.
+
+    fetch_user_token prefers ``<p>_pat`` over the OAuth identity, so pushing uses that PAT
+    and the login channel is never consulted; reporting a channel verdict here would block
+    the task and point at a remedy that cannot work (review C-1 / Required 2, PR #2249).
+    """
+    import src.domains.mgmt.user.repo_manager as rm
+    from src.domains.mgmt.user.db import set_credential
+
+    rk = _rk()
+    _seed_repo(rk, host_user_id=f"{NS}u1")
+    set_credential(f"{NS}u1", "github", {"token": "t"})   # PAT exists, capability undeclared
+    monkeypatch.setattr(rm, "_login_channel_scope", lambda p: "read:user user:email repo")
+    set_level("user")
+    got = rm.push_workflows_capability(rk)
+    blocker = rm.workflows_capability_blocker(f"{NS}u1", "github", True, rk)
+    _clean(rk)
+    assert got == {"capability": None, "source": "pat"}, got
+    assert blocker == "", blocker
 
 
 def test_capability_non_github_channel_scope_never_blocks(set_level, monkeypatch):

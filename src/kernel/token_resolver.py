@@ -1332,7 +1332,7 @@ def credential_workflows_write(user_id: str, provider: str) -> "bool | None":
     """D105-18：凭据级 workflows 写能力（三态，gh-aw ADR-0002 显式声明制）。
 
     返回：True=声明有写权限（push 不删 workflows）；False=声明受限（删）；
-    None=未声明（调用方回退平台名旧逻辑，保证存量零回归）。
+    None=未声明（调用方按未知态处理：不阻断、不删目录、不落键，见 #4301 决策 A）。
     声明位置：凭据域 <p>_pat 配置的 workflows_write 键。写入源（Issue #4301，
     PR#2135 复审 O-3 契约对齐）：① 用户显式声明（platform_tokens 对象形态）；
     ② 绑定期预检——经典 PAT 解析 X-OAuth-Scopes 后自动落键，细粒度 PAT 无

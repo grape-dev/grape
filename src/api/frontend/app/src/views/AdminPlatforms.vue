@@ -626,5 +626,5 @@ onMounted(load)
 .ap-icon.danger { color: #b3261e; border-color: #f0c9c5; }
 .ap-hint { color: #6e6e73; font-size: 13px; padding: 8px 4px; }
 .ap-err { color: #b3261e; font-size: 13px; padding: 8px 4px; }
-.ap-warn { color: #8a5a00; font-size: 13px; padding: 8px 4px; white-space: pre-line; }
+.ap-warn { color: var(--c-warning); font-size: 13px; padding: 8px 4px; white-space: pre-line; }
 </style>
