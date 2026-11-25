@@ -19768,7 +19768,7 @@
           "runtime"
         ],
         "summary": "Set role tags",
-        "description": "Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Write is restricted to the credential owner (user/org owner+admin) or platform admin (Issue #3396).",
+        "description": "Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Write permission is layered (Issue #3396, 2026-11-24): locally-attached engines (credential_id=0) accept any authenticated user; credential-backed engines accept only a platform admin, the credential owner, or an owner/admin of the credential's org; session_token is always 403. Tag values are domain-validated (400 INVALID_ROLE_TAGS) and empty tag sets are rejected (400 EMPTY_ROLE_TAGS, at least one role must remain).",
         "operationId": "runtime_tags_set",
         "parameters": [
           {
@@ -32427,44 +32427,106 @@
             "default": []
           },
           "cpu_percent": {
-            "type": "number",
-            "title": "Cpu Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Percent"
           },
           "memory_percent": {
-            "type": "number",
-            "title": "Memory Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Percent"
           },
           "disk_percent": {
-            "type": "number",
-            "title": "Disk Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disk Percent"
           },
           "tmp_percent": {
-            "type": "number",
-            "title": "Tmp Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tmp Percent"
           },
           "bandwidth_percent": {
-            "type": "number",
-            "title": "Bandwidth Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bandwidth Percent"
           },
           "bandwidth_mbps": {
-            "type": "number",
-            "title": "Bandwidth Mbps",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bandwidth Mbps"
           },
           "load_avg": {
-            "type": "string",
-            "title": "Load Avg",
-            "default": ""
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Avg"
           },
           "spec": {
             "type": "string",
             "title": "Spec",
             "default": ""
+          },
+          "acp_state_db_bytes": {
+            "type": "number",
+            "title": "Acp State Db Bytes",
+            "default": 0.0
+          },
+          "acp_state_db_cleanup_counts": {
+            "type": "string",
+            "title": "Acp State Db Cleanup Counts",
+            "default": ""
+          },
+          "acp_state_db_bytes_freed_total": {
+            "type": "number",
+            "title": "Acp State Db Bytes Freed Total",
+            "default": 0.0
+          },
+          "acp_resume_skipped_total": {
+            "type": "integer",
+            "title": "Acp Resume Skipped Total",
+            "default": 0
           },
           "log_lines": {
             "items": {
@@ -32482,7 +32544,8 @@
           }
         },
         "type": "object",
-        "title": "HeartbeatBody"
+        "title": "HeartbeatBody",
+        "description": "心跳 body。\n\nIssue（心跳双写覆盖指标）：worker 有两个心跳循环——完整心跳带 metrics，\n`_presence_heartbeat_loop` 的最小在线态心跳**不带**。旧模型把缺省值定为 0.0 并\n无条件 UPDATE，于是最小心跳每 15~20s 就把真实 cpu/mem/disk 刷成 0，看板来回跳\n「有数据 → 全 0」。现在缺省为 None，服务端只更新**真的上报了**的列。"
       },
       "HeartbeatBodyV2": {
         "properties": {
@@ -32495,44 +32558,106 @@
             "default": []
           },
           "cpu_percent": {
-            "type": "number",
-            "title": "Cpu Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Percent"
           },
           "memory_percent": {
-            "type": "number",
-            "title": "Memory Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Percent"
           },
           "disk_percent": {
-            "type": "number",
-            "title": "Disk Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disk Percent"
           },
           "tmp_percent": {
-            "type": "number",
-            "title": "Tmp Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tmp Percent"
           },
           "bandwidth_percent": {
-            "type": "number",
-            "title": "Bandwidth Percent",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bandwidth Percent"
           },
           "bandwidth_mbps": {
-            "type": "number",
-            "title": "Bandwidth Mbps",
-            "default": 0.0
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bandwidth Mbps"
           },
           "load_avg": {
-            "type": "string",
-            "title": "Load Avg",
-            "default": ""
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Avg"
           },
           "spec": {
             "type": "string",
             "title": "Spec",
             "default": ""
+          },
+          "acp_state_db_bytes": {
+            "type": "number",
+            "title": "Acp State Db Bytes",
+            "default": 0.0
+          },
+          "acp_state_db_cleanup_counts": {
+            "type": "string",
+            "title": "Acp State Db Cleanup Counts",
+            "default": ""
+          },
+          "acp_state_db_bytes_freed_total": {
+            "type": "number",
+            "title": "Acp State Db Bytes Freed Total",
+            "default": 0.0
+          },
+          "acp_resume_skipped_total": {
+            "type": "integer",
+            "title": "Acp Resume Skipped Total",
+            "default": 0
           },
           "log_lines": {
             "items": {
@@ -34859,9 +34984,15 @@
             "default": ""
           },
           "description": {
-            "type": "string",
-            "title": "Description",
-            "default": ""
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
           },
           "avatar_url": {
             "type": "string",
@@ -34869,19 +35000,37 @@
             "default": ""
           },
           "max_members": {
-            "type": "integer",
-            "title": "Max Members",
-            "default": 0
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Members"
           },
           "max_workers": {
-            "type": "integer",
-            "title": "Max Workers",
-            "default": 0
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Workers"
           },
           "max_repos": {
-            "type": "integer",
-            "title": "Max Repos",
-            "default": 0
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Repos"
           }
         },
         "type": "object",
@@ -36018,7 +36167,7 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "8b1599e96",
-  "x-generated-at": "2026-11-24T08:52:05.641856+00:00",
+  "x-source-commit": "2ead459f9",
+  "x-generated-at": "2026-11-25T02:28:32.063186+00:00",
   "tags": []
 }
