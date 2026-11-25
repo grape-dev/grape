@@ -38,6 +38,20 @@ class TestPrometheusRule:
         assert "sum by (repo)" in expr, "必须按仓库聚合，全局聚合会被正常流量稀释"
         assert "> 10" in expr, "阈值与种子规则一致（10 次/分钟）"
 
+    def test_annotation_and_comment_use_emitted_log_fields(self):
+        """告警指引的 grep 字段必须与 route 实际日志同口径（`token_fp=`/`expected_fp=`）。
+
+        告警 annotation 是运维的第一手指引：字段名漂移（旧 `expected=`/`actual=`）会让
+        触发后按指引 grep 扑空，直接削弱 Issue #3750 交付的「可定位」能力。
+        """
+        raw = open(ALERTS, encoding="utf-8").read()
+        start = raw.index("Issue #3750：同仓库")
+        end = raw.index("GrapeWebhookTokenMismatch", start)
+        end = raw.find("\n      - alert:", end)
+        block = raw[start:] if end < 0 else raw[start:end]
+        assert "token_fp=" in block and "expected_fp=" in block, block
+        assert "actual=" not in block, "日志字段已统一为 token_fp/expected_fp，指引不得残留 actual="
+
     def test_counter_is_registered_in_observability(self):
         pytest.importorskip("prometheus_client")
         from prometheus_client import generate_latest

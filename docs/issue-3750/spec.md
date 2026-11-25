@@ -1,10 +1,11 @@
 # Issue #3750 需求文档（Spec）
 
 > 来源：Issue #3750 正文 + VOD Agent 收敛评论（2026-11-22）+ issue agent 可开发性分析（评级 ready）
-> 与本仓当前基线的差异：基线已由 Issue #3897 C 组（B）落地**403 日志指纹**（`expected=`/`actual=`
-> 的 `sha256:` 前 12 位 + `ip`/`xff`，见 `src/domains/runtime/routes/webhook.py::_token_fingerprint`），
-> 因此本 Issue 的代码交付收窄为「**拒绝事实落库 + 按仓库速率告警**」与日志字段补全（`event`/`reason`），
-> 不重复实现已闭环的指纹。
+> 与本仓当前基线的差异：基线已由 Issue #3897 C 组（B）落地**403 日志指纹**（`sha256:` 前 12 位 +
+> `ip`/`xff`，见 `src/domains/runtime/routes/webhook.py::_token_fingerprint`）；基线原字段名为
+> `expected=`/`actual=`，本 Issue 按验收口径统一为 `token_fp=`（实收）/`expected_fp=`（期望），
+> 日志与落库同名字段一一对应，因此本 Issue 的代码交付收窄为「**拒绝事实落库 + 按仓库速率告警**」
+> 与日志字段补全（`event`/`reason`），不重复实现已闭环的指纹。
 
 ## 1. 问题陈述
 
@@ -21,10 +22,13 @@
 ## 2. 期望行为
 
 ### In Scope
-1. **403 拒绝日志可诊断化（补全）**：`repo`、`event`、`ip`（附 `xff`）、`expected`/`actual`（`sha256:`
-   短指纹）、`reason=absent|mismatch`；404 unmanaged 分支补 `event`/`ip`。
-2. **拒绝事实落库** `obs_webhook_rejects`：每次 403 落一行（`repo_key`/`event`/`ip`/`token_fp`/
-   `expected_fp`/`reason`/`provider`/`created_at`），支撑速率统计与「哪条旧 secret 在发事件」反查。
+1. **403 拒绝日志可诊断化（补全）**：`repo`、`event`、`ip`（附 `xff`）、`token_fp`/`expected_fp`
+   （`sha256:` 短指纹，实收/期望两侧都记）、`reason=absent|mismatch`；404 unmanaged 分支补
+   `event`/`ip`（GitHub 入口同时可拿到 client host）。
+2. **拒绝事实落库** `obs_webhook_rejects`：token 比对 403 每次落一行（`repo_key`/`event`/`ip`/
+   `token_fp`/`expected_fp`/`reason`/`provider`/`created_at`），支撑速率统计与「哪条旧 secret 在发事件」反查。
+   例外：GitHub 的 `X-Hub-Signature-256` **签名**不一致 403 不是 token 比对（无 token 指纹可比），
+   只补日志（`repo`/`event`/`ip`/`body_size`），不落拒绝行、不计入速率告警。
 3. **速率告警**：同仓库 60s 内 token mismatch > 10 次、持续 5 分钟 → `firing`（`warning`，
    `dim_key=repo:<repo_key>`）；回落 `resolved`；跨仓库不聚合。
 4. **GitCode webhook 列表核查与 secret 统一**（管理员手动；本 Issue 只提供定位手段）。
@@ -36,11 +40,12 @@
 
 ## 3. 验收标准
 
-- [ ] 403 WARNING 含 `repo/event/ip/expected/actual/reason`，不依赖 INFO 行 + request_id 反查
-- [ ] 404 unmanaged 日志含 `event`/`ip`
+- [ ] 403 WARNING 含 `repo/event/ip/token_fp/expected_fp/reason`，不依赖 INFO 行 + request_id 反查
+- [ ] 404 unmanaged 日志含 `event`/`ip`（GitCode 与 GitHub 两个入口均如此）
 - [ ] 日志与落库均无完整 token 及任意长度前缀/子串；#860 / #3897 回归用例全绿
 - [ ] 403 响应体 `{"code":403,"message":"invalid webhook token"}` 与 `compare_digest` 校验不变
-- [ ] 每次 403 落一条 `obs_webhook_rejects`；写库异常/队满不影响 403 返回（有界队列丢弃并计数）
+- [ ] token 比对 403 每次落一条 `obs_webhook_rejects`（GitHub 签名不一致 403 除外，见 §2 例外）；
+      写库异常/队满不影响 403 返回（有界队列丢弃并计数）
 - [ ] 60s 内 >10 次且持续 5 分钟 → firing（`warning`, `repo:<repo_key>`）；回落 resolved；跨仓库不聚合
 - [ ] `promtool check rules deploy/alerts.yml` 通过；种子规则可幂等 seed
 - [ ] 新增测试覆盖上述行为；存量测试全绿
