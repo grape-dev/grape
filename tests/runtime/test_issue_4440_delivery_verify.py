@@ -108,10 +108,11 @@ class TestVerifyCodingDelivery:
         assert r["code"] == "no_issue_number"
         assert calls["n"] == 0, "无需求编号不得外呼查询"
 
-    def test_pr_subscription_pseudo_issue_id(self, _vcs):
-        _vcs(REPO)
+    def test_pr_subscription_pseudo_issue_id_skips(self, _vcs):
+        calls = _vcs(REPO)
         r = self._verify(issue_id="#pr_123_scene")
-        assert r["delivered"] is False and r["code"] == "no_issue_number"
+        assert r["applies"] is False and r["delivered"] is True, "PR 订阅不是新交付目标，双路径同口径跳过"
+        assert calls["n"] == 0, "PR 订阅不得外呼查询"
 
     def test_no_linked_pr(self, _vcs):
         _vcs(REPO, prs=[])
@@ -196,9 +197,13 @@ def _worker_hooks(monkeypatch):
     import src.api.issues_center as api_issues_center
     import src.domains.runtime.pipeline.event_pipeline as ep
     import src.domains.mgmt.vcs as mgmt_vcs
+    import src.domains.runtime.engine.backend_health as backend_health
     advances = []
+    notes = []
     monkeypatch.setattr(svc, "_schedule_auto_advance_after_complete",
                         lambda *a, **k: advances.append(a))
+    monkeypatch.setattr(backend_health, "note_task_success",
+                        lambda rid: notes.append(rid))
     monkeypatch.setattr(event_archive, "finalize_event_archive", lambda *a, **k: None)
     monkeypatch.setattr(api_issues_center, "finalize_issue_to_pending_review",
                         lambda *a, **k: "noop:not_last_node")
@@ -207,13 +212,14 @@ def _worker_hooks(monkeypatch):
     monkeypatch.setattr(ep, "_post_subtask_completion_to_parent", lambda *a, **k: None)
     monkeypatch.setattr(ep, "_post_all_subtasks_done", lambda *a, **k: None)
     monkeypatch.setattr(mgmt_vcs, "create_provider_from_repo_key", lambda *a, **k: None)
-    return advances
+    return {"advances": advances, "notes": notes}
 
 
-def _complete(skill=VERIFY_SKILL, issue_id="#4440", agent_type="coding"):
+def _complete(skill=VERIFY_SKILL, issue_id="#4440", agent_type="coding", exit_code=0):
     from src.domains.runtime.engine.service import complete_task
     _seed_worker_task(skill, issue_id, agent_type)
-    complete_task(WTASK, json.dumps({"actions": ["x"], "conclusion": "done"}), exit_code=0)
+    complete_task(WTASK, json.dumps({"actions": ["x"], "conclusion": "done"}),
+                  exit_code=exit_code)
 
 
 class TestWorkerCompleteTaskPath:
@@ -229,14 +235,16 @@ class TestWorkerCompleteTaskPath:
         ev = _event_row()
         assert ev[0] == "failed"
         assert "Coding 未交付" in (ev[2] or "")
-        assert not _worker_hooks, "未交付不得触发成功路径自动推进"
+        assert not _worker_hooks["advances"], "未交付不得触发成功路径自动推进"
+        assert not _worker_hooks["notes"], "未交付不得释放后端成功态（副作用须在核实后）"
 
     def test_query_failure_marks_not_delivered(self, _vcs, _worker_hooks):
         _vcs(REPO, error="500 server error")
         _complete()
         assert _task_row()[0] == "failed", "查询失败不静默记成功"
         assert "Coding 未交付" in (_event_row()[2] or "")
-        assert not _worker_hooks
+        assert not _worker_hooks["advances"]
+        assert not _worker_hooks["notes"]
 
     def test_delivered_with_pr_records_success(self, _vcs, _worker_hooks):
         _vcs(REPO, prs=[_pr(101, "fixes #4440")])
@@ -244,14 +252,15 @@ class TestWorkerCompleteTaskPath:
         row = _task_row()
         assert row[0] == "completed" and row[1] == 0
         assert _event_row()[0] == "completed"
-        assert len(_worker_hooks) == 1, "核实通过才推进下游"
+        assert len(_worker_hooks["advances"]) == 1, "核实通过才推进下游"
+        assert _worker_hooks["notes"], "核实通过才释放后端成功态"
 
     def test_other_skill_unchanged_no_verify(self, _vcs, _worker_hooks):
         calls = _vcs(REPO, prs=[])
         _complete(skill="coding-cli-1")
         assert _task_row()[0] == "completed", "非核实工作流行为不变"
         assert calls["n"] == 0, "未命中清单不得外呼查询"
-        assert len(_worker_hooks) == 1
+        assert len(_worker_hooks["advances"]) == 1
 
     def test_no_issue_id_skips_gate(self, _vcs, _worker_hooks):
         calls = _vcs(REPO, prs=[])
@@ -264,6 +273,60 @@ class TestWorkerCompleteTaskPath:
         _complete(agent_type="qa", skill=VERIFY_SKILL)
         assert _task_row()[0] == "completed"
         assert calls["n"] == 0
+
+    def test_structured_output_revival_requires_delivery(self, _vcs, _worker_hooks):
+        """-15 + actions/conclusion 的「复活为 completed」通道同样要经过核实。"""
+        _vcs(REPO, prs=[])
+        _complete(exit_code=-15)
+        row = _task_row()
+        assert row[0] == "failed", "非零退出码 + 自述不是交付证据，不得复活为成功"
+        assert row[1] == 1
+        assert "Coding 未交付" in (_event_row()[2] or "")
+        assert not _worker_hooks["advances"]
+        assert not _worker_hooks["notes"]
+
+    def test_structured_output_revival_with_pr_succeeds(self, _vcs, _worker_hooks):
+        _vcs(REPO, prs=[_pr(101, "fixes #4440")])
+        _complete(exit_code=-15)
+        row = _task_row()
+        assert row[0] == "completed" and row[1] == 0
+        assert _event_row()[0] == "completed"
+
+    def test_pr_subscription_skips_gate_symmetry(self, _vcs, _worker_hooks):
+        """worker 对 PR 订阅伪 issue_id 与 direct 同口径跳过（不误判未交付）。"""
+        calls = _vcs(REPO, prs=[])
+        _complete(issue_id="#pr_123_scene")
+        assert _task_row()[0] == "completed", "PR 订阅不是新交付目标"
+        assert calls["n"] == 0, "PR 订阅不得外呼查询"
+        assert len(_worker_hooks["advances"]) == 1
+
+
+class TestTransientDegradeDeliveryGate:
+    """transient_retry 降级为 completed 也是成功通道，须先过交付核实。"""
+
+    def _degrade(self):
+        from src.domains.runtime.engine.transient_retry import retry_transient_task
+        _seed_worker_task()
+        return retry_transient_task(
+            WTASK, -1, "connection reset by peer", has_output=True,
+            tool_uses=[{"cmd": "grape git push origin feat/issue-4440"}],
+            result_text="代码已推送")
+
+    def test_transient_degrade_blocked_without_pr(self, _vcs):
+        _vcs(REPO, prs=[])
+        r = self._degrade()
+        assert r is False, "交付核实未通过不得降级为 completed"
+        row = _task_row()
+        assert row[0] == "running", "保持 running，交由调用方判死写 failed"
+        errs = json.loads(row[3] or "[]")
+        assert any(isinstance(e, dict) and e.get("error_code") == "CODING_DELIVERY_UNVERIFIED"
+                   for e in errs), f"结构化错误码缺失: {errs}"
+
+    def test_transient_degrade_allowed_with_pr(self, _vcs):
+        _vcs(REPO, prs=[_pr(101, "fixes #4440")])
+        r = self._degrade()
+        assert r is True
+        assert _task_row()[0] == "completed", "有可核实 PR 才允许降级完成"
 
 
 # ===== direct 收尾路径：direct_executor._execute_agent_inner =====
@@ -295,6 +358,7 @@ def _direct_env(monkeypatch, tmp_path):
     events_done = []
     advances = []
     recorded_errors = []
+    idles = []
 
     monkeypatch.setattr(ep, "_fail_event",
                         lambda seq, reason, exit_code=1, diag=None: fails.append(reason))
@@ -340,6 +404,8 @@ def _direct_env(monkeypatch, tmp_path):
     def _append_err(tid, entry):
         recorded_errors.append((tid, entry))
     monkeypatch.setattr(transient_retry, "_append_task_error", _append_err)
+    monkeypatch.setattr(direct_executor_mod(), "_mark_session_idle",
+                        lambda rk: idles.append(rk))
 
     class _StubUsage:
         def start(self):
@@ -360,7 +426,7 @@ def _direct_env(monkeypatch, tmp_path):
     monkeypatch.setattr(executor_mod, "stream_devops_agent", _fake_stream)
 
     return {"fails": fails, "statuses": statuses, "events": events_done,
-            "advances": advances, "errors": recorded_errors}
+            "advances": advances, "errors": recorded_errors, "idles": idles}
 
 
 def direct_executor_mod():
@@ -368,9 +434,9 @@ def direct_executor_mod():
     return de
 
 
-def _run_direct(skill=VERIFY_SKILL):
+def _run_direct(skill=VERIFY_SKILL, issue_id="#4440"):
     de = direct_executor_mod()
-    evt = {"repo_key": REPO, "repository": "i4440/dev-repo", "issue_id": "#4440",
+    evt = {"repo_key": REPO, "repository": "i4440/dev-repo", "issue_id": issue_id,
            "type": "a2a_event", "payload": {}}
     de._execute_agent_inner(REPO, DSEQ, "coding", "opencode", skill, evt, 0, DTASK)
 
@@ -383,12 +449,15 @@ class TestDirectExecPath:
         assert _direct_env["statuses"], "必须写入终态"
         tid, status, kw = _direct_env["statuses"][-1]
         assert status == "failed", "direct 无关联 PR 不得记成功"
+        assert kw.get("exit_code") == 1, "direct 交付失败须与 worker 同口径 exit_code=1"
         assert any(e[0] == DTASK and e[1].get("error_code") == "CODING_DELIVERY_UNVERIFIED"
                    for e in _direct_env["errors"]), "结构化错误码必须落档"
         ev = _direct_env["events"][-1]
         assert ev["status"] == "failed"
+        assert ev["exit_code"] == 1
         assert "Coding 未交付" in (ev["result"] or "")
         assert not _direct_env["advances"], "direct 未交付不得触发自动推进"
+        assert not _direct_env["idles"], "未交付不得重置会话成功态（副作用须在核实后）"
 
     def test_query_failure_marks_not_delivered(self, _vcs, _direct_env):
         _vcs(REPO, error="403 forbidden")
@@ -401,8 +470,10 @@ class TestDirectExecPath:
         _vcs(REPO, prs=[_pr(201, "fixes #4440")])
         _run_direct()
         assert _direct_env["statuses"][-1][1] == "completed"
+        assert _direct_env["statuses"][-1][2].get("exit_code") == 0
         assert _direct_env["events"][-1]["status"] == "completed"
         assert _direct_env["advances"], "核实通过才推进（auto-advance 钩子执行）"
+        assert _direct_env["idles"], "核实通过才重置会话成功态"
 
     def test_other_skill_unchanged(self, _vcs, _direct_env):
         calls = _vcs(REPO, prs=[])
@@ -410,6 +481,12 @@ class TestDirectExecPath:
         assert _direct_env["statuses"][-1][1] == "completed", "非核实工作流行为不变"
         assert calls["n"] == 0
         assert _direct_env["advances"]
+
+    def test_pr_subscription_skips_gate_symmetry(self, _vcs, _direct_env):
+        calls = _vcs(REPO, prs=[])
+        _run_direct(issue_id="#pr_123_scene")
+        assert _direct_env["statuses"][-1][1] == "completed", "PR 订阅不是新交付目标"
+        assert calls["n"] == 0, "PR 订阅不得外呼查询"
 
 
 # ===== 双路径共用同一入口（源级守卫） =====

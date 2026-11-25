@@ -13,11 +13,20 @@ PR；核实失败（无 PR / 查询失败）不得走成功路径，改记「Cod
 - 统一「交付核实」校验入口：输入 repo_key + 原需求编号 + 工作流，输出
   已交付 / 未交付（含原因与机器可读 code）。
 - Coding（atomcode-bug-fix 工作流）成功收尾记录前置核实。
+- **所有成功通道都必须核实**，不只在入口 `exit_code==0` 时：
+  ① 入口即成功；② `exit_code!=0` 但带完整结构化产出将「复活为 completed」
+  （如 -15）；③ 瞬时故障降级为 completed（transient_retry 写证据 + 有产出）。
 - 远程 Worker 收尾路径（service.complete_task）与 direct 收尾路径
   （direct_executor._execute_agent_inner）共用同一入口。
-- 未通过 → 任务/事件 failed + 「Coding 未交付」原因 + 结构化错误码
-  CODING_DELIVERY_UNVERIFIED；成功钩子（自动推进/回帖）不触发。
-- 回归测试：无 PR / 查询失败 / 有 PR 三类场景 × 两条路径。
+- 未通过 → 任务/事件 failed + `exit_code=1`（与 worker 同口径）+ 「Coding 未交付」
+  原因 + 结构化错误码 CODING_DELIVERY_UNVERIFIED；成功钩子（自动推进/回帖/会话
+  idle/后端熔断释放）不触发，且不得先于核实执行。
+- PR 订阅伪 issue_id（`#pr_<n>_<scene>`）不要求新交付 PR → 两条路径同口径跳过
+  核实（direct 侧同时保留 `_pr_sub_pr_number` 显式守卫）。
+- PR 全量翻页查询在带墙钟超时的子线程执行（默认 15s），超时按查询失败处理，
+  不长时间占用收尾请求线程。
+- 回归测试：无 PR / 查询失败 / 有 PR 三类场景 × 两条路径，覆盖 -15 结构化复活、
+  瞬时降级、成功副作用时序、PR 订阅不对称、direct exit_code。
 
 ### Out of Scope
 - 其他 Coding 工作流（skill 未命中核实清单）行为调整。
@@ -34,7 +43,12 @@ PR；核实失败（无 PR / 查询失败）不得走成功路径，改记「Cod
    agent_tasks.errors 落结构化错误码；结构化产出「复活为 completed」的
    通道对交付核实失败显式关闭。
 3. direct 路径：`_execute_agent_inner` 在终态写入（update_task_status /
-   update_event_complete）与 #403 重试之前同口径核实，未通过 new_status=failed。
+   update_event_complete）与 #403 重试之前同口径核实，未通过 new_status=failed
+   且 exit_code=1；崩溃兜底同样落 CODING_DELIVERY_UNVERIFIED 结构化码。
+4. 瞬时降级：`transient_retry.retry_transient_task` 在降级 completed 前调用
+   `verify_task_delivery`，未通过则不降级（交调用方判死 failed）。
+5. 副作用时序：worker `note_task_success` 与 direct 会话 `status='idle'` 移到
+   核实通过之后；`_mark_session_idle` 抽为可断言函数。
 
 ## Acceptance Criteria
 - [x] atomcode-bug-fix 无关联 PR 时不记录为成功，显示「Coding 未交付」+ 原因
@@ -42,4 +56,8 @@ PR；核实失败（无 PR / 查询失败）不得走成功路径，改记「Cod
 - [x] 存在可核实关联 PR 时正常记成功并继续推进
 - [x] 远程 Worker 与 direct 两条收尾路径共用同一校验入口（源级守卫测试锁定）
 - [x] 其他 Coding 工作流行为不变（未命中清单不核实、不外呼查询）
-- [x] 新增测试覆盖上述场景（tests/runtime/test_issue_4440_delivery_verify.py，25 用例）
+- [x] 全部成功通道（入口成功 / -15 结构化复活 / 瞬时降级）均经核实
+- [x] 未交付 exit_code=1、结构化错误码与「Coding 未交付」展示双路径同口径
+- [x] 成功副作用（后端熔断释放 / 会话 idle）在核实通过后执行
+- [x] PR 订阅伪 issue_id 双路径同口径跳过（不误判未交付）
+- [x] 新增测试覆盖上述场景（tests/runtime/test_issue_4440_delivery_verify.py，31 用例）

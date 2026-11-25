@@ -7,4 +7,5 @@
 | 3 | direct 收尾路径挂钩：`direct_executor._execute_agent_inner` 终态写入前同口径核实 | ✅ |
 | 4 | 未通过不进 #403 瞬时重试（两条路径），直接判死留痕 | ✅ |
 | 5 | 回归测试：三类场景 × 两条路径 + 未命中清单零改动 + 源级共用入口守卫 | ✅ |
-| 6 | 门禁：新增测试 25 passed；make lint 通过；check-arch PASS；AGENTS.md 回归套件通过（存量失败已基线复核） | ✅ |
+| 6 | 复审修复：-15 结构化复活 / 瞬时降级两条成功通道纳入核实；成功副作用后移；PR 订阅双路径同口径；direct exit_code=1 + 崩溃兜底码；查询超时；判定收敛为常量/helper；skill 为空显式留痕 | ✅ |
+| 7 | 门禁：新增测试 31 passed；相关回归 153 passed；make lint 通过；check-arch PASS | ✅ |

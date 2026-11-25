@@ -609,6 +609,21 @@ def retry_transient_task(task_id, exit_code, error_text: str, has_output: bool =
         # 「不重试」≠「判死」：降级 completed + errors 留诊断（可追溯原始错误）。
         # 仅 has_output（有实质输出）才降级；纯崩溃空跑维持原 fail 路径。
         if has_output:
+            # Issue #4440：瞬时降级为 completed 也是成功通道，不得绕过交付核实——
+            # 写证据/结构化自述不是 PR 交付证据；核实未通过则不降级，交调用方判死
+            # （failed + CODING_DELIVERY_UNVERIFIED 留痕）。
+            from src.domains.runtime.engine.delivery_verify import (
+                delivery_unverified_error_entry, is_delivery_unverified,
+                verify_task_delivery)
+            _dv = verify_task_delivery(task_id)
+            if is_delivery_unverified(_dv):
+                try:
+                    _append_task_error(task_id, delivery_unverified_error_entry(_dv))
+                except Exception:
+                    pass
+                log.warning(f"transient_retry: task {task_id} transient degrade blocked "
+                            f"by coding delivery verify (code={_dv.get('code')})")
+                return False
             _degrade_note = (f"收尾瞬时故障降级为完成：实质产出已留痕，收尾动作遇"
                              f"{_cls['error_class']}（{_cls['reason'][:150]}），未重试")
             try:

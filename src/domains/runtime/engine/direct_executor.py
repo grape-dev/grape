@@ -941,20 +941,6 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _fake_completion = False
     if exit_code == 0 or (has_output and exit_code < 0):
         new_status = "completed"
-        # R21.7.1: agent 完成后立即更新 devops_agent_session status='idle'
-        # 缩小 session 兜底误拦窗口（R21.7.4: status=idle → 兜底查询不命中 → 无误拦）
-        try:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "UPDATE devops_agent_session SET status='idle' "
-                    "WHERE repo_key=? AND status='active'",
-                    (repo_key,)
-                )
-                db.commit()
-        except Exception:
-            pass
         if exit_code < 0:
             log.info(f"Exec agent: seq={seq} exit_code={exit_code} but has_output=True, mark completed (signal death after work done)")
         # ── 假完成硬门槛（issue-P5，关卡B）──
@@ -1022,36 +1008,37 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _dv_failed = False
     if (new_status == "completed" and agent_type == "coding" and issue_id
             and not evt.get("_pr_sub_pr_number")):
+        from src.domains.runtime.engine.delivery_verify import (
+            DELIVERY_CODE_PR_QUERY_FAILED, not_delivered_message,
+            delivery_unverified_error_entry, is_delivery_unverified,
+            verify_coding_delivery)
         try:
-            from src.domains.runtime.engine.delivery_verify import (
-                DELIVERY_NOT_DELIVERED_PREFIX, verify_coding_delivery)
             _dv = verify_coding_delivery(repo_key, issue_id, "coding", skill_name)
-            if not _dv["delivered"]:
-                _dv_failed = True
-                new_status = "failed"
-                _dv_msg = f"⚠️ {DELIVERY_NOT_DELIVERED_PREFIX}：{_dv['reason']}"
-                result_text = (f"{_dv_msg}\n{result_text}" if (result_text or "").strip()
-                               else _dv_msg)
-                log.warning(f"Exec agent: seq={seq} coding delivery unverified "
-                            f"(code={_dv['code']}), demoting to failed")
-                try:
-                    from src.domains.runtime.engine.transient_retry import _append_task_error
-                    from src.domains.runtime.engine.delivery_verify import DELIVERY_UNVERIFIED_ERROR_CODE
-                    if task_id:
-                        _append_task_error(task_id, {
-                            "error_code": DELIVERY_UNVERIFIED_ERROR_CODE,
-                            "code": _dv.get("code") or "",
-                            "message": _dv.get("reason") or "",
-                            "skill": skill_name or ""})
-                except Exception as _dve:
-                    log.warning(f"Exec agent: delivery error record failed for seq={seq}: {_dve}")
         except Exception as _dv_crash:
             # fail-closed：核实链路自身异常同样按未交付处理，不静默放行
+            _dv = {"applies": True, "delivered": False,
+                   "code": DELIVERY_CODE_PR_QUERY_FAILED,
+                   "reason": f"交付核实异常：{str(_dv_crash)[:200]}", "prs": []}
+            log.warning(f"Exec agent: seq={seq} delivery verify crashed: {_dv_crash}")
+        if is_delivery_unverified(_dv):
             _dv_failed = True
             new_status = "failed"
-            result_text = (f"⚠️ Coding 未交付：交付核实异常：{str(_dv_crash)[:200]}\n"
-                           f"{result_text or ''}").strip()
-            log.warning(f"Exec agent: seq={seq} delivery verify crashed: {_dv_crash}")
+            exit_code = 1
+            _dv_msg = not_delivered_message(_dv)
+            result_text = (f"{_dv_msg}\n{result_text}" if (result_text or "").strip()
+                           else _dv_msg)
+            log.warning(f"Exec agent: seq={seq} coding delivery unverified "
+                        f"(code={_dv['code']}), demoting to failed")
+            try:
+                from src.domains.runtime.engine.transient_retry import _append_task_error
+                if task_id:
+                    _append_task_error(task_id, delivery_unverified_error_entry(_dv, skill_name))
+            except Exception as _dve:
+                log.warning(f"Exec agent: delivery error record failed for seq={seq}: {_dve}")
+    # R21.7.1: 成功副作用（session status='idle'）必须在交付核实通过后执行——
+    # 未交付仍重置会话成功态会误导 session 兜底判定（#4440 Spec）。
+    if new_status == "completed":
+        _mark_session_idle(repo_key)
     # Issue #403：瞬时上游抖动自动重试（判定层收口，direct 执行路径）。
     # new_status 判定完成后、终态写入（任务+事件）之前拦截：可重试（瞬时分类
     # ∧ 无写操作证据 ∧ attempts 未耗尽）则退避 requeue 并跳过终态写入。
@@ -1330,3 +1317,22 @@ import os, threading, traceback
 
 设计文档：docs/weekly-09/grape-three-process-split-design.md §3
 """
+
+
+def _mark_session_idle(repo_key: str) -> None:
+    """R21.7.1：agent 完成后把会话置 idle（成功副作用，须在交付核实通过后调用）。
+
+    抽出为独立函数便于回归用例断言「未交付不得重置会话成功态」（#4440）。
+    """
+    try:
+        from src.kernel.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE devops_agent_session SET status='idle' "
+                "WHERE repo_key=? AND status='active'",
+                (repo_key,)
+            )
+            db.commit()
+    except Exception:
+        pass
