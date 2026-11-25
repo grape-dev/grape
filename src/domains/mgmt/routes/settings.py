@@ -980,20 +980,50 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
         except Exception:
             pass  # 查询失败不阻断
 
+    _wf_warnings: list[str] = []
     if body.bot_token and not _is_placeholder(body.bot_token):
         token = body.bot_token.strip()
         # FR-9.1: verify token 有效性（与 R15 同口径）
         from src.domains.mgmt.vcs import create_provider_from_repo_key
         _vcs_provider = create_provider_from_repo_key(repo_key)
         _verified_login = ""
+        _bot_scopes = None
+        _verify_scopes = getattr(_vcs_provider, "verify_token_scopes", None)
         try:
-            _info = _vcs_provider.verify_token(token) or {}
+            if callable(_verify_scopes):
+                _vres = _verify_scopes(token)
+                if isinstance(_vres, tuple) and len(_vres) == 2:
+                    _info, _bot_scopes = _vres[0], _vres[1]
+                else:  # 非预期形态 → 当作纯 verify 结果，能力未知
+                    _info = _vres
+            else:
+                _info = _vcs_provider.verify_token(token) or {}
             _verified_login = str((_info or {}).get("login") or "").strip()
         except Exception:
             raise HTTPException(status_code=400, detail={
                 "code": 400, "error_code": "TOKEN_INVALID",
                 "message": "Bot Token 无效，请检查后重试"
             })
+        # Issue #4301 第二批（2026-11-25 负责人拍板）：这是仓库 Bot 令牌的**第二个**
+        # 写入入口（设置页快路径）——与 /repos/bot-token 同口径预检 workflow 能力，
+        # 两路口径必须一致，否则从设置页绑的 bot 仍会静默缺权限。
+        _wf_cap = None
+        from src.domains.mgmt.user.repo_manager import (
+            workflows_probe_supported as _wf_probe_ok,
+            workflows_write_from_scopes as _wf_from_scopes,
+        )
+        _provider_str = repo_key.split(":", 1)[0] if ":" in repo_key else ""
+        if _wf_probe_ok(_provider_str):
+            _wf_cap = _wf_from_scopes(_bot_scopes)
+            if _wf_cap is False:
+                _wf_warnings.append(
+                    "该 Bot Token 缺少 workflow 权限：涉及 .github/workflows 的推送会被 GitHub "
+                    "拒绝。请用含 workflow 权限的令牌重新绑定（经典 PAT 勾选 workflow；"
+                    "细粒度 PAT 把 Workflows 设为 Read and write）。")
+            elif _wf_cap is None:
+                _wf_warnings.append(
+                    "未能从令牌确认 workflow 权限（通常为细粒度 PAT）：请确认 Workflows 权限为 "
+                    "Read and write，否则涉及 .github/workflows 的推送会被拒绝。")
         # 先校验最终会写下去的用户名（显式值优先，其次令牌所属账号），再写令牌
         _assert_bot_username_free((body.bot_username or _verified_login or "").strip())
         _result = update_managed_repo_bot_token(repo_key, token)
@@ -1008,6 +1038,15 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
             body.bot_username = _verified_login
             _log.info(f"settings: bot username auto-filled from token owner: {_verified_login}")
         _log.info(f"settings: bot token updated for {repo_key} by user {user.get('id')}")
+        # Issue #4301 第二批：能力落 rc 单表（与 /repos/bot-token 同口径；未知不落键）
+        if _wf_cap is not None:
+            try:
+                from datetime import datetime, timezone
+                from src.domains.insight.public import upsert_repo_credential_value as _rc_upsert
+                _rc_upsert(repo_key, "workflows_write", "true" if _wf_cap else "false",
+                           datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+            except Exception as _wfe:
+                _log.warning(f"settings: persist workflows_write failed: {_wfe}")
     else:
         _result = {"ok": True, "warning": "", "related_repos": []}
     if body.bot_username:
@@ -1016,11 +1055,15 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
             _assert_bot_username_free(body.bot_username.strip())
         update_managed_repo_bot_username(repo_key, body.bot_username)
     # FR-20.11: 返回 warning + related_repos
-    _response = {"message": "GitCode Repo 配置已更新"}
+    _response: dict = {"message": "GitCode Repo 配置已更新"}
     if _result.get("warning"):
         _response["warning"] = _result["warning"]
+    _scope_warnings = list(_wf_warnings)
     if _result.get("related_repos"):
-        _response["scope_warnings"] = [f"该 Token 变更将影响 {len(_result['related_repos'])} 个关联仓库的跨仓信任域"]
+        _scope_warnings.append(
+            f"该 Token 变更将影响 {len(_result['related_repos'])} 个关联仓库的跨仓信任域")
+    if _scope_warnings:
+        _response["scope_warnings"] = _scope_warnings
     return _response
 
 @router.get("/oauth", operation_id="settings_oauth_get", summary="Get GitCode OAuth config", description="Returns whether GitCode OAuth is configured (client id/redirect uri; secret masked).")

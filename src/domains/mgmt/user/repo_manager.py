@@ -1410,21 +1410,146 @@ def workflows_probe_supported(provider: str) -> bool:
 
 
 def workflows_capability_blocker(user_id, provider: str,
-                                 task_requires_workflows: bool = False) -> str:
+                                 task_requires_workflows: bool = False,
+                                 repo_key: str = "") -> str:
     """Issue #4301：Agent spec 阶段诊断。
 
-    任务涉及 ``.github/workflows`` 且凭据**明确**无 workflow 写权限（三态 False）
-    时返回阻断级提示；未涉及 / 有权限 / 未知（细粒度 PAT）返回空串（不阻断）。
+    任务涉及 ``.github/workflows`` 且当前**推送凭据**明确无 workflow 写权限（三态 False）
+    时返回阻断级提示；未涉及 / 有权限 / 未知返回空串（不阻断）。
+
+    2026-11-25 负责人拍板（本条第二批）：诊断覆盖**整条推送凭据链**，不再只看
+    用户 PAT。传 ``repo_key`` 时按链首实际胜出的档位判定（仓库 Bot → 全局 Bot →
+    PAT → 登录渠道 scope），提示文案带档位；不传则维持旧口径（只读用户 PAT，
+    兼容既有调用方与单测）。
     """
     if not task_requires_workflows:
         return ""
-    if credential_workflows_write(user_id, provider) is False:
-        return (
-            "当前凭据缺少 workflow 权限：涉及 .github/workflows 的推送会被 GitHub "
-            "拒绝。请重新绑定含 workflow 权限的 GitHub PAT（经典 PAT 勾选 workflow；"
-            "细粒度 PAT 勾选 Workflows: Read and write）后再执行该任务。"
-        )
-    return ""
+    source = "pat"
+    capability = credential_workflows_write(user_id, provider)
+    if repo_key:
+        got = push_workflows_capability(repo_key)
+        capability = got.get("capability")
+        source = got.get("source") or ""
+    if capability is not False:
+        return ""
+    return _WORKFLOWS_BLOCKER_TEXTS.get(source) or _WORKFLOWS_BLOCKER_TEXTS["pat"]
+
+
+# 按凭据档位区分的阻断文案（Issue #4301 第二批）：同一故障、不同补救动作。
+_WORKFLOWS_BLOCKER_TEXTS = {
+    "pat": (
+        "当前凭据缺少 workflow 权限：涉及 .github/workflows 的推送会被 GitHub "
+        "拒绝。请重新绑定含 workflow 权限的 GitHub PAT（经典 PAT 勾选 workflow；"
+        "细粒度 PAT 勾选 Workflows: Read and write）后再执行该任务。"),
+    "repo_bot": (
+        "本仓库绑定的仓库级 Bot 凭据缺少 workflow 权限：涉及 .github/workflows 的推送"
+        "会被 GitHub 拒绝。请用含 workflow 权限的令牌重新绑定仓库 Bot（经典 PAT 勾选 "
+        "workflow；细粒度 PAT 勾选 Workflows: Read and write）后再执行该任务。"),
+    "global_bot": (
+        "平台全局 Bot 凭据缺少 workflow 权限：涉及 .github/workflows 的推送会被 GitHub "
+        "拒绝。请管理员在平台配置里换成含 workflow 权限的 Bot 令牌（经典 PAT 勾选 "
+        "workflow；细粒度 PAT 勾选 Workflows: Read and write）后再执行该任务。"),
+    "login_channel": (
+        "当前只走 GitHub 登录授权推送，而登录渠道申请的 scope 未含 workflow：涉及 "
+        ".github/workflows 的推送会被 GitHub 拒绝。请管理员把登录渠道 scope 加上 "
+        "workflow，用户重新授权一次；或改绑含 workflow 权限的 GitHub PAT。"),
+}
+
+
+# 平台级 Bot 的 workflow 能力落点（meta，按 provider 存 'true'/'false'）
+_GLOBAL_BOT_WORKFLOWS_META = "global_bot_{provider}_workflows_write"
+
+
+def _login_channel_scope(provider: str) -> str:
+    """登录渠道卡当前申请的 scope（管理面值优先，文件卡兜底；读失败=空）。"""
+    try:
+        from src.domains.mgmt.auth.providers import get_provider as _gp
+        return str(((_gp(provider) or {}).get("scope")) or "")
+    except Exception:
+        return ""
+
+
+def _login_channel_scope_has(provider: str, name: str) -> "bool | None":
+    """登录渠道 scope 是否含某权限（None=渠道未声明 scope，无法判定）。
+
+    注意：渠道卡 scope 用**空格**分隔（`read:user user:email repo workflow`），
+    而 X-OAuth-Scopes 响应头用**逗号**分隔——这里必须两种都认，直接复用
+    ``workflows_write_from_scopes``（只按逗号切）会把整串当成一个 scope，
+    把「已含 workflow」误判成「不含」（本文件第二批实测踩到）。
+    """
+    scopes = _login_channel_scope(provider)
+    if not scopes.strip():
+        return None
+    parts = {p for p in __import__("re").split(r"[,\s]+", scopes) if p}
+    return name in parts
+
+
+def _repo_bot_workflows_write(repo_key: str) -> "bool | None":
+    """仓库级 Bot 的 workflow 能力（rc 单表 cred_type='workflows_write'；无行=None）。"""
+    try:
+        from src.domains.insight.public import repo_credential_value as _rcv
+        raw = str(_rcv(repo_key, "workflows_write") or "").strip().lower()
+    except Exception:
+        return None
+    return True if raw == "true" else (False if raw == "false" else None)
+
+
+def _global_bot_workflows_write(provider: str) -> "bool | None":
+    """平台全局 Bot 的 workflow 能力（meta 键；未探测过=None）。"""
+    try:
+        from src.domains.mgmt.user.db import get_meta_value
+        raw = str(get_meta_value(_GLOBAL_BOT_WORKFLOWS_META.format(provider=provider)) or "")
+    except Exception:
+        return None
+    raw = raw.strip().lower()
+    return True if raw == "true" else (False if raw == "false" else None)
+
+
+def push_workflows_capability(repo_key: str) -> dict:
+    """Issue #4301 第二批：当前**推送凭据**的 workflow 写能力 + 档位（三态）。
+
+    档位判定复用真实取 token 的链（``token_resolver.resolve_exec_token``），
+    不再自己写一套优先级——否则诊断与实际推送会漂移（历史上两次吃过这个亏）。
+
+    返回 ``{"capability": True|False|None, "source": "repo_bot"|"global_bot"|
+    "pat"|"login_channel"|""}``；None=未知（不阻断），""=无可用凭据/无法判定。
+    """
+    provider = ""
+    try:
+        from src.kernel.repo_key import parse_repo_key
+        provider = parse_repo_key(repo_key or "")[0] or ""
+    except Exception:
+        provider = ""
+    level = ""
+    try:
+        from src.kernel.token_resolver import resolve_exec_token
+        level = str(getattr(resolve_exec_token(repo_key), "level", "") or "")
+    except Exception:
+        level = ""
+    if level in ("rc_bot", "repo_bot"):
+        return {"capability": _repo_bot_workflows_write(repo_key), "source": "repo_bot"}
+    if level == "global_bot":
+        return {"capability": _global_bot_workflows_write(provider), "source": "global_bot"}
+    user_id = ""
+    try:
+        from src.kernel.ports import tokens as _tokens
+        user_id = str(_tokens.get_host_user_id(repo_key) or "")
+    except Exception:
+        user_id = ""
+    if user_id not in ("", "0") and provider:
+        capability = credential_workflows_write(user_id, provider)
+        if capability is not None:
+            return {"capability": capability, "source": "pat"}
+    scopes = _login_channel_scope(provider) if provider else ""
+    if scopes:
+        has = _login_channel_scope_has(provider, "workflow")
+        if has is False:
+            return {"capability": False, "source": "login_channel"}
+        # 渠道已申请含 workflow：具体用户的令牌可能是升级前签发的 → 未知不阻断
+        return {"capability": None, "source": "login_channel"}
+    if user_id in ("", "0"):
+        return {"capability": None, "source": ""}
+    return {"capability": None, "source": "pat"}
 
 
 def probe_github_repo_create(api_token: str, owner: str = "", private: bool = True

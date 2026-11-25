@@ -621,6 +621,32 @@ def verify_token(provider: str, token: str) -> dict:
     return {"provider": provider, "login": login, "name": user_data.get("name") or login}
 
 
+def verify_token_scopes(provider: str, token: str) -> "tuple[dict, 'str | None']":
+    """Issue #4301：verify_token + 同一次 /user 响应里的 x-oauth-scopes 头。
+
+    平台 bot 令牌与用户 PAT 是两条独立入口，但同一套 scope 语义：绑定期预检
+    workflow 写能力必须走这里，否则 bot 令牌缺权限时只能在 push 阶段被打回。
+    平台不返回该头（细粒度 PAT/GitCode 等）→ None（未知，不阻断）。
+    """
+    from src.domains.mgmt.vcs import create_provider
+    provider_obj = create_provider(provider)
+    _verify_scopes = getattr(provider_obj, "verify_token_scopes", None)
+    scopes = None
+    if callable(_verify_scopes):
+        res = _verify_scopes(token)
+        if isinstance(res, tuple) and len(res) == 2:
+            user_data, scopes = res[0], res[1]
+        else:  # 非预期形态（自定义 provider）→ 当作纯 verify_token 结果，未知态
+            user_data = res
+    else:
+        user_data = provider_obj.verify_token(token)
+    if not isinstance(user_data, dict):
+        raise RuntimeError(f"verify_token_scopes({provider}): empty user info")
+    login = str(user_data.get("login", "") or "")
+    return {"provider": provider, "login": login,
+            "name": user_data.get("name") or login}, scopes
+
+
 def _global_bot_token_swap_wrapper(provider: str, old_token: str, new_token: str):
     """R21.1.3/R21.1.7: 后台线程 wrapper——加分布式锁 + 异常隔离。"""
     try:

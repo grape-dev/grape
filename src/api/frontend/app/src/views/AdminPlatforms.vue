@@ -28,6 +28,7 @@
       <p v-if="!loading && !platforms.length" class="ap-hint">{{ t('page.platforms_empty') }}</p>
       <p v-if="loading" class="ap-hint">{{ t('page.loading') }}</p>
       <p v-if="error" class="ap-err">{{ error }}</p>
+      <p v-if="notice" class="ap-warn">{{ notice }}</p>
 
       <!-- Issue #3580/PR#1854：新增平台卡（自建实例一实例一卡：克隆现有同族卡改 id/host/base） -->
       <div class="ap-group">
@@ -246,6 +247,7 @@ const docs = ref({})
 const botEdit = reactive({})
 const loading = ref(true)
 const error = ref('')
+const notice = ref('')
 // 列表 → 详情：选中平台的 provider key（null = 列表视图）
 const selected = ref(null)
 // 品牌图标：与登录渠道页共用 /static/img/<provider>.svg（v=2 是图标内容变更的缓存版本）；
@@ -549,11 +551,14 @@ async function saveBot(p) {
     return
   }
   try {
-    await props.api(`/repo-platforms/${p.provider}/bot`, { method: 'PUT', body })
+    const res = await props.api(`/repo-platforms/${p.provider}/bot`, { method: 'PUT', body })
     await load()
     st.username = ''
     st.token = ''
     error.value = ''
+    // Issue #4301：绑定期 workflow 能力预检结果（缺权限/细粒度未知）直接展示
+    const warn = (res && res.scope_warnings) || []
+    notice.value = warn.length ? warn.join('\n') : ''
   } catch (e) {
     error.value = `${t('page.bot_save_failed')}：${e.message || e}`
   }
@@ -562,6 +567,7 @@ async function saveBot(p) {
 async function clearBot(p) {
   try {
     await props.api(`/repo-platforms/${p.provider}/bot`, { method: 'DELETE' })
+    notice.value = ''
     await load()
     error.value = ''
   } catch (e) {
@@ -620,4 +626,5 @@ onMounted(load)
 .ap-icon.danger { color: #b3261e; border-color: #f0c9c5; }
 .ap-hint { color: #6e6e73; font-size: 13px; padding: 8px 4px; }
 .ap-err { color: #b3261e; font-size: 13px; padding: 8px 4px; }
+.ap-warn { color: #8a5a00; font-size: 13px; padding: 8px 4px; white-space: pre-line; }
 </style>

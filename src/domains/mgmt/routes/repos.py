@@ -2552,6 +2552,13 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
             raise HTTPException(status_code=500, detail={"code": 500, "message": "清除 Bot Token 失败"})
         # R15.5.5: best-effort 移除旧 bot 协作者身份
         _remove_old_bot_collaborator(repo_key, owner, repo_name, _provider_str, user)
+        # Issue #4301 第二批：Bot 撤了，能力行必须一起清——否则诊断会继续按
+        # 已不存在的 Bot 能力判定（假阴性/假阳性）。
+        try:
+            from src.domains.insight.public import delete_repo_credential_value as _rc_del
+            _rc_del(repo_key, "workflows_write")
+        except Exception as _cfe:
+            log.warning(f"set_repo_bot_token: clear workflows_write failed: {_cfe}")
         return {"message": "Bot Token 已清除", "bot_username": ""}
 
     # === R15 七步流程 ===
@@ -2572,13 +2579,40 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
     # 步骤 2: 验证 token 有效性（通过 VCSProvider 接口）
     from src.domains.mgmt.vcs import create_provider_from_repo_key
     _vcs_provider = create_provider_from_repo_key(repo_key)
+    _bot_scopes = None
+    _verify_scopes = getattr(_vcs_provider, "verify_token_scopes", None)
     try:
-        user_data = _vcs_provider.verify_token(body.bot_token)
+        if callable(_verify_scopes):
+            user_data, _bot_scopes = _verify_scopes(body.bot_token)
+        else:
+            user_data = _vcs_provider.verify_token(body.bot_token)
     except Exception:
         raise HTTPException(status_code=400, detail={
             "code": 400, "error_code": "TOKEN_INVALID",
             "message": "Bot Token 无效，请检查后重试"
         })
+
+    # Issue #4301 第二批（2026-11-25 负责人拍板）：仓库级 Bot 是**推送链首**凭据，
+    # 绑定期必须预检 workflow 写能力——否则含 .github/workflows 的推送会被平台拒，
+    # 而用户在这里看不到任何提示。能力落 rc 单表（cred_type='workflows_write'，
+    # 数据行、无 DDL），未知（细粒度 PAT 无 scope 响应头）不落键、只提示。
+    _wf_cap = None
+    _wf_warnings: list[str] = []
+    from src.domains.mgmt.user.repo_manager import (
+        workflows_probe_supported as _wf_probe_ok,
+        workflows_write_from_scopes as _wf_from_scopes,
+    )
+    if _wf_probe_ok(_provider_str):
+        _wf_cap = _wf_from_scopes(_bot_scopes)
+        if _wf_cap is False:
+            _wf_warnings.append(
+                "该 Bot Token 缺少 workflow 权限：涉及 .github/workflows 的推送会被 GitHub "
+                "拒绝。请用含 workflow 权限的令牌重新绑定（经典 PAT 勾选 workflow；"
+                "细粒度 PAT 把 Workflows 设为 Read and write）。")
+        elif _wf_cap is None:
+            _wf_warnings.append(
+                "未能从令牌确认 workflow 权限（通常为细粒度 PAT）：请确认 Workflows 权限为 "
+                "Read and write，否则涉及 .github/workflows 的推送会被拒绝。")
 
     # 步骤 3: 获取 bot username
     repo_bot_username = (user_data.get("login") or "") if isinstance(user_data, dict) else ""
@@ -2653,10 +2687,22 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
     if repo_bot_username:
         update_managed_repo_bot_username(repo_key, repo_bot_username)
 
+    # Issue #4301 第二批：能力落 rc 单表（仅在与实际写入分离的「已知」态落键；
+    # 未知不落键 = 不阻断、下次绑定再探）。写失败只记日志，不影响绑定结果。
+    if _wf_cap is not None:
+        try:
+            from datetime import datetime, timezone
+            from src.domains.insight.public import upsert_repo_credential_value as _rc_upsert
+            _rc_upsert(repo_key, "workflows_write", "true" if _wf_cap else "false",
+                       datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+        except Exception as _wfe:
+            log.warning(f"set_repo_bot_token: persist workflows_write failed: {_wfe}")
+
     # R17.1.3: PAT 无续期提示
     return {
         "message": "Bot Token 已更新",
         "bot_username": repo_bot_username,
+        "scope_warnings": _wf_warnings,
         "pat_no_refresh_hint": "此 Token 为 PAT 类型，不会自动续期，过期后需手动重新配置",
     }
 

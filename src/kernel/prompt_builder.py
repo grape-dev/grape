@@ -1052,7 +1052,9 @@ def _build_workflows_blocker_section(repo_key: str, agent_type: str = "",
         # 0/'' = 该仓库未绑定托管用户 → 无凭据域可查（不阻断）
         if user_id in ("", "0"):
             return ""
-        blocker = _repos.workflows_capability_blocker(user_id, provider, True)
+        # Issue #4301 第二批（2026-11-25 拍板）：把 repo_key 传进去，让诊断按真实
+        # 推送凭据链（仓库 Bot → 全局 Bot → PAT → 登录渠道 scope）判定，而不是只看 PAT。
+        blocker = _repos.workflows_capability_blocker(user_id, provider, True, repo_key)
     except Exception as _e:
         _log_safe("debug", f"prompt_builder: workflows blocker probe failed: {_e}")
         return ""
