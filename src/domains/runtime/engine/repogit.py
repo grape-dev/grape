@@ -9,7 +9,7 @@
   辅助脚本读已注入的 `$BOT_GITCODE_TOKEN`（不落盘、随目录清理）。
 """
 
-import base64, json, os, re, shutil, subprocess, sys, threading, time
+import base64, errno, json, os, re, shutil, subprocess, sys, threading, time
 
 from src.kernel import config
 
@@ -44,6 +44,12 @@ WORKSPACE_MARKER = ".grape-workspace.json"
 #（口径与 worktree_guard._ARTIFACT_DIR_PREFIXES 一致；.git-askpass* 由 _write_askpass 写入）
 _DIRT_IGNORE_NAMES = (WORKSPACE_MARKER, ".git-askpass.sh", ".git-askpass-wrapper.sh")
 _DIRT_IGNORE_PREFIXES = (".skills/", ".project-info/", ".knowledge/")
+
+# Issue #3482（B）：worktree 目标目录「已存在且无 .git」时的平台白名单产物——
+# 这些条目由平台物化生成、可重建，处置为清空后建树；出现其它条目即隔离留证。
+_PLATFORM_ASSET_NAMES = (WORKSPACE_MARKER, ".skills", ".project-info", ".knowledge",
+                         "_grape_stage2.py", ".git-askpass.sh", ".git-askpass-wrapper.sh")
+_PLATFORM_ASSET_PREFIXES = (".git-askpass", ".grape-")
 
 # GRAPE_WORKSPACE_TTL_HOURS：巡检回收阈值（默认 24h）
 # GRAPE_WORKSPACE_STRICT：基线分叉是否阻断任务（默认 1=开；0=降级 warn 继续复用）
@@ -781,11 +787,16 @@ def _run_git_retry(args: list, token: str = "", timeout: int = 900,
             delay *= 2
     return last
 
-def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
+def ensure_repo_base(repo_key: str, token: str = "", issue_num=None,
+                     agent_type: str = "") -> str | None:
     """确保本机 bare 基线存在并刷新（每机懒建立）。
 
     用 `git init --bare` + refspec 拉取到 `refs/remotes/origin/*`，而非 `--mirror`：
     mirror 会把 per-Issue 本地分支 refs/heads/feat/issue-* 误当远程跟踪引用，被 `fetch --prune` 误删。
+
+    Issue #3923：``issue_num``/``agent_type`` 下传后，init/remote add/fetch/异常各失败
+    路径直接把现场写到 (repo, issue, agent) 三元组键——并发任务各自持有自己的 git
+    原文，互不覆盖；不传时回落仓级键（历史行为）。
     """
     base = repo_base_dir(repo_key)
     url = clone_url_for(repo_key)
@@ -823,19 +834,46 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
                 r = _run_git_retry(["init", "--bare", base], token=token, scheme=_scheme,
                               provider=_provider, username=_clone_user)
                 if r is None or r.returncode != 0:
-                    log.warning(f"repogit init failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
+                    _stderr = (r.stderr if r is not None else "git exec failed") or ""
+                    log.warning(f"repogit init failed {repo_key}: {_stderr[:300]}")
+                    # Issue #3923：init 失败同样写失败现场——不写会导致
+                    # worktree_failure_error 为空、任务不阻断而在无工作区状态继续执行
+                    _record_worktree_failure(repo_key, WORKTREE_STAGE_BASE, _stderr,
+                                             issue_num=issue_num, agent_type=agent_type)
                     return None
-                _run_git_retry(["-C", base, "remote", "add", "origin", url], token=token, scheme=_scheme,
+                r = _run_git_retry(["-C", base, "remote", "add", "origin", url], token=token, scheme=_scheme,
                                 provider=_provider, username=_clone_user)
+                if r is None or r.returncode != 0:
+                    _stderr = (r.stderr if r is not None else "git exec failed") or ""
+                    log.warning(f"repogit remote add failed {repo_key}: {_stderr[:300]}")
+                    _record_worktree_failure(repo_key, WORKTREE_STAGE_BASE, _stderr,
+                                             issue_num=issue_num, agent_type=agent_type)
+                    return None
             r = _run_git_retry(["-C", base, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*",
                                 "+refs/tags/*:refs/tags/*"], token=token, scheme=_scheme,
                                provider=_provider, username=_clone_user)
             if r is None or r.returncode != 0:
-                log.warning(f"repogit fetch failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
+                _stderr = (r.stderr if r is not None else "git exec failed") or ""
+                log.warning(f"repogit fetch failed {repo_key}: {_stderr[:300]}")
+                # Issue #3923：建树失败要能透传 git 原文与失败阶段（不落 not_configured）
+                _record_worktree_failure(repo_key, WORKTREE_STAGE_BASE, _stderr,
+                                         issue_num=issue_num, agent_type=agent_type)
                 return None
+            # Issue #3923：裸仓 HEAD 必须在 refs/heads/* 下。历史现场里 HEAD 被写成
+            # `ref: refs/remotes/origin/<baseline>`（远程跟踪引用），此后每次
+            # `git worktree add` 都必然 `fatal: HEAD not found below refs/heads!`。
+            # 建树前先校验并自愈，避免把 git 侧故障带进归因阶段。
+            _head = ensure_bare_head(
+                base, _default_base_branch(base, token, repo_key), token=token,
+                repo_key=repo_key, stage="ensure_repo_base")
+            if not _head.get("ok"):
+                log.warning(f"repogit bare HEAD unusable {repo_key}: {_head.get('detail', '')}")
             return base
         except Exception as e:
             log.warning(f"repogit ensure_repo_base failed {repo_key}: {e}")
+            # Issue #3923：异常兜底同样写失败现场，不得静默返回 None
+            _record_worktree_failure(repo_key, WORKTREE_STAGE_BASE, f"ensure_repo_base exception: {e}",
+                                     issue_num=issue_num, agent_type=agent_type)
             return None
 
 def ensure_repo_base_multi(linked_repos: list, token: str = "", env: dict = None) -> dict:
@@ -1476,7 +1514,12 @@ def probe_common_write(common_dir: str) -> tuple:
 
 
 def _is_readonly_git_failure(stderr: str) -> bool:
-    """判断 git 失败是否由只读挂载/权限导致，避免对非只读错误盲目降级建树。"""
+    """stderr 文案是否含只读线索（**仅日志线索**，不再作为降级判据）。
+
+    Issue #3482（D）：降级判据改为 `readonly_errno_reason()`——依次 stat 目标目录与
+    共享基线再按 errno(EROFS/EACCES/EPERM) 判定。文案白名单是漏判来源（`already
+    exists` 就漏在这里），继续在文案上加词等于在同一脆弱点上叠加。
+    """
     text = (stderr or "").lower()
     if not text:
         return False
@@ -1486,6 +1529,75 @@ def _is_readonly_git_failure(stderr: str) -> bool:
         "permission denied",
     )
     return any(marker in text for marker in markers)
+
+
+# Issue #3482（D）：唯一判只读的 errno 集合（与实写探测同一语义）
+_READONLY_ERRNOS = (errno.EROFS, errno.EACCES, errno.EPERM)
+
+
+def _probe_dir_ro_errno_reason(probe_dir: str) -> str:
+    """在单个目录上实写探测一次，命中只读 errno 返回原因，否则空串。"""
+    if not probe_dir or not os.path.isdir(probe_dir):
+        return ""
+    probe = os.path.join(probe_dir, f".grape-ro-probe-{os.getpid()}-{threading.get_ident()}")
+    try:
+        fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        try:
+            os.unlink(probe)
+        except OSError as e:
+            log.warning(f"repogit readonly probe: failed to remove residual probe {probe}: {e}")
+        return ""
+    except OSError as e:
+        if e.errno in _READONLY_ERRNOS:
+            return f"{errno.errorcode.get(e.errno, e.errno)}: {e.strerror or e}"
+        return ""
+
+
+def readonly_errno_reason(target_dir: str, base_dir: str = "") -> str:
+    """按 stat + errno 判定只读/无权限卷（Issue #3482 D；复审 Required 扩探测面）。
+
+    判据源不是 git 的 stderr 文案：
+    1. 依次 stat **目标目录**与**共享基线目录**——目标不存在则探测其父目录
+       （建树失败时目录常已被 git 清理）；
+    2. 在探测目录上实写一次（与 git 写路径同一语义），捕获 errno；
+    3. **仅** EROFS / EACCES / EPERM 判只读；ENOSPC/EIO/EEXIST 等一律不算，
+       不许据此降级建树（降级会掩盖真实错误、制造同分支双工作树）。
+
+    #2245 明确支持的部署形态是「共享基线在只读卷、目标目录可写」——只探测目标
+    会漏判，`git worktree add` 因基线只读失败时被判 non-readonly → refuse degrade
+    → `ensure_issue_worktree` 返回 None → 任务 `workspace_unavailable`，而该场景
+    本应降级到会话级 gitdir 建树成功。因此基线目录（repo base / common dir）也是
+    探测面，任一命中即判只读，返回值以 `target:` / `base:` 前缀区分命中位置（日志
+    可观测）。
+
+    Returns:
+        非空字符串 = 只读原因（`target: EROFS: Read-only file system` 形式，写日志/事件用）；
+        空字符串 = 非只读（或无法判定）。
+    """
+    try:
+        _probe_target = target_dir if os.path.isdir(target_dir) else (
+            os.path.dirname(target_dir) or target_dir)
+    except OSError:
+        _probe_target = os.path.dirname(target_dir) or target_dir
+    _reason = _probe_dir_ro_errno_reason(_probe_target)
+    if _reason:
+        return f"target: {_reason}"
+    if base_dir:
+        _reason = _probe_dir_ro_errno_reason(
+            base_dir if os.path.isdir(base_dir) else (os.path.dirname(base_dir) or base_dir))
+        if _reason:
+            return f"base: {_reason}"
+    return ""
+
+
+def _is_already_exists_collision(stderr: str) -> bool:
+    """Issue #3482：识别 `git worktree add` 的目标目录被占用错误。
+
+    典型来源：direct 路径技能物化（`.skills/` 等）先于 worktree 创建落进目标目录
+    （目录存在但无 `.git`），`git worktree add` 报 fatal: '<path>' already exists。
+    """
+    return "already exists" in (stderr or "")
 
 
 def _session_git_config_args(repo_key: str, session: str, worktree: str) -> list:
@@ -1623,13 +1735,16 @@ def ensure_worktree_git_writable(repo_key: str, wt_dir: str, token: str = "") ->
     """Issue #2245（M1/M2）：确保 worktree git 元数据可写；不可写时迁移或降级标注。
 
     Returns:
-        {writable, mode(native|relocated|readonly), gitdir, common_dir, reason, hint}
+        {writable, mode(native|relocated|readonly|missing), gitdir, common_dir, reason, hint}
     """
     out = {"writable": False, "mode": "readonly", "gitdir": "", "common_dir": "",
            "reason": "", "hint": ""}
     gitdir = resolve_gitdir(wt_dir)
     out["gitdir"] = gitdir
     if not gitdir:
+        # Issue #3482（C）：gitdir 不存在是**错误**（workspace 没建起来），不是只读降级。
+        # 只读语义只覆盖「gitdir 存在但不可写」；此处单独标 mode=missing 供上游显式失败。
+        out["mode"] = "missing"
         out["reason"] = "git dir not found"
         out["hint"] = ("No .git directory or gitdir pointer found in the worktree; "
                        "git baseline sync/commit/push are unavailable. Actionable: provide a "
@@ -1724,6 +1839,199 @@ def _create_worktree_with_session_gitdir(repo_key: str, issue_dir: str, base: st
         return False
 
 
+def _utc_stamp() -> str:
+    """UTC 时间戳（`YYYYmmddTHHMMSSZ`）：隔离目录命名的统一口径。"""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _merge_collided_assets(backup_dir: str, target_dir: str) -> bool:
+    """Issue #3482：把迁移备份中的占用物（.skills 等物化产物）合并回重建后的目录。
+
+    逐条目迁移：目标不存在则移入；同名目录递归合并；同名文件以重建后的基线为准
+    （追踪文件优先，物化产物不覆盖代码基线）。
+
+    QA 复审修订：「迁移不删除」是红线——只要有条目未能合并（rename 失败 / 同名文件
+    冲突未迁走），就**保留备份目录**留证，不再无条件 `rmtree`，避免把没合并的
+    物化产物删掉。
+
+    Returns:
+        True = 全部合并完成，备份已清理；False = 有条目残留，备份保留（日志给路径）。
+    """
+    leftover = False
+    try:
+        for name in os.listdir(backup_dir):
+            if name == ".git":
+                continue
+            src = os.path.join(backup_dir, name)
+            dst = os.path.join(target_dir, name)
+            if os.path.exists(dst):
+                if os.path.isdir(src) and os.path.isdir(dst):
+                    if not _merge_collided_assets(src, dst):
+                        leftover = True
+                    continue
+                # 同名文件：以重建后的基线为准，源件留在备份里留证（不删）
+                leftover = True
+                log.warning(f"repogit: collided asset kept in backup (same name as baseline) "
+                            f"{src}")
+                continue
+            try:
+                os.rename(src, dst)
+            except OSError as e:
+                leftover = True
+                log.warning(f"repogit: merge collided asset failed "
+                            f"{src} -> {dst}: {e}")
+        if leftover:
+            log.warning(f"repogit: collided assets not fully merged, keep backup for audit: "
+                        f"{backup_dir}")
+        else:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+        return not leftover
+    except Exception as e:
+        log.warning(f"repogit: merge collided assets failed "
+                    f"{backup_dir} -> {target_dir}: {e} (backup kept: {backup_dir})")
+        return False
+
+
+def _is_platform_asset_name(name: str) -> bool:
+    """Issue #3482（B）：条目是否为平台可重建产物（清空后可再生）。"""
+    if name in _PLATFORM_ASSET_NAMES:
+        return True
+    return name.startswith(_PLATFORM_ASSET_PREFIXES)
+
+
+def dispose_occupied_workdir_target(repo_key: str, issue_dir: str) -> dict:
+    """Issue #3482（B）：`git worktree add` 前处置「目标目录已存在且无 `.git`」。
+
+    判据走 stat（存在/非空/无 `.git`），**不依赖 git 的 stderr 文案**——文案是漏判来源
+    （上次残留目录、旧顺序下的物化产物都不在文案白名单里）。分流：
+
+    - 目录不存在 / 为空 → ``action=none``（git 可直接建树，零副作用）；
+    - 条目全部命中平台物化产物白名单（``.skills`` / ``.project-info`` / ``.knowledge`` /
+      ``_grape_stage2.py`` / ``.git-askpass*`` / ``.grape-*``）→ 清空后重建（``cleared``），
+      这些产物由本轮落盘重新生成；
+    - 含未知条目（用户文件 / 上一轮受限改动）→ 整体 ``os.rename`` 为
+      ``<dir>.stale-<ts>`` 隔离留证（``quarantined``），**不删除**；
+    - 处置本身失败（权限/跨设备）→ ``action=failed``，调用方按 workspace 不可用显式失败。
+
+    Returns:
+        ``{"action": none|cleared|quarantined|failed, "stale_path": str,
+        "unknown": [...], "reason": str}``
+    """
+    out = {"action": "none", "stale_path": "", "unknown": [], "reason": ""}
+    if not os.path.isdir(issue_dir):
+        return out
+    try:
+        names = sorted(os.listdir(issue_dir))
+    except OSError as e:
+        out.update(action="failed", reason=f"list target dir failed: {e}")
+        return out
+    names = [n for n in names if n != ".git"]
+    if not names:
+        return out
+    unknown = [n for n in names if not _is_platform_asset_name(n)]
+    if not unknown:
+        try:
+            for n in names:
+                p = os.path.join(issue_dir, n)
+                if os.path.isdir(p) and not os.path.islink(p):
+                    shutil.rmtree(p)
+                else:
+                    os.unlink(p)
+        except OSError as e:
+            out.update(action="failed", reason=f"clear platform assets failed: {e}",
+                       unknown=list(names))
+            return out
+        out["action"] = "cleared"
+        return out
+    from datetime import datetime, timezone
+    stale = f"{issue_dir}.stale-{_utc_stamp()}"
+    try:
+        os.rename(issue_dir, stale)
+    except OSError as e:
+        out.update(action="failed", reason=f"quarantine target dir failed: {e}",
+                   unknown=unknown)
+        return out
+    out.update(action="quarantined", stale_path=stale, unknown=unknown)
+    return out
+
+
+def _recover_worktree_already_exists(repo_key: str, issue_dir: str, base: str,
+                                      branch: str, base_branch: str,
+                                      branch_reused: bool, token: str = "") -> bool:
+    """Issue #3482：`git worktree add` 报 already exists 的恢复分支（direct/worker 共用）。
+
+    目标目录被 `.skills` 技能物化产物占用（已存在且无 `.git`）时，worktree add 报
+    fatal: '<path>' already exists；此前该错误不匹配只读特征 → 被判 non-readonly
+    failure refuse degrade → coding 会话误降级只读。恢复动作（对齐 #711 worker
+    修复语义，见 docs/new-version1/coding-worktree-skill-collision.md）：
+    1. 把占用目录原子迁移到同父级备份路径（保留物化产物，不删除）；
+    2. 重放 worktree add（分支 ref 存在 --force 复用，否则 -b 基于 origin/<base>）；
+    3. 成功后把备份中的物化产物合并回新 worktree；
+    4. 任一步失败 → 回滚迁移并改走会话级 gitdir（clone --shared）兜底——目标目录
+       原样保留产物，`.git` 指针落位后 `inject_git_write_context()` 可正常解析
+       gitdir，不再误置 GRAPE_GIT_READONLY。
+    """
+    backup = issue_dir + ".grape-collide-backup"
+    try:
+        if os.path.isdir(backup):
+            # QA 复审修订：上次中断遗留的备份可能还有未合并的物化产物——不删除，
+            # 改为带时间戳隔离留证，再为新一轮腾出固定备份名。
+            _prev_stale = f"{backup}.stale-{_utc_stamp()}"
+            try:
+                os.rename(backup, _prev_stale)
+                log.warning(f"repogit: previous collided-asset backup quarantined "
+                            f"{repo_key}: {backup} -> {_prev_stale}")
+            except OSError as e:
+                log.warning(f"repogit: quarantine previous collided-asset backup failed "
+                            f"{repo_key}: {e}")
+        moved = False
+        try:
+            os.rename(issue_dir, backup)
+            moved = True
+            log.warning(f"repogit: worktree target occupied by non-git assets "
+                        f"(no .git), moved aside for rebuild {repo_key}: "
+                        f"{issue_dir} -> {backup}")
+        except OSError as e:
+            log.warning(f"repogit: move occupied dir aside failed, fallback to "
+                       f"session gitdir {repo_key}: {e}")
+        if moved:
+            if branch_reused:
+                r = _run_git(["-C", base, "worktree", "add", "--force", issue_dir,
+                              branch], token=token)
+            else:
+                r = _run_git(["-C", base, "worktree", "add", issue_dir, "-b", branch,
+                              f"origin/{base_branch}"], token=token)
+            if r is not None and r.returncode == 0:
+                _merge_collided_assets(backup, issue_dir)
+                log.warning(f"repogit: worktree rebuilt after already-exists "
+                            f"collision {repo_key}: {issue_dir} "
+                            f"(assets merged back)")
+                return True
+            _re_err = ((r.stderr if r is not None else "git exec failed") or "")[:200]
+            log.warning(f"repogit: worktree re-add after collision failed, "
+                        f"rollback {repo_key}: {_re_err}")
+            try:
+                if os.path.isdir(issue_dir):
+                    shutil.rmtree(issue_dir, ignore_errors=True)
+                os.rename(backup, issue_dir)
+            except OSError as e:
+                log.warning(f"repogit: rollback collided dir failed {repo_key}: {e}")
+        # 兜底：会话级 gitdir（clone --shared）——占用目录保持原样（含物化产物），
+        # `.git` 指针指向会话 gitdir，gitdir 可解析、不再误置只读。
+        if _create_worktree_with_session_gitdir(
+                repo_key, issue_dir, base, branch, base_branch, token=token):
+            if os.path.isdir(backup):
+                _merge_collided_assets(backup, issue_dir)
+            log.warning(f"repogit: worktree recovered via session gitdir after "
+                        f"already-exists collision {repo_key}: {issue_dir}")
+            return True
+        return False
+    except Exception as e:
+        log.warning(f"repogit: already-exists recovery failed {repo_key}: {e}")
+        return False
+
+
 def inject_git_write_context(task: dict, env: dict, prompt: str) -> tuple:
     """Issue #2245（M2）：会话启动自检 git 写权限，注入只读标记与降级提示。
 
@@ -1751,6 +2059,22 @@ def inject_git_write_context(task: dict, env: dict, prompt: str) -> tuple:
             env.pop("GRAPE_GIT_READONLY", None)
             env.pop("GRAPE_GIT_READONLY_REASON", None)
             return prompt, status
+        if status.get("mode") == "missing":
+            # Issue #3482（C）：`git dir not found` 不再降级只读——工作区没建起来是一条
+            # 错误，标只读会让 agent 以「只读会话」收尾、任务 completed 却缺交付物。
+            # 这里只标注 workspace 缺失（上游建树入口据此把任务置 failed）。
+            env.pop("GRAPE_GIT_READONLY", None)
+            env.pop("GRAPE_GIT_READONLY_REASON", None)
+            env["GRAPE_GIT_WORKSPACE_MISSING"] = "true"
+            env["GRAPE_GIT_WORKSPACE_MISSING_REASON"] = status.get("reason") or ""
+            block = (
+                "\n\n[grape runtime] ERROR: workspace git dir is MISSING "
+                f"({status.get('gitdir') or '?'}: {status.get('reason') or 'unknown'}). "
+                "This is NOT a read-only session: the workspace baseline was never created. "
+                "Do NOT deliver a read-only conclusion; report this error "
+                "(machine-readable: GRAPE_GIT_WRITABLE=false, GRAPE_GIT_WORKSPACE_MISSING=true).\n"
+            )
+            return prompt + block, status
         env["GRAPE_GIT_READONLY"] = "true"
         env["GRAPE_GIT_READONLY_REASON"] = status.get("reason") or ""
         block = (
@@ -1865,6 +2189,255 @@ def _reset_branch_to_baseline(base: str, branch: str, base_branch: str,
     return True
 
 
+# ---------------------------------------------------------------------------
+# Issue #3923：裸仓 HEAD 校验与自愈
+#
+# 裸仓 HEAD 必须是 `ref: refs/heads/*`。某台 worker 上曾被写成
+# `ref: refs/remotes/origin/<baseline>`，此后**每次** `git worktree add` 都必然
+# `fatal: HEAD not found below refs/heads!`；而建树失败后的归因又落在凭据上，
+# 把 git 侧故障伪装成「仓库没配凭据」。这里在建树入口先校验、非法即自愈。
+# ---------------------------------------------------------------------------
+
+def bare_head_ref(base: str, token: str = "") -> str:
+    """读取裸仓 HEAD 的符号引用目标（如 `refs/heads/main`）；读不到返回空串。"""
+    r = _run_git(["-C", base, "symbolic-ref", "-q", "HEAD"],
+                 token=token, timeout=_GIT_WRITE_PROBE_TIMEOUT)
+    if r is None or r.returncode != 0:
+        return ""
+    return (r.stdout or "").strip()
+
+
+def _repair_branch_candidates(base: str, preferred: str, token: str = "") -> list:
+    """候选修复分支名：优先基线，其次任一远端分支，再任一本地分支（去重保序）。"""
+    candidates: list = []
+
+    def _add(name: str) -> None:
+        name = (name or "").strip()
+        if name and name not in candidates:
+            candidates.append(name)
+
+    _add(preferred)
+    r = _run_git(["-C", base, "for-each-ref", "--format=%(refname:short)",
+                  "refs/remotes/origin"], token=token, timeout=_GIT_WRITE_PROBE_TIMEOUT)
+    if r is not None and r.returncode == 0:
+        for name in (r.stdout or "").splitlines():
+            name = (name or "").strip()
+            if not name or name.endswith("/HEAD"):
+                continue
+            _add(name.split("/", 1)[-1])
+    r = _run_git(["-C", base, "for-each-ref", "--format=%(refname:short)",
+                  "refs/heads"], token=token, timeout=_GIT_WRITE_PROBE_TIMEOUT)
+    if r is not None and r.returncode == 0:
+        for name in (r.stdout or "").splitlines():
+            _add(name)
+    return candidates
+
+
+def _ensure_local_branch_for_head(base: str, branch: str, token: str = "") -> str:
+    """确保 `refs/heads/<branch>` 存在（缺则从 origin 建）；返回错误串，成功空串。"""
+    head_ref = f"refs/heads/{branch}"
+    has_local = _run_git(["-C", base, "show-ref", "--verify", "--quiet", head_ref],
+                         token=token, timeout=_GIT_WRITE_PROBE_TIMEOUT)
+    if has_local is not None and has_local.returncode == 0:
+        return ""
+    remote_ref = f"refs/remotes/origin/{branch}"
+    has_remote = _run_git(["-C", base, "show-ref", "--verify", "--quiet", remote_ref],
+                          token=token, timeout=_GIT_WRITE_PROBE_TIMEOUT)
+    if has_remote is None or has_remote.returncode != 0:
+        return f"分支 {branch} 本地与远端都不存在"
+    cr = _run_git(["-C", base, "update-ref", head_ref, remote_ref],
+                  token=token, timeout=_GIT_WRITE_PROBE_TIMEOUT)
+    if cr is None or cr.returncode != 0:
+        return (f"从 {remote_ref} 建本地分支 {branch} 失败："
+                f"{((cr.stderr if cr is not None else '') or 'git exec failed')[:200]}")
+    return ""
+
+
+def ensure_bare_head(base: str, preferred_branch: str = "", token: str = "",
+                     repo_key: str = "", stage: str = "") -> dict:
+    """校验裸仓 HEAD 位于 `refs/heads/*`，非法则修到可用分支（Issue #3923）。
+
+    Returns:
+        {"ok", "previous", "current", "repaired", "branch", "detail"}
+        ok=False 只表示「修不了」（如仓库无任何分支），调用方据此决定是否继续建树。
+
+    为什么要自愈而不是只报错：HEAD 指到 `refs/remotes/*` 是**本机裸仓的陈旧状态**，
+    仓库本身完好（远端分支齐全），修一行即可恢复；不自愈就会让该机所有新建树任务
+    持续失败，且失败被误归因成凭据问题（Issue #3923 的现场形态）。
+    """
+    out = {"ok": False, "previous": "", "current": "", "repaired": False,
+           "branch": "", "detail": ""}
+    if not base or not _is_git_dir(base):
+        out["detail"] = "bare base not found"
+        return out
+    previous = bare_head_ref(base, token=token)
+    out["previous"] = previous
+    valid = previous.startswith("refs/heads/")
+    if valid:
+        chk = _run_git(["-C", base, "show-ref", "--verify", "--quiet", previous],
+                       token=token, timeout=_GIT_WRITE_PROBE_TIMEOUT)
+        if chk is not None and chk.returncode == 0:
+            out.update(ok=True, current=previous, branch=previous[len("refs/heads/"):])
+            return out
+        valid = False
+    candidates = _repair_branch_candidates(base, preferred_branch, token=token)
+    if not candidates:
+        out["detail"] = (f"HEAD={previous or 'unreadable'} 不在 refs/heads/* 下，"
+                         f"且仓库没有可用于修复的分支")
+        log.warning(f"repogit head repair impossible repo={repo_key or '-'} "
+                    f"stage={stage or '-'} {out['detail']}")
+        return out
+    details = []
+    for branch in candidates:
+        err = _ensure_local_branch_for_head(base, branch, token=token)
+        if err:
+            details.append(err)
+            continue
+        head_ref = f"refs/heads/{branch}"
+        sr = _run_git(["-C", base, "symbolic-ref", "HEAD", head_ref],
+                      token=token, timeout=_GIT_WRITE_PROBE_TIMEOUT)
+        if sr is None or sr.returncode != 0:
+            details.append(f"HEAD 指回 {head_ref} 失败："
+                           f"{((sr.stderr if sr is not None else '') or 'git exec failed')[:200]}")
+            continue
+        out.update(ok=True, current=head_ref, repaired=True, branch=branch)
+        log.warning(f"repogit head repaired repo={repo_key or '-'} stage={stage or '-'} "
+                    f"previous={previous or 'unreadable'} current={head_ref} "
+                    f"(bare HEAD must live under refs/heads/*, Issue #3923)")
+        return out
+    out["detail"] = ("HEAD " + (previous or "unreadable") + " 非法，修复失败："
+                     + "；".join(details)[:400])
+    log.warning(f"repogit head repair failed repo={repo_key or '-'} "
+                f"stage={stage or '-'} {out['detail']}")
+    return out
+
+
+# 建树失败阶段（写进错误面的「已执行到哪一步」，只陈述事实）
+WORKTREE_STAGE_ADD = "worktree_add"
+WORKTREE_STAGE_HEAD_REPAIR = "worktree_add_head_repair"
+WORKTREE_STAGE_BASE = "repo_base"
+# 建树函数自身抛异常/目录建不出来（os.makedirs、_write_askpass 等）的出口：
+# 这类失败没有 git stderr 可透传，但同样**必须**留下现场，否则任务不阻断。
+WORKTREE_STAGE_BUILD_EXCEPTION = "worktree_build_exception"
+
+# 阶段 → 事实措辞（Issue #3923 审查 Required）：阶段名不能一律渲染成
+# 「git worktree add 失败」，否则 repo_base（clone/fetch 失败）会被误述。
+_WORKTREE_STAGE_FAILURE_TEXT = {
+    WORKTREE_STAGE_BASE: "基线 fetch/clone 失败",
+    WORKTREE_STAGE_ADD: "git worktree add 失败",
+    WORKTREE_STAGE_HEAD_REPAIR: "HEAD 自愈后重试仍失败",
+    WORKTREE_STAGE_BUILD_EXCEPTION: "建树过程异常（目录/文件系统）",
+}
+
+# 阶段优先级（Issue #3923 复审 Required）：同一任务键**不全量覆盖**。
+# base（init/fetch）失败先于 worktree add，后者覆盖会把 401/网络原文抹掉；
+# 优先级低的新现场不得顶掉已记录的更高优先级现场（同等优先级允许后写覆盖，
+# 例如同一次调用内 add → head_repair 的推进）。数值越大越接近根因。
+WORKTREE_STAGE_PRIORITY = {
+    WORKTREE_STAGE_BASE: 3,
+    WORKTREE_STAGE_HEAD_REPAIR: 2,
+    WORKTREE_STAGE_ADD: 1,
+    WORKTREE_STAGE_BUILD_EXCEPTION: 1,
+}
+
+# 最近一次建树失败的现场（供失败后的错误面透传 git 原文与失败阶段）
+# key = `<repo_key>|<issue>|<agent>`（无 issue/agent 时用 repo_key）；只保留最近一次，
+# 避免无限增长。**不存 token/凭据**。
+_LAST_WORKTREE_FAILURE: dict = {}
+# 现场条数上限。来源（业务要求，Issue #3923）：单 worker 并发建树的 (repo, issue,
+# agent) 三元组规模实测远小于该值，200 是「同机全仓失败现场各留一份」的安全上界，
+# 只防内存无限增长，不参与任何判定语义；超限丢最旧（按写入时间）。
+_LAST_WORKTREE_FAILURE_MAX = 200
+# 仓级兜底记录（无 issue/agent 三元组时）的保留时长：过期记录不再当作当前失败
+# 原因（见 worktree_last_failure 的 TTL 判定）。三元组记录不设 TTL，由建树成功/
+# 入口清理；Issue #3923 复审后失败现场在 ensure_repo_base 内直接写三元组键，
+# 不再经过「仓级 → 三元组」复制。
+# 数值来源（业务要求，Issue #3923）：仓级键只在「建树入口未带 issue/agent」的
+# 调用路径产生，读取方是紧接着同一仓的下一批任务；15 分钟覆盖「同仓连续派单的
+# 常规间隔」的观察窗口，目标是避免上上轮的仓级失败被后来的任务误读为当前原因
+# ——窗口应大于派单重试间隔、小于一次值班排查的会话时长。若需精确值，
+# 需实测「仓级失败 → 下一任务读现场」的实际间隔分布再定（待决策项已登记）。
+_LAST_WORKTREE_FAILURE_REPO_TTL = 900
+
+
+def _record_worktree_failure(repo_key: str, stage: str, stderr: str,
+                             head_repair: dict = None, issue_num=None,
+                             agent_type: str = "") -> None:
+    key = _failure_key(repo_key, issue_num, agent_type)
+    prev = _LAST_WORKTREE_FAILURE.get(key) or {}
+    prev_stage = prev.get("stage") or ""
+    # Issue #3923 复审 Required：同一键按阶段优先级保留现场。一次建树里
+    # `ensure_repo_base` 失败（401/网络原文）先写入，随后回落到既有裸仓再
+    # `worktree add` 又失败——旧实现直接覆盖，把真正的 git 原文抹掉。
+    if prev_stage and (WORKTREE_STAGE_PRIORITY.get(stage, 0)
+                       < WORKTREE_STAGE_PRIORITY.get(prev_stage, 0)):
+        log.info(f"repogit keep earlier failure scene repo={repo_key or '-'} "
+                 f"issue={issue_num or '-'} agent={agent_type or '-'} "
+                 f"kept_stage={prev_stage} dropped_stage={stage} "
+                 f"dropped_stderr={(stderr or '')[:160]}")
+        return
+    _LAST_WORKTREE_FAILURE[key] = {
+        "stage": stage,
+        "stderr": (stderr or "").strip()[:600],
+        "head_repair": dict(head_repair or {}),
+        "issue_num": str(issue_num or ""),
+        "agent_type": agent_type or "",
+        "at": time.time(),
+    }
+    # 失败现场只是诊断信息，不随失败任务数无限增长：超上限丢最旧的（按写入时间）
+    if len(_LAST_WORKTREE_FAILURE) > _LAST_WORKTREE_FAILURE_MAX:
+        for _k, _ in sorted(_LAST_WORKTREE_FAILURE.items(),
+                            key=lambda kv: kv[1].get("at", 0))[:len(_LAST_WORKTREE_FAILURE)
+                                                          - _LAST_WORKTREE_FAILURE_MAX]:
+            _LAST_WORKTREE_FAILURE.pop(_k, None)
+
+
+def _failure_key(repo_key: str, issue_num=None, agent_type: str = "") -> str:
+    """失败现场的键：有 Issue/Agent 时按三元组隔离，避免并发任务互相覆盖。"""
+    if issue_num or agent_type:
+        return f"{repo_key}|{issue_num or ''}|{agent_type or ''}"
+    return repo_key
+
+
+def worktree_last_failure(repo_key: str, issue_num=None, agent_type: str = "") -> dict:
+    """取最近一次建树失败现场（按 (repo, issue, agent) 优先，回落 repo；无记录空 dict）。
+
+    Issue #3923 审查：仓级兜底记录不 pop，同仓并发任务都要能读到同一份现场；
+    这里用 TTL 收敛，避免很久以前的仓级失败被后来的任务当成当前原因。
+    """
+    rk = repo_key or ""
+    if not rk:
+        return {}
+    if issue_num or agent_type:
+        hit = _LAST_WORKTREE_FAILURE.get(_failure_key(rk, issue_num, agent_type))
+        if hit:
+            return dict(hit)
+    repo_hit = _LAST_WORKTREE_FAILURE.get(rk, {}) or {}
+    if not repo_hit:
+        return {}
+    if time.time() - float(repo_hit.get("at") or 0) > _LAST_WORKTREE_FAILURE_REPO_TTL:
+        return {}
+    return dict(repo_hit)
+
+
+def clear_worktree_failure(repo_key: str = "", issue_num=None,
+                           agent_type: str = "") -> None:
+    """清除建树失败现场（建树入口/成功后调用）。
+
+    传 issue_num/agent_type 时只清该三元组（并发任务互不影响）；
+    只传 repo_key 时清该仓全部记录；都不传则全清。
+    """
+    if not repo_key:
+        _LAST_WORKTREE_FAILURE.clear()
+        return
+    if issue_num or agent_type:
+        _LAST_WORKTREE_FAILURE.pop(_failure_key(repo_key, issue_num, agent_type), None)
+        return
+    for key in [k for k in list(_LAST_WORKTREE_FAILURE)
+                if k == repo_key or k.startswith(f"{repo_key}|")]:
+        _LAST_WORKTREE_FAILURE.pop(key, None)
+
+
 # 凭据不可用分类 → 任务面措辞（Issue #3713）。分类枚举由 kernel 选择器给出
 # （`CREDENTIAL_STAGES`），这里只做「渲染」，不重复判定。
 _CREDENTIAL_STAGE_HINTS = {
@@ -1896,7 +2469,8 @@ def repo_base_has_refs(repo_key: str) -> "bool | None":
     return bool((r.stdout or "").strip())
 
 
-def worktree_credential_error(repo_key: str) -> str:
+def worktree_credential_error(repo_key: str, token_result=None,
+                              failure_scene=None) -> str:
     """建树失败后的凭据归因（Issue #3713）：返回 `<code>: <message>`，否则空串。
 
     为什么需要：token 取空 → mirror refs=0 → `git worktree add` 失败 → 平台只看得到
@@ -1908,25 +2482,109 @@ def worktree_credential_error(repo_key: str) -> str:
       · 凭据可用（token 非空）→ 返回空串：建树失败原因在 git 侧，走原告警路径；
       · 凭据不可用           → 返回 `credential_<stage>`，stage ∈ 选择器的分类枚举，
                               无 rc 行且全链为空时用 not_configured。
+
+    Issue #3923 收敛：只有「归因**跑完了**且结论是没凭据」（attribution=no_credential）
+    才允许落 `credential_not_configured`。worker 进程没有装配层（`vcs_provider`
+    端口未绑），归因本身不成立（unavailable/unattributed）→ 返回空串，由
+    `worktree_failure_error()` 如实透传 git 原文与失败阶段。这样「归因不可用」与
+    「确实无凭据」在任务错误与日志中可区分。
+
+    `token_result`：调用方已跑过一次 `resolve_exec_token` 时传入，避免单次阻断
+    把同一条凭据链重复解析（Issue #3923 审查 Optional）。
+
+    `failure_scene`：本任务已记录的失败现场（`worktree_last_failure` 的结果）。
+    空仓断言只在「**没有** repo_base 阶段现场」时成立——fetch/init 失败本身就会
+    让本地 `refs/remotes/origin` 为 0，此时空仓是失败的**结果**而非原因，再报
+    `empty_repo` 会把 401/网络原文抹掉（Issue #3923 复审 Required）。
     """
     if not repo_key:
         return ""
-    # 空仓优先：远端 0 分支时凭据再好也建不出树 —— 先把事实说清，不归因到凭据
-    if repo_base_has_refs(repo_key) is False:
+    scene_stage = (failure_scene or {}).get("stage") or ""
+    # 空仓优先：远端 0 分支时凭据再好也建不出树 —— 先把事实说清，不归因到凭据。
+    # 但已有 repo_base 阶段现场时不得短路：那是 git 侧失败的后果，原文才是真因。
+    if scene_stage != WORKTREE_STAGE_BASE and repo_base_has_refs(repo_key) is False:
         return ("empty_repo: 仓库还没有任何提交（远端 0 条分支）；"
                 "请先在仓库放置一个初始提交后再派任务（这不是凭据问题）")
     try:
-        from src.kernel.token_resolver import resolve_exec_token
-        sel = resolve_exec_token(repo_key)
+        from src.kernel.token_resolver import (
+            CREDENTIAL_ATTRIBUTION_UNAVAILABLE, CREDENTIAL_ATTRIBUTION_UNATTRIBUTED,
+            resolve_exec_token,
+        )
+        sel = token_result if token_result is not None else resolve_exec_token(repo_key)
     except Exception as e:  # noqa: BLE001 - 归因失败不得反过来打断任务
         log.warning(f"repogit: credential attribution failed {repo_key}: {e}")
         return ""
     if getattr(sel, "token", ""):
         return ""
-    stage = getattr(sel, "stage", "") or "not_configured"
+    stage = getattr(sel, "stage", "") or ""
+    attribution = getattr(sel, "attribution", "") or ""
+    if not stage and attribution in (CREDENTIAL_ATTRIBUTION_UNAVAILABLE,
+                                     CREDENTIAL_ATTRIBUTION_UNATTRIBUTED):
+        # 归因不可用/未归因：这是「查不了」，不是「没有」。不得落 not_configured。
+        log.warning(f"repogit: credential attribution {attribution} for {repo_key}: "
+                    f"{getattr(sel, 'attribution_detail', '') or '-'}")
+        return ""
+    stage = stage or "not_configured"
     hint = _CREDENTIAL_STAGE_HINTS.get(stage, "凭据不可用")
-    return (f"credential_{stage}: {hint}；建树取 token 失败，本轮无法 clone/fetch"
-            f"（真因在凭据，不在 git 目录权限）")
+    return (f"credential_{stage}: {hint}；建树取 token 为空，本轮无法 clone/fetch")
+
+
+def worktree_failure_error(repo_key: str, issue_num=None, agent_type: str = "",
+                           token_result=None, failure_scene=None) -> str:
+    """建树失败的错误面（Issue #3923）：凭据归因成立才报凭据，否则透传 git 原文。
+
+    worker 侧不做 repo token 归因（无装配层），因此这里的主路径是「如实上报」：
+
+      `<stage>: <阶段事实措辞>: <git stderr 原文>`（含 HEAD 修复结果）
+
+    只有 `worktree_credential_error()` 明确归因为凭据问题（或空仓）时才返回
+    `credential_<stage>` / `empty_repo`。无失败现场返回空串（保持既有告警路径）。
+
+    `token_result`：调用方已解析过凭据链时传入，凭据归因与归因备注复用同一结果，
+    单次阻断只解析一次（Issue #3923 审查 Optional）。
+
+    `failure_scene`：调用方已读过的失败现场，传入即不再重复读（也便于先读现场
+    再问凭据的次序在单一入口处可见，Issue #3923 复审 Required）。
+    """
+    # 先读现场、再问凭据：空仓断言与凭据归因都要能看见「git 侧已经失败在哪一步」，
+    # 否则 fetch 失败导致的本地 0 refs 会被渲染成 empty_repo / 凭据问题。
+    fail = (failure_scene if failure_scene is not None
+            else worktree_last_failure(repo_key, issue_num=issue_num,
+                                       agent_type=agent_type))
+    cred = worktree_credential_error(repo_key, token_result=token_result,
+                                     failure_scene=fail)
+    if cred:
+        return cred
+    if not fail:
+        return ""
+    stage = fail.get("stage") or WORKTREE_STAGE_ADD
+    stderr = (fail.get("stderr") or "").strip()
+    repair = fail.get("head_repair") or {}
+    failure_text = _WORKTREE_STAGE_FAILURE_TEXT.get(stage, "git worktree add 失败")
+    parts = [f"{stage}: {failure_text}"]
+    if repair:
+        prev = repair.get("previous") or "unreadable"
+        cur = repair.get("current") or "-"
+        if repair.get("repaired"):
+            parts.append(f"已执行 HEAD 自愈：{prev} → {cur}")
+        elif repair.get("detail"):
+            parts.append(f"HEAD 自愈未成功：{repair.get('detail')}")
+    if stderr:
+        parts.append(f"git 原文：{stderr}")
+    # Issue #3923：事件错误里也要能看出「归因不可用」≠「确实无凭据」
+    try:
+        from src.kernel.token_resolver import (
+            CREDENTIAL_ATTRIBUTION_UNAVAILABLE, CREDENTIAL_ATTRIBUTION_UNATTRIBUTED,
+            resolve_exec_token,
+        )
+        _sel = token_result if token_result is not None else resolve_exec_token(repo_key)
+        if (getattr(_sel, "attribution", "") in (CREDENTIAL_ATTRIBUTION_UNAVAILABLE,
+                                                 CREDENTIAL_ATTRIBUTION_UNATTRIBUTED)
+                and not getattr(_sel, "token", "")):
+            parts.append("凭据归因不可用（未据此判定为凭据问题）")
+    except Exception as e:  # noqa: BLE001 - 注释性信息失败不得打断错误上报
+        log.warning(f"repogit: worktree failure attribution note failed {repo_key}: {e}")
+    return "；".join(parts)
 
 
 def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str = "",
@@ -1954,16 +2612,35 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
     """
     if not is_git_agent(agent_type):
         return None
+    # Issue #3923：本入口重试前先清掉该仓的旧失败现场，避免把上一轮的 git 原文
+    # 当成这一轮的失败原因；新失败会在下面重新记录。按 (repo, issue, agent)
+    # 精确清理，并发任务互不覆盖。
+    clear_worktree_failure(repo_key, issue_num=issue_num, agent_type=agent_type)
     _base_dir = repo_base_dir(repo_key)
     if _is_git_dir(_base_dir) and not probe_path_writable(_base_dir)[0]:
         base = _base_dir
         log.warning(f"repogit: shared base is read-only, reuse as-is: {_base_dir}")
     else:
-        base = ensure_repo_base(repo_key, token) or (_base_dir if _is_git_dir(_base_dir) else None)
+        # Issue #3923：issue/agent 下传 ensure_repo_base，init/remote add/fetch/异常
+        # 失败直接写 (repo, issue, agent) 三元组键——并发任务各自持有自己的 git 原文，
+        # 不再经过「仓级 → 三元组」复制（后写覆盖先写的竞态随之消失）。
+        base = ensure_repo_base(repo_key, token, issue_num=issue_num,
+                                agent_type=agent_type) or (_base_dir if _is_git_dir(_base_dir) else None)
     if not base:
         return None
     issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
-    os.makedirs(os.path.dirname(issue_dir), exist_ok=True)
+    # Issue #3923 复审 Required：目录建不出来（父路径是普通文件/磁盘满/权限）
+    # 必须在**本函数内**写失败现场。旧实现把 makedirs 放在 try 之外，异常一路
+    # 冒到 agent 的宽 except 只 WARNING 一条 → 无现场 → 任务在无工作区状态下继续跑。
+    try:
+        os.makedirs(os.path.dirname(issue_dir), exist_ok=True)
+    except Exception as e:  # noqa: BLE001 - 失败已记录，按不可建树处理
+        log.warning(f"repogit worktree dir create failed {repo_key}: {e}")
+        _record_worktree_failure(
+            repo_key, WORKTREE_STAGE_BUILD_EXCEPTION,
+            f"ensure_issue_worktree dir create failed: {e}",
+            issue_num=issue_num, agent_type=agent_type)
+        return None
     branch = f"feat/issue-{issue_num}"
     # #2514：基线只解析一次并贯穿全函数（标记 baseline / 新建起点 / 闸门同一口径）
     base_branch, requested_branch, _fb_reason = _resolve_base_branch(
@@ -1973,6 +2650,26 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
             _has_git = os.path.isdir(issue_dir) and (
                 os.path.isdir(os.path.join(issue_dir, ".git"))
                 or os.path.isfile(os.path.join(issue_dir, ".git")))
+            # Issue #3482（B）：先 stat 目标目录再建树——目录已存在且无 `.git`
+            # （上次残留 / direct 端旧顺序下先物化的产物）时按内容分流处置：
+            # 平台产物 → 清空重建；含未知内容 → 隔离为 <dir>.stale-<ts> 后重建。
+            # 不再对「已存在」无动于衷、等 `git worktree add` 报 already exists。
+            if not _has_git and os.path.isdir(issue_dir):
+                _disp = dispose_occupied_workdir_target(repo_key, issue_dir)
+                if _disp["action"] == "failed":
+                    log.warning(f"repogit workspace.occupied_unrecoverable {repo_key} "
+                                f"issue={issue_num} agent={agent_type} path={issue_dir} "
+                                f"reason={_disp.get('reason', '')}")
+                    return None
+                if _disp["action"] == "cleared":
+                    log.warning(f"repogit workspace.occupied_cleared {repo_key} "
+                                f"issue={issue_num} agent={agent_type} path={issue_dir} "
+                                f"(platform assets removable, rebuilding worktree)")
+                elif _disp["action"] == "quarantined":
+                    log.warning(f"repogit workspace.occupied_quarantined {repo_key} "
+                                f"issue={issue_num} agent={agent_type} path={issue_dir} "
+                                f"stale={_disp.get('stale_path', '')} "
+                                f"unknown={','.join(_disp.get('unknown') or [])[:200]}")
             reuse = False
             # 拒绝复用但移除失败 → 保留的是「外来脏树」，不得重写归属标记（跳过标记落盘）
             foreign_kept = False
@@ -2050,15 +2747,74 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                 else:
                     r = _run_git(["-C", base, "worktree", "add", issue_dir, "-b", branch,
                                   f"origin/{base_branch}"], token=token)
+                stderr = ""
                 if r is None or r.returncode != 0:
                     stderr = (r.stderr if r is not None else "git exec failed") or ""
                     log.warning(f"repogit worktree add failed {repo_key}: {stderr[:300]}")
-                    # Issue #2245：仅当失败源于只读挂载/权限时降级建树；其它失败
+                    # Issue #3923：HEAD 非法（如指到 refs/remotes/*）时先自愈再重试一次。
+                    # 这是本机裸仓的陈旧状态，不重试就会让该机所有新建树任务持续失败，
+                    # 且失败被归因到凭据。仅重试一次，失败即返回。
+                    _repair = {"ok": False}
+                    if "head not found below refs/heads" in stderr.lower():
+                        _repair = ensure_bare_head(
+                            base, base_branch, token=token, repo_key=repo_key,
+                            stage=WORKTREE_STAGE_HEAD_REPAIR)
+                    if _repair.get("ok"):
+                        log.warning(f"repogit worktree add retrying after HEAD repair "
+                                    f"{repo_key} issue={issue_num} agent={agent_type} "
+                                    f"previous={_repair.get('previous') or '-'} "
+                                    f"current={_repair.get('current')}")
+                        if _branch_reused:
+                            r = _run_git(["-C", base, "worktree", "add", "--force",
+                                          issue_dir, branch], token=token)
+                        else:
+                            r = _run_git(["-C", base, "worktree", "add", issue_dir,
+                                          "-b", branch, f"origin/{base_branch}"], token=token)
+                        if r is not None and r.returncode == 0:
+                            stderr = ""
+                        else:
+                            stderr = (r.stderr if r is not None else "git exec failed") or ""
+                    if stderr:
+                        _record_worktree_failure(
+                            repo_key,
+                            WORKTREE_STAGE_ADD if not _repair.get("ok")
+                            else WORKTREE_STAGE_HEAD_REPAIR,
+                            stderr, head_repair=_repair,
+                            issue_num=issue_num, agent_type=agent_type)
+                if stderr:
+                    # stderr 非空 = 重试后仍失败（或本就不需要重试）
+                    # Issue #3482（D）：只读判据改判定源——stat 目标目录（不存在则父目录）
+                    # 与共享基线 base（复审 Required：#2245 只读基线/可写目标场景由 base 命中）
+                    # 后按 errno(EROFS/EACCES/EPERM) 判；stderr 文案只保留为日志线索
+                    # （`already exists` 正是被文案白名单漏掉的反例）。
+                    _ro_reason = readonly_errno_reason(issue_dir, base)
+                    _stderr_hint = ("readonly-keyword"
+                                    if _is_readonly_git_failure(stderr) else "no-readonly-keyword")
+                    log.warning(f"repogit worktree add failed {repo_key}: {stderr[:300]} "
+                                f"(readonly_probe={_ro_reason or 'none'}, "
+                                f"stderr_hint={_stderr_hint})")
+                    if (_is_already_exists_collision(stderr)
+                            and not _has_git and os.path.isdir(issue_dir)):
+                        # Issue #3482：最后一道防线（B 前置处置后仍撞竞态时）——迁移
+                        # 占用物重建 worktree，失败走会话级 gitdir 兜底，不落 refuse degrade。
+                        # direct 与 worker _execute_task 双路径共用本函数，行为一致。
+                        if not _recover_worktree_already_exists(
+                                repo_key, issue_dir, base, branch, base_branch,
+                                _branch_reused, token=token):
+                            return None
+                        # QA 复审补充：恢复成功路径也要做写权限自检（与新建 worktree 同口径），
+                        # 元数据只读时迁移到会话 gitdir 并记录，不静默。
+                        _git_status = ensure_worktree_git_writable(repo_key, issue_dir, token=token)
+                        if not _git_status.get("writable"):
+                            log.warning(f"repogit: recovered worktree in read-only git mode "
+                                        f"{repo_key}: {_git_status.get('reason', '')}")
+                    # Issue #2245：仅当 errno 判定目标确实只读/无权限时降级建树；其它失败
                     # （如分支已被其它 worktree 占用）降级会制造同分支双工作树，直接失败。
-                    if not _is_readonly_git_failure(stderr):
-                        log.warning(f"repogit worktree add non-readonly failure, refuse degrade {repo_key}")
+                    elif not _ro_reason:
+                        log.warning(f"repogit worktree add non-readonly failure, refuse degrade "
+                                    f"{repo_key} (errno=non-readonly)")
                         return None
-                    if not _create_worktree_with_session_gitdir(
+                    elif not _create_worktree_with_session_gitdir(
                             repo_key, issue_dir, base, branch, base_branch, token=token):
                         return None
                 else:
@@ -2134,11 +2890,19 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
             _validate_issue_baseline(issue_dir, issue_num, agent_type, base_branch,
                                      token=token, requested=requested_branch,
                                      strict_override=strict_override)
+            clear_worktree_failure(repo_key, issue_num=issue_num, agent_type=agent_type)
             return issue_dir
         except WorkspaceBaselineError:
             raise
         except Exception as e:
             log.warning(f"repogit worktree failed {repo_key}: {e}")
+            # Issue #3923 复审 Required：建树自身的异常出口必须写现场——
+            # 旧实现只 warn 后 return None，agent 侧宽 except 再吞一条 → 无现场 →
+            # worktree_block_result 返回 None → 任务无工作区继续执行。
+            _record_worktree_failure(
+                repo_key, WORKTREE_STAGE_BUILD_EXCEPTION,
+                f"ensure_issue_worktree exception: {e}",
+                issue_num=issue_num, agent_type=agent_type)
             return None
 
 

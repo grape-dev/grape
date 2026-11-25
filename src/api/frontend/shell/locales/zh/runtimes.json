@@ -126,7 +126,9 @@
     "sandbox_template": "模板",
     "platform_disabled": "已禁用",
     "platform_disabled_tip": "关联的沙箱平台已禁用：不再新建沙箱，启用请在平台详情操作",
-    "cred_id_tip": "凭据 ID——同机多实例时机器侧服务名为 sandbox-worker-<实例ID>-<凭据ID>，可用 systemctl 管理"
+    "cred_id_tip": "凭据 ID——同机多实例时机器侧服务名为 sandbox-worker-<实例ID>-<凭据ID>，可用 systemctl 管理",
+    "roles_disabled": "已停用",
+    "roles_disabled_tip": "该引擎的角色标签已全部停用（enabled=0），当前不会被任何任务选中；打开「角色标签」勾选并保存即可重新启用"
   },
   "empty": {
     "no_engines": "暂无引擎",
@@ -213,7 +215,10 @@
     "max_concurrent_saved": "并发数已保存",
     "max_concurrent_invalid": "请输入 1-100 之间的整数",
     "save_failed": "保存失败: {{msg}}",
-    "scanning": "扫描中..."
+    "scanning": "扫描中...",
+    "tags_need_one": "至少要保留一个角色（全能或任一角色），不能全部取消",
+    "tags_scene_drop_confirm": "当前场景不支持这些角色：{{roles}}；保存将把它们移除，确定继续？",
+    "tags_scene_none": "当前场景下没有可保存的角色（{{roles}} 不在本场景），请切换场景或重新勾选"
   },
   "skill": {
     "no_desc": "无描述",

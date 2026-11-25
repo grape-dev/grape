@@ -119,7 +119,7 @@ def test_b2_github_create_user_token_fallback(user):
                           is_subtask_mode=0)
     seen = {}
 
-    def _fake_find(api_token, owner, repo, title, provider=""):
+    def _fake_find(api_token, owner, repo, title, provider="", **kwargs):  # #3349: accept timeout kwarg
         seen["find_token"] = api_token
         return None
 
@@ -148,7 +148,7 @@ def test_b2_github_create_bot_token_still_preferred(user):
                           is_subtask_mode=0)
     seen = {}
 
-    def _fake_find(api_token, owner, repo, title, provider=""):
+    def _fake_find(api_token, owner, repo, title, provider="", **kwargs):  # #3349: accept timeout kwarg
         seen["find_token"] = api_token
         return None
 

@@ -51,3 +51,9 @@ jobs:
         run: |
           python -m pytest -q tests/insight/test_issue_4248_faro_client_disconnect.py \
                             tests/api/test_issue_4248_api_error_classname.py
+      - name: Worktree build failure regression (issue #3923)
+        # Issue #3923 复审：建树失败必须阻断（凭据归因不可用时透传 git 原文），
+        # 这条不变量此前只在本机跑，CI 里无覆盖。纳入本 job 后 PR 上可直接复算。
+        run: |
+          python -m pytest -q tests/runtime/test_issue_3923_worktree_head_and_attribution.py \
+                            tests/runtime/test_repogit.py

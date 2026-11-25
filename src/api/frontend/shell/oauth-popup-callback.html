@@ -161,6 +161,11 @@ body{margin:0;display:flex;align-items:center;justify-content:center;height:100v
         'provider_mismatch':  '平台不匹配，请重试 / Provider mismatch, please retry',
         'delete_mismatch':    '注销认证用户不匹配 / Delete auth user mismatch',
         'WHITELIST':          '用户不在白名单中 / User not in whitelist',
+        // 绑定类错误此前落到回退分支直接显示原始码（bind_conflict 等），
+        // 无 opener 的降级页面上用户只看到英文枚举——2026-11-24 补双语映射。
+        'bind_conflict':      '该平台账号已绑定其他账号 / This platform account is already bound to another account',
+        'bind_failed':        '绑定失败，请重试 / Binding failed, please retry',
+        'rebind_failed':      '恢复绑定失败，请重试 / Restoring the binding failed, please retry',
         'account_not_found':  '账号不存在 / Account not found',
         'account_disabled':   '账号已被禁用 / Account disabled',
         'invalid_param':      '授权回调参数无效 / Invalid callback parameter'

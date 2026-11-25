@@ -173,6 +173,13 @@ jobs:
         run: python -m pytest tests/runtime/test_atomcode_runtime.py -v
       - name: Frontend autopilot uid source-assertion tests (issue #1011)
         run: node tests/js/test_issue_1011_autopilot_uid.js
+      - name: Ledger dedupe + upstream timeout regression tests (issue #3349)
+        # Issue #3349 QA 审查：新增 tests/test_issue_3349_dedup_offload.py（台账查重/
+        # 有界探针/线程卸载/504 幂等/静态守卫）此前未被流水线执行，回归无门禁兜底；
+        # 此处接入 CI（仿 issue #1613 先例）。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/test_issue_3349_dedup_offload.py -v
       - name: Destructive DDL guard + Issue #536 migration safety tests
         # Issue #536 QA-Impt：CI 显式接入 DDL 卡点与新增用例；base 显式传目标分支
         # （GitCode 注入 CI_MERGE_REQUEST_TARGET_BRANCH_NAME，GitHub 用 PR base），

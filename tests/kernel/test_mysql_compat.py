@@ -272,6 +272,22 @@ class TestTranslateSql:
         out = mc.translate_sql(sql)
         assert "__derived" not in out
 
+    def test_role_backfill_derived_table_alias_preserved(self):
+        """QA 复审 Required ③（Issue #3396）：ensure/seed 的 INSERT ... SELECT 里
+        `FROM (<UNION ALL 行>)` 派生表必须带别名——translate_sql 不代补，
+        无别名在 MySQL/MariaDB 是 1248/1064；此测试锁住别名不被回退掉。
+        """
+        rows_sql = " UNION ALL ".join(
+            "SELECT ? AS runtime_id, ? AS tag, 1 AS max_concurrent, 50 AS priority,"
+            " 1 AS enabled, ? AS created_at, ? AS updated_at" for _ in range(2))
+        sql = ("INSERT INTO engine_capabilities "
+               "(runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+               "SELECT runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at FROM ("
+               + rows_sql + ") AS _rows WHERE NOT EXISTS ("
+               "  SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND tag IN (?,?))")
+        out = mc.translate_sql(sql)
+        assert ") AS _rows" in out, out
+
 
 class TestTranslateCreateTable:
     def test_text_primary_key_to_varchar(self):

@@ -2564,6 +2564,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
 
         # 鉴权：用户级身份（JWT/API Key，校验托管仓库）或内部 bot/会话 token（_authorize_a2a）
 
+        import asyncio as _aio  # Issue #3349：本端点内同步 VCS 调用统一经它卸载到线程
+
         # Issue #671：注册表未命中 → GitCode 可达性回退（鉴权之后执行，
         # 未认证调用方不触发外呼，维持原 400 not hosted 拒绝语义）。
         # 仅以下认证形态触发回退：JWT/API Key 用户、或会话 token 有效
@@ -2576,7 +2578,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 _fb_hint = {"user_id": _a2a_session_info.get("user_id") or 0,
                             "username": _a2a_session_info.get("username") or ""}
             if _fb_hint is not None:
-                _verdict = _a2a_repo_fallback_check(repo_key, _fb_hint)
+                # Issue #3349：可达性回退是同步 VCS 调用（get_repo_info），卸载到线程，
+                # 避免 async 端点在上游变慢时独占事件循环。
+                _verdict = await _aio.to_thread(_a2a_repo_fallback_check, repo_key, _fb_hint)
                 if _verdict == "ok":
                     # 放行 + 幂等补录（自愈注册缺口，重复调用不产生重复行）
                     _a2a_register_repo(repo_key)
@@ -2596,7 +2600,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # DB 快查命中（平台已知 Issue）→ 放行不外呼；VCS 明确 404 → 400；
         # 网络/无 token（unknown）→ 放行，不误杀正常链路。
         if issue_number and not _issue_exists_in_db(repo_key, issue_number):
-            _issue_verdict = _issue_vcs_verdict_cache or _a2a_issue_vcs_check(repo_key, issue_number)
+            # Issue #3349：存在性校验同样是同步 VCS 调用（get_issue），卸载到线程。
+            _issue_verdict = _issue_vcs_verdict_cache or await _aio.to_thread(
+                _a2a_issue_vcs_check, repo_key, issue_number)
             if _issue_verdict == "not_found":
                 log.info(f"A2A #755: rejected — issue #{issue_number} not found in target repo {repo_key}")
                 raise HTTPException(status_code=400, detail={
@@ -2739,8 +2745,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             "hint": "retry with the same idempotency_key, or verify via GET /api/a2a/status",
         }), _a2a_degraded)
     try:
-        from src.domains.runtime.pipeline.event_pipeline import _execute_agent
-        from src.kernel.session_manager import db_lock
+        from src.domains.runtime.engine.direct_executor import _execute_agent
+        from src.kernel.session_manager import db, db_lock
         backend = ""
         # payload.runtime_id 优先（接管场景：指定路由到本机 worker）
         runtime_id = int(payload.get("runtime_id", 0) or 0)

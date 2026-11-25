@@ -529,6 +529,49 @@ def get_efficiency_issues(repo: str = "", kind: str = "aging", bucket: str = "",
         return {"repo": repo_key_out, "items": [], "total": 0, "empty": True,
                 "error": "aggregation_failed"}
 
+def _metrics_age_seconds(last_seen_at) -> int | None:
+    """last_seen_at → 距现在的秒数；解析不出返回 None（调用方按「未知」处理）。"""
+    raw = str(last_seen_at or "").strip()
+    if not raw:
+        return None
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        d = _dt.fromisoformat(raw.replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=_tz.utc)
+        return max(0, int((_dt.now(_tz.utc) - d).total_seconds()))
+    except Exception:
+        return None
+
+
+_SPEC_RE = None
+
+
+def _spec_cpu_mem(spec) -> tuple[int | None, int | None]:
+    """把凭据上的 spec 串（如 "8C14G"）解析成 (CPU 核数, 内存总量 MB)。
+
+    worker 心跳只上报**百分比**（cpu_percent / memory_percent），库里没有绝对值。
+    spec 是心跳一起上报的机型串，解析后就能把百分比还原成「已用 / 总量」给看板用。
+    解析不出（空串、非 "NC MG" 形态、Windows 桌面机）一律返回 (None, None)：调用方
+    退回只显示百分比，不编造分母。
+    """
+    global _SPEC_RE
+    if _SPEC_RE is None:
+        import re
+        _SPEC_RE = re.compile(r"^\s*(\d+)\s*C\s*(\d+(?:\.\d+)?)\s*G\s*$", re.I)
+    m = _SPEC_RE.match(str(spec or ""))
+    if not m:
+        return None, None
+    try:
+        cores = int(m.group(1)) or None
+        mem_gb = float(m.group(2))
+    except Exception:
+        return None, None
+    if not mem_gb or mem_gb <= 0:
+        return cores, None
+    return cores, int(round(mem_gb * 1024))
+
+
 @router.get("/ops/overview", operation_id="dashboard_ops_overview", summary="Ops overview", description="Real-time ops overview: task queue depth, running count, stuck detection and runtime online status.")
 def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
     """实时运维概览：任务队列深度、运行数、卡住检测、runtime 在线状态。
@@ -737,20 +780,39 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
             # 三种可见性口径（组织隔离 / 仓库级 / 个人组织全局）在 owner 域原语里分支
             for w in _rt_dash.dashboard_worker_rows(
                     _stale_cutoff, _filter_org_id, _uname, repo_key, repo):
-                wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wbw, wbm, wload, wowner = w
+                # 兼容 14 列（旧 provider / 灰度期远端实现）与 15 列（含 spec）
+                _row = tuple(w)
+                (wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem,
+                 wdisk, wtmp, wbw, wbm, wload, wowner) = _row[:14]
+                wspec = _row[14] if len(_row) > 14 else ""
                 worker_total += 1
                 w_health = derive_runtime_health(wstatus or "offline", wlast_seen, now_ts)
                 w_online = w_health == "online"
                 if w_online:
                     worker_online += 1
+                _cores, _mem_total_mb = _spec_cpu_mem(wspec)
+                _mem_used_mb = None
+                if _mem_total_mb and wmem:
+                    _mem_used_mb = int(round(_mem_total_mb * float(wmem) / 100.0))
+                _m_age = _metrics_age_seconds(wlast_seen)
                 worker_list.append({
                     "id": wid, "name": wname or "", "device_name": wdevice or "",
                     "status": wstatus or "offline", "health": w_health,
+                    # 心跳断了以后 cpu/mem 等是最后一次采样值（很多是 0）——前端据此显示「无采样」
+                    "metrics_age_seconds": _m_age,
+                    # 过期判据复用健康态派生（derive_runtime_health，阈值 RUNTIME_STALE_SECONDS
+                    # 默认 100s，env 可调）：卡片圆点显示「失联」时指标就不再按实时渲染，
+                    # 不再自造第二个新鲜度阈值（架构守护 B2）。
+                    "metrics_stale": w_health != "online",
                     "last_seen_at": normalize_event_time(wlast_seen), "last_ip": wip or "",
                     "cpu_percent": wcpu or 0, "memory_percent": wmem or 0,
                     "disk_percent": wdisk or 0, "tmp_percent": wtmp or 0,
                     "bandwidth_percent": wbw or 0,
                     "bandwidth_mbps": wbm or 0,
+                    # 「已用 / 总量」的绝对量：只有 spec 解析成功才有分母
+                    "cpu_cores": _cores, "memory_total_mb": _mem_total_mb,
+                    "memory_used_mb": _mem_used_mb,
+                    "spec": wspec or "",
                     "load_avg": wload or "",
                     "owner_name": wowner or "",
                 })
@@ -768,21 +830,41 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
             if _local_rts:
                 _has_local_worker = any(w.get("device_name") == (_local_hostname or "本机直连") for w in worker_list)
                 if not _has_local_worker:
+                    _lc_cores = None
+                    _lc_mem_total = None
+                    try:
+                        _lc_cores = _ps.cpu_count() or None
+                        _lc_mem_total = int(_ps.virtual_memory().total // (1024 * 1024)) or None
+                    except Exception:
+                        pass
                     worker_list.append({
                         "id": 0, "name": _local_hostname or "本机直连",
                         "device_name": _local_hostname or "本机直连",
                         "status": "online", "health": "online",
+                        "metrics_age_seconds": 0, "metrics_stale": False,
                         "last_seen_at": "", "last_ip": "127.0.0.1",
                         "cpu_percent": _local_cpu, "memory_percent": _local_mem,
                         "disk_percent": _local_disk, "tmp_percent": _local_tmp,
                         "bandwidth_percent": _local_bw_pct,
                         "bandwidth_mbps": _local_bw_mbps,
+                        "cpu_cores": _lc_cores, "memory_total_mb": _lc_mem_total,
+                        "memory_used_mb": (
+                            int(round(_lc_mem_total * float(_local_mem) / 100.0))
+                            if (_lc_mem_total and _local_mem) else None),
+                        "spec": "",
                         "load_avg": _local_load, "owner_name": "",
                     })
                     worker_total += 1
                     worker_online += 1
                 else:
                     # 本机直连设备已在 worker_list 中（hostname 匹配），更新实时指标
+                    _g_cores = None
+                    _g_mem_total = None
+                    try:
+                        _g_cores = _ps.cpu_count() or None
+                        _g_mem_total = int(_ps.virtual_memory().total // (1024 * 1024)) or None
+                    except Exception:
+                        pass
                     for w in worker_list:
                         if w.get("device_name") == (_local_hostname or "本机直连"):
                             w["cpu_percent"] = _local_cpu
@@ -791,6 +873,17 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                             w["tmp_percent"] = _local_tmp
                             w["bandwidth_percent"] = _local_bw_pct
                             w["bandwidth_mbps"] = _local_bw_mbps
+                            w["metrics_age_seconds"] = 0
+                            w["metrics_stale"] = False
+                            # 本机是当前进程自己的机器：核数/内存总量直接用 psutil，
+                            # 不依赖凭据行上的 spec（root 安装形态常上报空 spec）。
+                            if _g_cores:
+                                w["cpu_cores"] = _g_cores
+                            if _g_mem_total:
+                                w["memory_total_mb"] = _g_mem_total
+                                w["memory_used_mb"] = (
+                                    int(round(_g_mem_total * float(_local_mem) / 100.0))
+                                    if _local_mem else None)
                             w["load_avg"] = _local_load
                             break
         except Exception as _e:

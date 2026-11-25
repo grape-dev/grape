@@ -39,6 +39,9 @@ _CODEARTS_ALLOW_PERMS = [
 
 from src.kernel.config import log, CHAT_CWD_BASE, log_context
 from src.domains.runtime.engine.client import CredentialRevokedError
+from src.domains.runtime.engine.metrics_collect import (
+    _unix_metrics_psutil_fill, _windows_metrics_fallback,
+)
 # Issue #4082：runtime_id 守卫的结构化错误（id 缺失/非法时不发请求）
 from src.domains.runtime.engine.runtime_id_guard import RuntimeIdMissingError, RUNTIME_ID_MISSING
 from src.domains.runtime.engine.acp_bootstrap import _is_spawn_failure
@@ -1662,6 +1665,10 @@ def _collect_worker_metrics() -> dict:
         except Exception:
             pass
 
+        # wmic 在 Win11 24H2 起已从系统移除：上面的 wmic 采集会静默失败、整卡显示 0.0。
+        # 这里按 psutil → PowerShell CIM 兜底，只填仍然为 0 的字段。
+        _windows_metrics_fallback(metrics)
+
         # load_avg: Windows 无等价指标，保持空
         # bandwidth: Windows 无 /proc/net/dev 等价，保持 0.0
         try:
@@ -1789,8 +1796,14 @@ def _collect_worker_metrics() -> dict:
         metrics.update(worker_metrics_snapshot())
     except Exception:
         pass
+    # /proc 读取失败兜底：心跳正常但 memory/disk 恒为 0.0 的 Linux worker（内存占用不可能
+    # 真的是 0），用 psutil 补同一口径的数字；已有值的字段不动。
+    if not metrics.get("memory_percent") or not metrics.get("disk_percent"):
+        _unix_metrics_psutil_fill(metrics)
 
     return metrics
+
+
 import logging as _logging_mod
 _worker_log_buffer = _collections.deque(maxlen=50)  # 最近 50 条 ERROR/WARNING
 _last_sent_log_ts = 0.0  # 上次上报的时间戳，避免重复发送
@@ -3519,7 +3532,8 @@ def platform_card_block_result(tid: str, repo_key: str, exc) -> dict:
     return {"_error": f"{code}: {exc}", "_started": False}
 
 
-def credential_block_result(tid: str, repo_key: str) -> "dict | None":
+def credential_block_result(tid: str, repo_key: str, token_result=None,
+                            failure_scene=None) -> "dict | None":
     """Issue #3713：建树取不到 token 时的任务阻断结果（纯构造，便于单测）。
 
     为什么单独成函数：原行为是「ensure_issue_worktree 返回空 → 只 WARNING 一条 →
@@ -3531,13 +3545,56 @@ def credential_block_result(tid: str, repo_key: str) -> "dict | None":
         归因成立 → `{"_error": "credential_<stage>: ...", "_started": False}`
         （由 `_wrap` 上报 failed，任务不进入 Agent 执行）；
         凭据可用或无法归因 → None（保持既有告警路径，语义不变）。
+
+    `token_result`：调用方已解析过凭据链时传入，避免同一阻断重复解析。
+    `failure_scene`：已记录的建树失败现场——有 repo_base 阶段现场时空仓断言不成立
+    （fetch 失败的后果），必须优先透传 git 原文（Issue #3923 复审 Required）。
     """
     from src.domains.runtime.engine import repogit
 
-    reason = repogit.worktree_credential_error(repo_key)
+    reason = repogit.worktree_credential_error(repo_key, token_result=token_result,
+                                               failure_scene=failure_scene)
     if not reason:
         return None
     log.error(f"task {tid} blocked by credential: {reason} repo_key={repo_key or ''}")
+    return {"_error": reason, "_started": False}
+
+
+def worktree_block_result(tid: str, repo_key: str, issue_num=None,
+                          agent_type: str = "") -> "dict | None":
+    """Issue #3923：建树失败的阻断结果 —— 凭据归因成立则报凭据，否则透传 git 原文。
+
+    为什么需要：worker 进程没有装配层（`vcs_provider`/`vcs_cards` 端口未绑），
+    凭据归因在 worker 上永远不成立；此前归因为空即落默认 `not_configured`，
+    把任何 git 失败（HEAD 断裂、ref 冲突）都写成「仓库没配凭据」。
+
+    Returns:
+        有失败现场 → `{"_error": ..., "_started": False}`；
+        无失败现场（建树失败另有原因/未记录）→ None（保持既有告警路径）。
+    """
+    from src.domains.runtime.engine import repogit
+    from src.kernel.token_resolver import resolve_exec_token
+
+    # Issue #3923 审查 Optional：一次阻断只解析一次凭据链，结果下传给
+    # 凭据归因与错误面（原实现会重复解析 3 次，失败路径成本被放大）。
+    token_result = resolve_exec_token(repo_key)
+    # Issue #3923 复审 Required：**先读现场、再问凭据**。空仓断言只在没有
+    # repo_base 阶段现场时成立（fetch/init 失败会让本地 0 refs，此时空仓是
+    # 失败的后果，不是原因）；否则 401/网络原文会被 empty_repo 抹掉。
+    scene = repogit.worktree_last_failure(repo_key, issue_num=issue_num,
+                                          agent_type=agent_type)
+    # 凭据归因成立（确实无凭据/空仓）→ 沿用既有阻断语义与文案
+    cred = credential_block_result(tid, repo_key, token_result=token_result,
+                                   failure_scene=scene)
+    if cred:
+        return cred
+    reason = repogit.worktree_failure_error(repo_key, issue_num=issue_num,
+                                            agent_type=agent_type,
+                                            token_result=token_result,
+                                            failure_scene=scene)
+    if not reason:
+        return None
+    log.error(f"task {tid} blocked by worktree failure: {reason} repo_key={repo_key or ''}")
     return {"_error": reason, "_started": False}
 
 
@@ -3704,10 +3761,16 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     # 返回 _error 由 _wrap 上报 failed，任务**不进入** Agent 执行。
     from src.domains.runtime.engine.repogit import WorkspaceBaselineError as _WsBaselineError
     from src.domains.runtime.vcs.platform_card import PlatformCardMissingError as _PlatformCardMissing
+    from src.domains.runtime.engine import repogit
+    _wt_repo_key = task.get("repo_key") or ""
+    _wt_agent = task.get("agent_type") or ""
+    _wt_wanted = False
+    _num = 0
     try:
-        from src.domains.runtime.engine import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
-        if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
+        _wt_wanted = bool(repogit.is_git_agent(task.get("agent_type") or "") and _num
+                          and task.get("issue_session_id"))
+        if _wt_wanted:
             _wb = env.get("GRAPE_WORK_BRANCH", "")
             _wt = repogit.ensure_issue_worktree(
                 task.get("repo_key") or "", task.get("agent_type") or "",
@@ -3717,10 +3780,23 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
             # Issue #3713：建树没成且凭据侧不可用 → 把 stage 带进 task errors 并阻断，
             # 不再放任 agent 以「git 元数据只读」自述降级、零交付仍 completed。
             if not _wt:
-                _cred_blocked = credential_block_result(tid, task.get("repo_key") or "")
-                if _cred_blocked:
+                # Issue #3923：凭据归因**成立**才报凭据；worker 上归因不可用（端口未绑）
+                # 时透传 git 原文与失败阶段，不再默认落 credential_not_configured。
+                _blocked = worktree_block_result(
+                    tid, task.get("repo_key") or "", issue_num=_num,
+                    agent_type=task.get("agent_type") or "")
+                if _blocked:
                     _res.dispose()
-                    return _cred_blocked
+                    return _blocked
+                # Issue #3482（C）：关闭 fail-open——需要工作区却没建起来 = 错误，
+                # 不得让任务以「只读会话」跑完再 completed（缺交付物却无报错）。
+                # （合并注：#3713 凭据侧不可用已在上面临断，此处为非凭据失败的兜底阻断。）
+                _wt_msg = (f"[workspace_unavailable] Issue #{_num} "
+                           f"{task.get('agent_type') or ''} 工作区不可用：git worktree 创建失败；"
+                           f"任务置 failed，不以只读 completed 收尾")
+                log.error(f"task {tid} {_wt_msg}")
+                _res.dispose()
+                return {"_error": _wt_msg, "_started": False}
     except _WsBaselineError as _wb_err:
         log.error(f"task {tid} blocked by workspace baseline guard: {_wb_err} "
                   f"fields={_wb_err.to_dict()}")
@@ -3734,6 +3810,25 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         _res.dispose()
         return platform_card_block_result(tid, task.get("repo_key") or "", _pc_err)
     except Exception as e:
+        # Issue #3923 复审 Required：建树异常不得只 WARNING 一条就放行——旧行为让
+        # agent 在无工作区状态下继续执行、自述降级交付，正是本 Issue 要消灭的形态。
+        log.error(f"git worktree ensure failed: {e}")
+        if repogit.is_git_agent(_wt_agent) and task.get("issue_session_id"):
+            _blocked = worktree_block_result(tid, _wt_repo_key, issue_num=_num,
+                                             agent_type=_wt_agent)
+            if not _blocked:
+                # 异常发生在失败现场落盘之前（如 repo_base_dir 自身抛错）：
+                # 仍按不可建树阻断，错误面如实带异常原文。
+                _blocked = {"_error": f"worktree_failed: {e}", "_started": False}
+            _res.dispose()
+            return _blocked
+        if _wt_wanted:
+            _wt_msg = (f"[workspace_unavailable] Issue #{_num} "
+                       f"{task.get('agent_type') or ''} 工作区不可用：{str(e)[:300]}；"
+                       f"任务置 failed，不以只读 completed 收尾")
+            log.error(f"task {tid} {_wt_msg}")
+            _res.dispose()
+            return {"_error": _wt_msg, "_started": False}
         log.warning(f"git worktree ensure failed: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）
     # Issue #466: 传 env（含 GRAPE_LINKED_REPO_TOKENS，服务端派发时随 env_extra 下发），
@@ -3967,9 +4062,10 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
                 return _abort_task_terminal(task, engine_name, env, _res, started,
                                             "at final flush")
         # Issue #242: coding agent 成功完成后，向关联仓库提交 PR（在 cleanup 删 worktree 之前执行）
+        # Issue #3349：同步建 PR（同步 urllib）不能在事件循环线程内执行，卸载到工作线程
         if done is not None and not (isinstance(done, dict) and done.get("_error")):
             try:
-                _submit_linked_repo_prs(task, env)
+                await asyncio.to_thread(_submit_linked_repo_prs, task, env)
             except Exception as _e:
                 log.warning(f"linked PR submission failed for task {tid}: {_e}")
         # 可观测性：采集并上报 LLM 用量（引擎已退出，账本已落盘）

@@ -540,5 +540,8 @@
   },
   "obs_no_data": "Worker data unavailable (not zero workers)",
   "obs_stale_since": "Refresh failed — showing the snapshot from {{time}}",
-  "obs_partial": "Partially degraded (backend section failed)"
+  "obs_partial": "Partially degraded (backend section failed)",
+  "page_empty_hint": "No workers on this page (the list just shrank) - click to go back to page one",
+  "metrics_stale": "No live sample (heartbeat lost, values are historical)",
+  "metrics_stale_min": "No live sample · last heartbeat {{n}} min ago"
 }

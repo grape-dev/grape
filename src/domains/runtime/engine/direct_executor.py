@@ -120,6 +120,127 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         except Exception as e:
             log.warning(f"Exec agent: session tmpdir cleanup failed: {e}")
 
+
+def _materialize_workdir_and_skill_gate(*, ws: str, repo_key: str, agent_type: str,
+                                        skill_name: str, evt: dict, issue_id: str,
+                                        prompt: str, engine_name: str, seq: int,
+                                        task_id: str, agent_logs: list | None = None) -> tuple:
+    """Issue #3482（A）+ Issue #887：工位物化 + 技能一致性硬校验（**建树之后**调用）。
+
+    时序是本次缺陷的第一根因：物化会把 `.skills` / `.project-info` / `.knowledge`
+    写进工位目录，若先于 `ensure_issue_worktree` 执行，目标目录就变成「已存在且无
+    `.git`」→ `git worktree add` 报 `fatal: '<path>' already exists`。worker 侧被写死为
+    「必须先建 worktree 再落地技能」（agent.py `_execute_task`，#711 方案 A），direct 端
+    此前顺序相反，本函数把整段物化（含 `_skill_consistency` 校验，它依赖物化结果）
+    整体下移到建树之后——不能只移一半。
+
+    Issue #3482 复审（Required，读侧随写侧下移）：#564 物化降级标注与 #887 技能
+    来源标注的读取块原在 `_execute_agent_inner` 里、于本函数**之前**执行——
+    `evt["_skill_materialize"]` / `evt[SKILL_CONSISTENCY_KEY]` 由物化写入，读侧
+    先于写侧执行恒得空值，direct 会话事件 agent_logs 里两行标注静默丢失（worker
+    端 agent.py 是物化后上报，两端口径分叉）。因此读侧也搬进本函数、紧跟物化
+    之后执行，`agent_logs` 由调用方传入原地追加。
+
+    Returns:
+        (prompt, ok)：ok=False 表示技能一致性拒绝执行（任务/事件已置 failed，调用方直接返回）。
+    """
+    from src.domains.runtime.pipeline.event_pipeline import (
+        _materialize_direct_workdir, _fail_event,
+    )
+    # 直接模式（direct）：组件4 统一物化 project-info / skill / knowledge 到 ws 内
+    # （替代旧的「占位符替换为服务端绝对路径：仓库级 project-info 原件 / 全局 SKILLS_DIR」），
+    # 使 direct 端与 worker 端 cwd 布局一致，后续 bwrap 锁只需挂 ws。
+    prompt = _materialize_direct_workdir(
+        ws, repo_key, agent_type, skill_name, evt, issue_id, prompt,
+        engine_name=engine_name,
+    )
+    # 读侧随写侧下移（见 docstring）：物化刚写完 evt 标注，此处读取才有值。
+    # Issue #564：技能物化降级标注落入事件 agent_logs（不静默空注入）
+    if agent_logs is not None:
+        try:
+            _sk_mat = evt.get("_skill_materialize") or {}
+            if _sk_mat.get("status") in ("fallback", "degraded"):
+                agent_logs.append({
+                    "time": datetime.utcnow().isoformat(),
+                    "type": "skill_materialize",
+                    "msg": f"skill materialize {_sk_mat.get('status')}: {_sk_mat.get('detail')}",
+                })
+        except Exception:
+            pass
+        # Issue #887：技能来源标注（绑定值 vs 实际值）落入事件 agent_logs
+        try:
+            from src.domains.runtime.engine.skill_materialize import SKILL_CONSISTENCY_KEY as _SCK2
+            _sk_src = evt.get(_SCK2) or {}
+            if _sk_src:
+                from src.domains.runtime.engine.task_log_stream import build_skill_source_message as _bssm
+                _sk_line = _bssm(_sk_src.get("bound") or "", _sk_src.get("actual") or "",
+                                 _sk_src.get("source") or "", ok=bool(_sk_src.get("ok")),
+                                 reason=_sk_src.get("reason") or "",
+                                 source_info=_sk_mat.get("source") or None,
+                                 drift=_sk_mat.get("drift") or None)
+                agent_logs.append({
+                    "time": datetime.utcnow().isoformat(),
+                    "type": "skill_source",
+                    "msg": ((_sk_line.get("data") or {}).get("text") or ""),
+                })
+        except Exception:
+            pass
+    # Issue #887：direct 端执行前一致性硬校验——绑定 skill 未物化而工位本地缓存
+    # 存在其它技能时拒绝执行（fail-fast，显式报错，不静默跑错流程）。
+    # 契约键缺失（物化异常降级）→ 显式告警后放行，不静默当作通过。
+    try:
+        from src.domains.runtime.engine.skill_materialize import (SKILL_CONSISTENCY_KEY as _SCK,
+                                                    skill_mismatch_error as _sme)
+    except Exception:  # noqa: BLE001 - 门禁依赖缺失不得中断执行链
+        _SCK = "_skill_consistency"
+        def _sme(sv):
+            return ("[skill_mismatch] "
+                    + str((sv or {}).get("reason") or "skill consistency check failed"))
+    _sv_887 = evt.get(_SCK) or {}
+    if not _sv_887:
+        log.warning(f"Exec agent: seq={seq} skill consistency verdict missing "
+                    f"(materialize degraded); degraded pass")
+    if _sv_887.get("ok") is False:
+        _sv_err = _sme(_sv_887)
+        log.error(f"Exec agent: [Agent:{agent_type}|repo:{repo_key}] "
+                  f"skill consistency refused: {_sv_err}")
+        if task_id:
+            try:
+                from src.kernel.session_manager import db as _sdb, db_lock as _sdl
+                with _sdl:
+                    _sc = _sdb.cursor()
+                    _sc.execute(
+                        "UPDATE agent_tasks SET status='failed', exit_code=1, "
+                        "result_text=?, errors=?, completed_at=? WHERE id=? "
+                        "AND status IN ('running','queued','dispatched')",
+                        (_sv_err, _sv_err,
+                         datetime.utcnow().isoformat(), task_id))
+                    _sdb.commit()
+            except Exception as _se:
+                log.warning(f"Exec agent: mark task failed failed: {_se}")
+        _fail_event(seq, _sv_err, diag={
+            "code": "skill_mismatch",
+            "skill": _sv_887.get("bound") or skill_name or "",
+            "actual": _sv_887.get("actual") or "",
+            "agent_type": agent_type, "repo_key": repo_key,
+            "reason": (_sv_887.get("reason") or "")[:300]})
+        return prompt, False
+    log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")
+    # 回写 prompt 到 agent_tasks（direct 模式创建时 prompt 为空，此处补写）
+    log.info(f"Exec agent: prompt writeback check: task_id={task_id!r}, prompt_len={len(prompt)}")
+    if task_id and prompt:
+        try:
+            from src.kernel.session_manager import db as _wdb, db_lock as _wdl
+            with _wdl:
+                c = _wdb.cursor()
+                c.execute("UPDATE agent_tasks SET prompt=? WHERE id=? AND prompt=''", (prompt, task_id))
+                _wdb.commit()
+            log.info(f"Exec agent: prompt writeback OK for task={task_id}, rows={c.rowcount}")
+        except Exception as _pe:
+            log.warning(f"Exec agent: prompt writeback failed for task={task_id}: {_pe}")
+    return prompt, True
+
+
 def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                          backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
                          task_id: str = ""):
@@ -128,7 +249,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # pipeline 侧 helper 在此函数级延迟 import（模块级会成环）。
     from src.domains.runtime.pipeline.event_pipeline import (
         _fail_event, _inject_bot_agent_env, _inject_issue_pr_env, _inject_linked_repo_tokens,
-        _inject_scene_env, _issue_num_from, _materialize_direct_workdir, _post_all_subtasks_done,
+        _inject_scene_env, _issue_num_from, _post_all_subtasks_done,
         _post_result_to_issue, _post_result_to_pr, _post_subtask_completion_to_parent,
         _read_scene_linked_repos, _redispatch_vod_after_recommend, _submit_direct_linked_prs,
         _sync_issue_comments_to_conversation, _update_direct_task, get_agent_display_name,
@@ -252,66 +373,6 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         else:
             prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
                                   skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id, agent_type=agent_type)
-        # 直接模式（direct）：组件4 统一物化 project-info / skill / knowledge 到 ws 内
-        # （替代旧的「占位符替换为服务端绝对路径：仓库级 project-info 原件 / 全局 SKILLS_DIR」），
-        # 使 direct 端与 worker 端 cwd 布局一致，后续 bwrap 锁只需挂 ws。
-        prompt = _materialize_direct_workdir(
-            ws, repo_key, agent_type, skill_name, evt, issue_id, prompt,
-            engine_name=inst_name or backend or ""
-        )
-        # Issue #887：direct 端执行前一致性硬校验——绑定 skill 未物化而工位本地缓存
-        # 存在其它技能时拒绝执行（fail-fast，显式报错，不静默跑错流程）。
-        # 契约键缺失（物化异常降级）→ 显式告警后放行，不静默当作通过。
-        try:
-            from src.domains.runtime.engine.skill_materialize import (SKILL_CONSISTENCY_KEY as _SCK,
-                                                        skill_mismatch_error as _sme)
-        except Exception:  # noqa: BLE001 - 门禁依赖缺失不得中断执行链
-            _SCK = "_skill_consistency"
-            def _sme(sv):
-                return ("[skill_mismatch] "
-                        + str((sv or {}).get("reason") or "skill consistency check failed"))
-        _sv_887 = evt.get(_SCK) or {}
-        if not _sv_887:
-            log.warning(f"Exec agent: seq={seq} skill consistency verdict missing "
-                        f"(materialize degraded); degraded pass")
-        if _sv_887.get("ok") is False:
-            _sv_err = _sme(_sv_887)
-            log.error(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] "
-                      f"skill consistency refused: {_sv_err}")
-            if task_id:
-                try:
-                    from src.kernel.session_manager import db as _sdb, db_lock as _sdl
-                    with _sdl:
-                        _sc = _sdb.cursor()
-                        _sc.execute(
-                            "UPDATE agent_tasks SET status='failed', exit_code=1, "
-                            "result_text=?, errors=?, completed_at=? WHERE id=? "
-                            "AND status IN ('running','queued','dispatched')",
-                            (_sv_err, _sv_err,
-                             datetime.utcnow().isoformat(), task_id))
-                        _sdb.commit()
-                except Exception as _se:
-                    log.warning(f"Exec agent: mark task failed failed: {_se}")
-            _fail_event(seq, _sv_err, diag={
-                "code": "skill_mismatch",
-                "skill": _sv_887.get("bound") or skill_name or "",
-                "actual": _sv_887.get("actual") or "",
-                "agent_type": agent_type, "repo_key": repo_key,
-                "reason": (_sv_887.get("reason") or "")[:300]})
-            return
-        log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")
-        # 回写 prompt 到 agent_tasks（direct 模式创建时 prompt 为空，此处补写）
-        log.info(f"Exec agent: prompt writeback check: task_id={task_id!r}, prompt_len={len(prompt)}")
-        if task_id and prompt:
-            try:
-                from src.kernel.session_manager import db as _wdb, db_lock as _wdl
-                with _wdl:
-                    c = _wdb.cursor()
-                    c.execute("UPDATE agent_tasks SET prompt=? WHERE id=? AND prompt=''", (prompt, task_id))
-                    _wdb.commit()
-                log.info(f"Exec agent: prompt writeback OK for task={task_id}, rows={c.rowcount}")
-            except Exception as _pe:
-                log.warning(f"Exec agent: prompt writeback failed for task={task_id}: {_pe}")
     except Exception as e:
         log.warning(f"Exec agent: prompt build failed: {e}")
         _prompt_skip_iid = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "")
@@ -337,35 +398,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _exec_done_stderr = ""
     tool_uses = []
     agent_logs = []
-    # Issue #564：技能物化降级标注落入事件 agent_logs（不静默空注入）
-    try:
-        _sk_mat = evt.get("_skill_materialize") or {}
-        if _sk_mat.get("status") in ("fallback", "degraded"):
-            agent_logs.append({
-                "time": datetime.utcnow().isoformat(),
-                "type": "skill_materialize",
-                "msg": f"skill materialize {_sk_mat.get('status')}: {_sk_mat.get('detail')}",
-            })
-    except Exception:
-        pass
-    # Issue #887：技能来源标注（绑定值 vs 实际值）落入事件 agent_logs
-    try:
-        from src.domains.runtime.engine.skill_materialize import SKILL_CONSISTENCY_KEY as _SCK2
-        _sk_src = evt.get(_SCK2) or {}
-        if _sk_src:
-            from src.domains.runtime.engine.task_log_stream import build_skill_source_message as _bssm
-            _sk_line = _bssm(_sk_src.get("bound") or "", _sk_src.get("actual") or "",
-                             _sk_src.get("source") or "", ok=bool(_sk_src.get("ok")),
-                             reason=_sk_src.get("reason") or "",
-                             source_info=_sk_mat.get("source") or None,
-                             drift=_sk_mat.get("drift") or None)
-            agent_logs.append({
-                "time": datetime.utcnow().isoformat(),
-                "type": "skill_source",
-                "msg": ((_sk_line.get("data") or {}).get("text") or ""),
-            })
-    except Exception:
-        pass
+    # （Issue #3482 复审 Required）#564/#887 的 agent_logs 标注读取块已随写侧整体
+    # 下移到 `_materialize_workdir_and_skill_gate`（物化之后）执行——此处（物化前）
+    # 读取恒为空，属顺序缺陷的第二半。
     # Issue #1660：REPO_OWNER/REPO_NAME 一律由 REPO_FULL_NAME（repository）派生，缺失回退 repo_key；
     # **禁止**用 exec_account（触发人账号/带前缀全名）充当 REPO_OWNER——否则触发人≠仓库 owner 时
     # 会注入 REPO_OWNER=<触发人>、REPO_NAME=""（反馈 2874）。Issue #94 的前缀剥离由派生入口统一处理。
@@ -389,6 +424,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _repo_owner_env, _repo_name_env = _sor_env(exec_account or repository)
     env_extra["REPO_OWNER"] = _repo_owner_env
     env_extra["REPO_NAME"] = _repo_name_env
+    # base 侧 #3482-rebase 移植：env 供 agent 复述/脱敏定位（与 worker 口径一致）
+    env_extra["REPO_KEY"] = repo_key or repository
 
     # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
     # Issue #427：PR 订阅 direct 派发（evt 带 _pr_sub_scene_id）同样按订阅场景注入
@@ -424,6 +461,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # agent 侧 git 操作统一走 `grape git`（服务端 git-credential 会话凭据），不依赖 askpass env。
     _is_inspector = False
     _wt = ""
+    _wt_wanted = False
+    _wt_err = ""
+    _gnum = 0
     _delivery_info: dict = {}
     # Issue #2514：direct 入口与 worker 同语义——复用闸门依赖 task_id 存档证据，
     # 基线分叉/不可达必须显式上抛（顶层兜底把 event/task 标 failed），不静默复用错基线。
@@ -431,7 +471,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     try:
         from src.domains.runtime.engine import repogit
         _gnum = repogit.issue_num_from(issue_id)
-        if repogit.is_git_agent(agent_type) and _gnum and issue_session_id:
+        _wt_wanted = bool(repogit.is_git_agent(agent_type) and _gnum and issue_session_id)
+        if _wt_wanted:
             _wb = env_extra.get("GRAPE_WORK_BRANCH", "")
             _is_inspector = repogit.is_inspector_agent(agent_type)
             _wt = repogit.ensure_issue_worktree(
@@ -453,7 +494,45 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except _WsBaselineError:
         raise
     except Exception as e:
+        _wt_err = str(e)
         log.warning(f"Exec agent: git worktree ensure failed: {e}")
+
+    # Issue #3482（C）：关闭 fail-open——需要 git 工作区却没建起来，是一条错误，
+    # 不是「只读会话」。任务置 failed 并在 completed_reason（result_text/errors）写明
+    # workspace 不可用及原因，杜绝「工作区没建起来 → 标只读 → 任务 completed 缺交付物」。
+    if _wt_wanted and not _wt:
+        _wu_reason = _wt_err or "ensure_issue_worktree returned no workspace"
+        _wu_msg = (f"[workspace_unavailable] Issue #{_gnum} {agent_type} 工作区不可用："
+                   f"git worktree 创建失败（{_wu_reason[:300]}）；任务置 failed，"
+                   f"不以只读 completed 收尾")
+        log.error(f"Exec agent: {_wu_msg}")
+        if task_id:
+            try:
+                from src.domains.runtime.engine.service import fail_task as _fail_task
+                _fail_task(task_id, _wu_msg, exit_code=1)
+            except Exception as _fte:
+                log.warning(f"Exec agent: fail_task for workspace unavailable failed: {_fte}")
+        _fail_event(seq, _wu_msg, diag={
+            "code": "workspace_unavailable",
+            "agent_type": agent_type, "repo_key": repo_key,
+            "issue_number": str(_gnum), "reason": _wu_reason[:300]})
+        return
+
+    # Issue #3482（A）：物化整体下移到建树之后——`.skills` / `.project-info` /
+    # `.knowledge` 与 `_skill_consistency` 校验一并搬（不能只移一半），否则目标目录
+    # 先被物化占住 → worktree add 报 already exists。
+    # agent_logs 随调用传入：#564/#887 标注在物化之后写入（读侧随写侧，复审 Required）。
+    try:
+        prompt, _mat_ok = _materialize_workdir_and_skill_gate(
+            ws=ws, repo_key=repo_key, agent_type=agent_type, skill_name=skill_name,
+            evt=evt, issue_id=issue_id, prompt=prompt,
+            engine_name=inst_name or backend or "", seq=seq, task_id=task_id,
+            agent_logs=agent_logs)
+    except Exception as _mate:
+        log.warning(f"Exec agent: direct workdir materialize failed: {_mate}")
+        _mat_ok = True  # 物化异常降级放行（Issue #564：不静默空注入，已由 _materialize 记日志）
+    if not _mat_ok:
+        return
 
     # Issue #1954：direct QA 前置 sha 门禁独立执行，建树/上下文注入异常不得跳过阻断。
     if _is_inspector and _wt:
@@ -1031,8 +1110,13 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as _e:
             log.warning(f"SRE → pending_review failed: {_e}")
 
-    # 末节点完成后 → 推进到「待人工确认」（与 event_pipeline 同一钩子清单）。
-    # 技能未显式置 pending-review 时由服务端兜底；函数自带 stage/末节点守卫，非末节点 noop。
+    # 末节点完成后 → 推进到「待人工确认」（人工闸 2026-11-17：不再自动结单）。
+    # 全部节点 completed + 无阻断 → status=stage=pending_review，等人工 confirm-done；
+    # failed/QA 阻断同样回退 pending_review 并保留原因标注。
+    # 函数自带 stage/末节点守卫，非末节点 noop。
+    # （Issue #3482 第四轮 Required：本钩子原在 event_pipeline 旧副本收尾清单内，随
+    #   #699 唯一实现迁移搬回此处——与 worker 端 complete_task() 的 pending_review 钩子
+    #   同口径，恢复 a2a_dispatch / events(redispatch) / webhook 三入口的人工闸。）
     if new_status == "completed" and issue_id and agent_type:
         try:
             from src.api.issues_center import finalize_issue_to_pending_review

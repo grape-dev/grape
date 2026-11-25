@@ -151,6 +151,76 @@ def test_heartbeat_reseeds_legacy_declared_row():
     assert es.engine_allows_role(rid, "coding") is False
 
 
+def test_heartbeat_does_not_resurrect_declared_disabled_roles():
+    """QA 第 6 轮 Required：声明非空 + 仅停用行 + tags_user_set=0，心跳也不得复活。
+
+    与 test_heartbeat_does_not_resurrect_disabled_roles 互补：那条是声明为空、
+    停用的恰是 all；本条复现 QA 端点探针的精确场景——声明的 sre 被显式停用后，
+    seed 旧口径（只看 enabled=1）会把它当「没配过」重新插入 enabled=1。
+    """
+    client = _client()
+    token = _make_token("b3396r-13")
+    rid = _register(client, token, "b3396r-dev13", {"name": "hermes", "role_tags": ["sre"]})
+    assert _role_caps(rid) == ["sre"]
+    with db_lock:
+        db.cursor().execute("UPDATE engine_capabilities SET enabled=0 WHERE runtime_id=?", (rid,))
+        db.cursor().execute("UPDATE agent_runtimes SET tags_user_set=0 WHERE id=?", (rid,))
+        db.commit()
+    assert _role_caps(rid) == []
+    r = client.post("/api/runtime/heartbeat", headers={"Authorization": f"Bearer {token}"},
+                    json={"runtime_ids": [rid]})
+    assert r.status_code == 200, r.text
+    assert _role_caps(rid) == [], "声明角色停用后被心跳复活"
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT tag, enabled FROM engine_capabilities WHERE runtime_id=?", (rid,)).fetchall()
+    assert [tuple(x) for x in rows if ":" not in x[0]] == [("sre", 0)], rows
+
+
+def test_re_register_does_not_resurrect_declared_disabled_roles():
+    """注册链同场景：重复注册（如 worker 重启自注册）不得复活显式停用的声明角色。"""
+    client = _client()
+    token = _make_token("b3396r-14")
+    payload = {"name": "hermes", "role_tags": ["sre"]}
+    rid = _register(client, token, "b3396r-dev14", payload)
+    with db_lock:
+        db.cursor().execute("UPDATE engine_capabilities SET enabled=0 WHERE runtime_id=?", (rid,))
+        db.cursor().execute("UPDATE agent_runtimes SET tags_user_set=0 WHERE id=?", (rid,))
+        db.commit()
+    r = client.post("/api/runtime/register", headers={"Authorization": f"Bearer {token}"},
+                    json={"device_name": "b3396r-dev14", "runtimes": [payload]})
+    assert r.status_code == 200, r.text
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT tag, enabled FROM engine_capabilities WHERE runtime_id=?", (rid,)).fetchall()
+    assert [tuple(x) for x in rows if ":" not in x[0]] == [("sre", 0)], rows
+
+
+def test_register_seed_skips_whole_group_when_sibling_role_disabled():
+    """QA 第 6 轮 Required ②：声明 ['chat','sre'] 且已存在停用 sre 行 → 整组跳过。
+
+    旧 seed 逐条 INSERT：chat 先落 enabled=1，sre 撞 (runtime_id, tag) 唯一键
+    1062 被整体吞成 log.warning → 半组启用、调用方却以为没播种。修复后只要
+    存在任何角色行（含 enabled=0）就整组不动，由 ensure_role_caps 收口。
+    """
+    client = _client()
+    token = _make_token("b3396r-16")
+    rid = _register(client, token, "b3396r-dev16", {"name": "codearts", "role_tags": ["sre"]})
+    assert _role_caps(rid) == ["sre"]
+    with db_lock:
+        db.cursor().execute(
+            "UPDATE engine_capabilities SET enabled=0 WHERE runtime_id=? AND tag='sre'", (rid,))
+        db.commit()
+    assert _role_caps(rid) == []
+    _register(client, token, "b3396r-dev16",
+              {"name": "codearts", "role_tags": ["chat", "sre"]})
+    assert _role_caps(rid) == [], "声明组被部分启用（chat 落了 enabled=1）"
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT tag, enabled FROM engine_capabilities WHERE runtime_id=?", (rid,)).fetchall()
+    assert [tuple(x) for x in rows if ":" not in x[0]] == [("sre", 0)], rows
+
+
 def test_user_set_tags_are_not_overwritten():
     """tags_user_set=1（UI 改过）→ 声明的 role_tags 不覆盖用户配置。"""
     client = _client()
@@ -184,3 +254,95 @@ def test_ui_set_roles_not_overwritten_without_user_flag():
         db.commit()
     _register(client, token, "b3396r-dev7", {"name": "hermes", "role_tags": ["sre"]})
     assert _role_caps(rid) == ["coding", "qa"], _role_caps(rid)
+
+
+def test_seed_reads_single_role_source(monkeypatch):
+    """播种值域与 AGENT_TAGS 同源：临时给它加一个角色，声明即被播种（不被第二份字面量过滤）。"""
+    from src.domains.runtime.routes import runtime as _rt
+    monkeypatch.setattr(_rt, "AGENT_TAGS", set(_rt.AGENT_TAGS) | {"demo-role"}, raising=True)
+    client = _client()
+    token = _make_token("b3396r-9")
+    rid = _register(client, token, "b3396r-dev9", {"name": "codearts", "role_tags": ["demo-role"]})
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,)).fetchall()
+    tags = sorted(r[0] for r in rows if ":" not in r[0])
+    assert tags == ["demo-role"], tags
+
+
+def test_heartbeat_backfills_legacy_user_set_empty_roles():
+    """tags_user_set=1 且**零角色行**（旧版「清空全部角色」遗留）→ 心跳自愈补 all。
+
+    2026-11-24 裁定：清空已被前端 + 接口双层禁止（`EMPTY_ROLE_TAGS`），该状态只剩
+    历史遗留。旧心跳用 `if not tags_user_set` 做闸门，这类引擎永久 fail-closed 且
+    没有任何链路能补回；现在心跳无条件走 ensure_role_caps（内部只补零角色行的引擎）。
+    """
+    client = _client()
+    token = _make_token("b3396r-10")
+    rid = _register(client, token, "b3396r-dev10", {"name": "hermes"})
+    assert _role_caps(rid) == ["all"]
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag NOT LIKE '%:%'", (rid,))
+        c.execute("UPDATE agent_runtimes SET role_tags='', tags_user_set=1 WHERE id=?", (rid,))
+        db.commit()
+    assert _role_caps(rid) == []
+    r = client.post("/api/runtime/heartbeat", headers={"Authorization": f"Bearer {token}"},
+                    json={"runtime_ids": [rid]})
+    assert r.status_code == 200, r.text
+    assert _role_caps(rid) == ["all"], _role_caps(rid)
+
+
+def test_heartbeat_keeps_user_set_roles_when_rows_exist():
+    """tags_user_set=1 且已有角色行 → 心跳不按声明覆盖用户配置（A3 不回归）。"""
+    client = _client()
+    token = _make_token("b3396r-11")
+    rid = _register(client, token, "b3396r-dev11", {"name": "codearts", "role_tags": ["sre"]})
+    assert _role_caps(rid) == ["sre"]
+    with db_lock:
+        db.cursor().execute(
+            "UPDATE agent_runtimes SET role_tags='[\"qa\"]', tags_user_set=1 WHERE id=?", (rid,))
+        db.commit()
+    r = client.post("/api/runtime/heartbeat", headers={"Authorization": f"Bearer {token}"},
+                    json={"runtime_ids": [rid]})
+    assert r.status_code == 200, r.text
+    assert _role_caps(rid) == ["sre"], _role_caps(rid)
+
+
+def test_heartbeat_does_not_resurrect_disabled_roles():
+    """去掉 `tags_user_set` 闸门后的最大风险：只有 enabled=0 行时不得被心跳复活。
+
+    `has_role_rows` 把停用行也算「已配置」（连续停用最后一个角色会被接口 400 拦住，
+    停用态只能来自显式操作或历史数据），心跳必须尊重它 —— 否则用户停用的引擎会
+    在下一跳自动变回可调度。
+    """
+    client = _client()
+    token = _make_token("b3396r-12")
+    rid = _register(client, token, "b3396r-dev12", {"name": "hermes"})
+    assert _role_caps(rid) == ["all"]
+    with db_lock:
+        db.cursor().execute("UPDATE engine_capabilities SET enabled=0 WHERE runtime_id=?", (rid,))
+        db.cursor().execute("UPDATE agent_runtimes SET tags_user_set=1 WHERE id=?", (rid,))
+        db.commit()
+    assert _role_caps(rid) == []
+    r = client.post("/api/runtime/heartbeat", headers={"Authorization": f"Bearer {token}"},
+                    json={"runtime_ids": [rid]})
+    assert r.status_code == 200, r.text
+    assert _role_caps(rid) == [], "停用行被心跳复活了"
+
+
+def test_heartbeat_backfills_declared_not_all_for_legacy_user_set():
+    """user_set=1 且零角色行、但有声明 → 补声明集合，不得放大成 all。"""
+    client = _client()
+    token = _make_token("b3396r-13")
+    rid = _register(client, token, "b3396r-dev13", {"name": "codearts", "role_tags": []})
+    with db_lock:
+        db.cursor().execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+        db.cursor().execute(
+            "UPDATE agent_runtimes SET role_tags='[\"sre\"]', tags_user_set=1 WHERE id=?", (rid,))
+        db.commit()
+    assert _role_caps(rid) == []
+    r = client.post("/api/runtime/heartbeat", headers={"Authorization": f"Bearer {token}"},
+                    json={"runtime_ids": [rid]})
+    assert r.status_code == 200, r.text
+    assert _role_caps(rid) == ["sre"], _role_caps(rid)

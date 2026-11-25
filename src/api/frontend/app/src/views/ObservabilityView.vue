@@ -144,6 +144,14 @@
               <div v-if="!sortedWorkers.length" class="ts t2" style="padding: 12px">
                 {{ opsWorkers.total === null ? t('obs_no_data') : t('no_remote_worker') }}
               </div>
+              <div
+                v-else-if="!pageWorkers.length"
+                class="ts t2"
+                style="padding: 12px"
+                @click="workerPage = 0"
+              >
+                {{ t('page_empty_hint') }}
+              </div>
               <div v-for="wk in pageWorkers" :key="wkKey(wk)" class="obv-wkcard">
                 <div class="obv-wk-head">
                   <span class="obv-wk-dot">{{ healthDot(wk.health) }}</span>
@@ -157,6 +165,13 @@
                   <div>
                     {{ t('heartbeat') }}: {{ fmtLocal(wk.last_seen_at || '').substring(11, 19) }}
                   </div>
+                </div>
+                <div
+                  v-if="wk.metrics_stale"
+                  class="ts t3"
+                  style="margin: 2px 0 4px; color: var(--y)"
+                >
+                  {{ staleHint(wk) }}
                 </div>
                 <div v-for="b in workerBars(wk)" :key="b.label" class="obv-bar-row">
                   <span class="obv-bar-lbl">{{ b.label }}</span>
@@ -2566,9 +2581,16 @@ G.window.__obvOpenAlerts = function () {
 }
 
 // ═══ 设备分区数据 ═══
+let lastOpsRepoKey = null
 function refreshObs(isAuto) {
   const repo = currentRepo()
   const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : ''
+  // 换仓库=换 worker 可见集，页码必须归零，否则沿用上个仓库的页码会切到空页
+  const _repoKey = (repo && repo.fullName) || ''
+  if (_repoKey !== lastOpsRepoKey) {
+    lastOpsRepoKey = _repoKey
+    workerPage.value = 0
+  }''
   if (!isAuto) {
     API()
       .get('/dashboard/ops/probe-now')
@@ -2582,6 +2604,14 @@ function refreshObs(isAuto) {
       // realOps 退回 fallbackOps，而 fallback 的数值是硬编码 0 —— 表现为
       // worker 卡片「一会儿全 0、一会儿正常」。现在保留旧值并标记失败时间。
       if (ops && !ops.error) {
+        // workers 段降级时不要把整块清空：保留上一份有效列表并沿用 stale 标记，
+        // 否则页面会在「有卡片」和「空列表」之间来回跳（用户报的「有时候是空的」）。
+        const _deg = Array.isArray(ops.degraded) ? ops.degraded : []
+        const _prev = opsData.value && !opsData.value.error ? opsData.value : null
+        if (_prev && _deg.indexOf('workers') >= 0 &&
+            ((_prev.workers || {}).list || []).length) {
+          ops = Object.assign({}, ops, { workers: _prev.workers })
+        }
         opsData.value = ops
         opsFailedAt.value = ''
       } else {
@@ -2645,27 +2675,88 @@ const sortedWorkers = computed(() =>
 const workerTotalPages = computed(() =>
   Math.max(1, Math.ceil(sortedWorkers.value.length / workerPageSize.value))
 )
-const pageWorkers = computed(() =>
-  sortedWorkers.value.slice(
-    workerPage.value * workerPageSize.value,
-    (workerPage.value + 1) * workerPageSize.value
-  )
-)
+// 页码夹取：worker 数会随心跳/过期变化，停在第 2 页而列表变短时旧实现会切出空数组，
+// 于是整块卡片区域空白（既没有卡片也没有"无远端 Worker"提示）。这里按当前总页数夹取，
+// 并在总页数缩小时把页码拉回最后一页。
+const pageWorkers = computed(() => {
+  const total = workerTotalPages.value
+  const p = Math.min(Math.max(0, workerPage.value), total - 1)
+  return sortedWorkers.value.slice(p * workerPageSize.value, (p + 1) * workerPageSize.value)
+})
+watch(workerTotalPages, function (n) {
+  if (workerPage.value > n - 1) workerPage.value = Math.max(0, n - 1)
+})
 function wkKey(wk) {
   return wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_')
 }
+// 指标格式化：没有采样（null/空/NaN）一律显 '—'，不画成长度为 NaN 的空条。
+function numOrNull(v) {
+  if (v === null || v === undefined || v === '') return null
+  const n = Number(v)
+  return isFinite(n) ? n : null
+}
+function pctText(v) {
+  const n = numOrNull(v)
+  return n === null ? '—' : n.toFixed(1) + '%'
+}
+function sizeText(mb) {
+  const n = numOrNull(mb)
+  if (n === null || n <= 0) return ''
+  return n >= 1024 ? (n / 1024).toFixed(1) + 'G' : Math.round(n) + 'M'
+}
+// 内存显示「已用 / 总量」（心跳只上报百分比，分母来自机型 spec；解析不出就退回百分比）
+function memText(wk) {
+  const used = numOrNull(wk.memory_used_mb)
+  const total = numOrNull(wk.memory_total_mb)
+  if (used !== null && total) {
+    const u = sizeText(used)
+    const tot = sizeText(total)
+    if (u && tot) return u + ' / ' + tot
+  }
+  return pctText(wk.memory_percent)
+}
+// 心跳断了（或从来没采到过）的 worker，库里存的是最后一次采样值，很多是 0.0。
+// 这种卡片的 0% 是假数据，统一显示 —，避免把「没数据」看成「机器很闲/空载」。
 function workerBars(wk) {
+  const stale = !!wk.metrics_stale
+  const cpu = numOrNull(wk.cpu_percent)
+  const mem = numOrNull(wk.memory_percent)
+  const tmp = numOrNull(wk.tmp_percent)
+  const disk = numOrNull(wk.disk_percent)
+  const bw = numOrNull(wk.bandwidth_percent)
   return [
-    { label: t('cpu'), pct: wk.cpu_percent },
-    { label: t('mem'), pct: wk.memory_percent },
-    { label: t('tmp'), pct: wk.tmp_percent },
-    { label: t('disk'), pct: wk.disk_percent },
+    {
+      label: t('cpu'),
+      pct: stale || cpu === null ? 0 : cpu,
+      text: stale ? '—' : pctText(wk.cpu_percent),
+    },
+    {
+      label: t('mem'),
+      pct: stale || mem === null ? 0 : mem,
+      text: stale ? '—' : memText(wk),
+    },
+    {
+      label: t('tmp'),
+      pct: stale || tmp === null ? 0 : tmp,
+      text: stale ? '—' : pctText(wk.tmp_percent),
+    },
+    {
+      label: t('disk'),
+      pct: stale || disk === null ? 0 : disk,
+      text: stale ? '—' : pctText(wk.disk_percent),
+    },
     {
       label: t('bandwidth'),
-      pct: wk.bandwidth_percent,
-      text: (wk.bandwidth_mbps || 0).toFixed(1) + ' Mbps',
+      pct: stale || bw === null ? 0 : bw,
+      text: stale ? '—' : (numOrNull(wk.bandwidth_mbps) || 0).toFixed(1) + ' Mbps',
     },
   ]
+}
+// 指标过期提示（分钟数；未知则不显示数字）
+function staleHint(wk) {
+  const age = numOrNull(wk.metrics_age_seconds)
+  const mins = age === null ? null : Math.floor(age / 60)
+  return mins === null ? t('metrics_stale') : t('metrics_stale_min', { n: mins })
 }
 const sortedRuntimes = computed(() =>
   (opsRuntimes.value.list || [] || [])
