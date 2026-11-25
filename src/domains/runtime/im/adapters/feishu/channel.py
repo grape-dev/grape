@@ -119,7 +119,12 @@ async def _default_endpoint_fetcher(app_id: str, app_secret: str) -> tuple:
     try:
         return await api.get_ws_endpoint(BotContext(app_id=app_id, app_secret=app_secret))
     finally:
-        await api.close()
+        # Issue #3735：关闭失败只 WARNING（带 app_id），不得覆盖 endpoint 返回值/原异常
+        # ——收尾动作不能反向影响建连主流程。
+        try:
+            await api.close()
+        except Exception as e:
+            log.warning("[feishu:%s] endpoint client close failed: %r", app_id, e)
 
 
 class FeishuChannel(Channel):
