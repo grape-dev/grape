@@ -70,6 +70,7 @@
     "no_description": "No description",
     "role_label": "Role",
     "member_limit": "Member limit",
+    "repo_limit": "Repository limit",
     "worker_limit": "Worker limit",
     "current_org": "Current organization",
     "all_orgs": "All organizations",

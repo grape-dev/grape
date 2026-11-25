@@ -554,8 +554,8 @@
             type="number"
           />
           <AGInput
-            v-model="editForm.max_workers"
-            :label="t('detail.worker_limit') || 'Worker 上限'"
+            v-model="editForm.max_repos"
+            :label="t('detail.repo_limit') || '仓库上限'"
             type="number"
           />
         </div>
@@ -915,7 +915,7 @@ const editForm = reactive({
   name: '',
   description: '',
   max_members: 50,
-  max_workers: 10,
+  max_repos: 20,
   isPersonal: false,
 })
 
@@ -1905,8 +1905,9 @@ function deleteOrg() {
 function openEdit() {
   editForm.name = detail.value.name || ''
   editForm.description = detail.value.description || ''
-  editForm.max_members = detail.value.max_members || 50
-  editForm.max_workers = detail.value.max_workers || 10
+  // 保留历史 0（不限）语义：只有字段缺失/为 null 时才回退默认值。
+  editForm.max_members = detail.value.max_members ?? 50
+  editForm.max_repos = detail.value.max_repos ?? 20
   editForm.isPersonal = !!detail.value.is_personal
   showEdit.value = true
 }
@@ -1915,8 +1916,12 @@ function saveEdit() {
   if (!editForm.name.trim()) return G.app.showToast(t('create.name_required') || '名称不能为空')
   const payload = { name: editForm.name.trim(), description: editForm.description.trim() }
   if (!editForm.isPersonal) {
-    payload.max_members = parseInt(editForm.max_members) || 0
-    payload.max_workers = parseInt(editForm.max_workers) || 0
+    // Worker 上限暂不在编辑组织弹窗中开放（后端仍保留字段，其他入口可继续使用）。
+    // 0 保留历史“不限”语义，后端把 0 视为不修改；空值回退默认 50/20。
+    const maxMembers = parseInt(editForm.max_members)
+    const maxRepos = parseInt(editForm.max_repos)
+    payload.max_members = Number.isFinite(maxMembers) && maxMembers >= 0 ? maxMembers : 50
+    payload.max_repos = Number.isFinite(maxRepos) && maxRepos >= 0 ? maxRepos : 20
   }
   G.API.put('/orgs/' + detailId.value, payload)
     .then(function () {

@@ -70,6 +70,7 @@
     "no_description": "暂无描述",
     "role_label": "角色",
     "member_limit": "成员上限",
+    "repo_limit": "仓库上限",
     "worker_limit": "Worker 上限",
     "current_org": "当前组织",
     "all_orgs": "全部组织",
