@@ -48,6 +48,35 @@ def _hermes_iso_home(cwd: str) -> str:
     return os.path.join(root, _cwd_hash(cwd))
 
 
+def _hermes_shared_home_fallback(cwd: str) -> bool:
+    """本进程内该 cwd 是否因 overlay 不可用回退到了共享 HERMES_HOME。
+
+    标记由 `agents/hermes_acp.py` 的 `stream_execute` 在真正回退时写入；拿不到
+    标记（模块导入失败/未回退）一律按「未回退」处理 —— 宁可少读共享账本，也不能
+    把共享库里别的历史累计当成本次用量。
+    """
+    try:
+        from src.domains.runtime.agents.hermes_acp import shared_home_fallback_cwds
+        return (cwd or ".") in shared_home_fallback_cwds()
+    except Exception:  # noqa: BLE001 - 采集不能因标记缺失而报错
+        return False
+
+
+def _hermes_state_db_paths(cwd: str) -> List[str]:
+    """hermes 账本候选路径（overlay 优先，回退过的 cwd 追加共享 HERMES_HOME）。
+
+    Issue #3904：overlay 被可用性自检判不可用时整个目录会被 `_remove_overlay_tree`
+    删掉、引擎改用共享 HERMES_HOME —— 账本也随之写在共享 `state.db` 里。只认
+    overlay 路径会在回退场景逐任务刷 `copy/open sqlite failed ... No such file`
+    并丢失用量。回退事实由 hermes_acp 打标，命中才追加共享候选。
+    """
+    paths = [os.path.join(_hermes_iso_home(cwd), "state.db")]
+    if _hermes_shared_home_fallback(cwd):
+        shared_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
+        paths.append(os.path.join(shared_home, "state.db"))
+    return paths
+
+
 def _hwcloud_iso_home(cwd: str) -> str:
     root = os.path.join(os.path.expanduser("~"), ".cache", "hwcloud-acp-homes")
     return os.path.join(root, _cwd_hash(cwd))
@@ -85,6 +114,11 @@ def _open_sqlite_readonly(path: str, workdir: str, copy_max_mb: int = 64) -> Opt
             if os.path.exists(path + suffix):
                 shutil.copy2(path + suffix, base + suffix)
         return sqlite3.connect(f"file:{base}?mode=ro", uri=True)
+    except FileNotFoundError as e:
+        # Issue #3904：回退共享 home 时 overlay 目录被删，探测与复制之间的竞态必然
+        # 触发 ENOENT —— 这是既知降级形态，不该逐任务刷 WARNING。
+        log.info(f"usage_collect: state.db vanished before copy {path}: {e}")
+        return None
     except Exception as e:
         log.warning(f"usage_collect: copy/open sqlite failed {path}: {e}")
         return None
@@ -389,8 +423,16 @@ class UsageCollector:
 
     def _hermes_rows(self) -> Dict[str, Dict[str, int]]:
         """{key: 计数} —— key = f"{session_id}|{model}|{task}"。"""
-        iso = _hermes_iso_home(self.cwd)
-        db_path = os.path.join(iso, "state.db")
+        # Issue #3904：overlay 优先；回退共享 home 时账本在共享 HERMES_HOME/state.db
+        candidates = _hermes_state_db_paths(self.cwd)
+        db_path = next((p for p in candidates if os.path.exists(p)), "")
+        if not db_path:
+            # 两个位置都没有账本：任务未跑模型步或账本已随 overlay 清理 —— DEBUG 即可
+            log.debug(f"usage_collect: hermes state.db not found (tried {candidates})")
+            return {}
+        if db_path != candidates[0]:
+            log.info(f"usage_collect: hermes ledger from shared home {db_path} "
+                     f"(overlay missing: {candidates[0]})")
         conn = _open_sqlite_readonly(db_path, self._workdir())
         if conn is None:
             return {}
