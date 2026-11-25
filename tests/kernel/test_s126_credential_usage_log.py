@@ -167,6 +167,9 @@ class TestCredentialUsageLog:
                 raise AssertionError(f"unexpected process-db access: {item}")
 
         monkeypatch.setattr(_reg, "uses_own_dsn", lambda _d: True)
+        # Issue #4375：`_any_cursor` 已收口到内核唯一路由判定 `route_of`（经 `cursor_for`），
+        # 拓扑模拟同步钉住路由，否则按「单库拓扑」落进程主库（_NoFallbackDB 哨兵即触发）。
+        monkeypatch.setattr(_reg, "route_of", lambda _d: "domain")
         monkeypatch.setattr(_reg, "cursor", _cursor)
         monkeypatch.setattr(_sm, "db", _NoFallbackDB())
 
