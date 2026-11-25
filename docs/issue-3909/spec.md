@@ -38,5 +38,6 @@
 - 单库/测试拓扑零回归。
 - 降级路径可测：`DomainUnavailable` / 查询异常 → 接口带降级标记且仍 200。
 - mgmt 一键加回走 runtime 事务，域不可用时返回显式失败原因（不再 503 撞库）。
-- 新增 `tests/runtime/test_issue_3909_detach_hint_topology.py`；`scan_pgconn.py --check` 通过，
-  `engine_select.py` / `recovery.py` 计数下降并刷新基线。
+- 新增 `tests/runtime/test_issue_3909_detach_hint_topology.py`；本 PR 涉及的
+  `engine_select.py` / `recovery.py` 计数只降不升并刷新基线（`transient_retry.py` 的
+  #3820/#3822 预存在漂移不在本 PR 吸收，另拆基线 PR 收敛）。
