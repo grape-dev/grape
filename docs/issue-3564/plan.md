@@ -20,7 +20,7 @@
    确认时只保存选中引擎的映射；创建/编辑/草稿/复制均透传并清洗孤儿键。
 
 ## 迁移
-`src/api/db_setup.py` 新增 `register_migration("202611240016", ...)`：
+`src/api/db_setup.py` 新增 `register_migration("202611240011", ...)`：
 `agent_tasks.engine_priorities TEXT DEFAULT ''`（`_ensure_column` + `allow_copy`/`strict`）。
 fresh DB 由 `src/domains/runtime/schema_ddl.py` 建列；跨库视图跳过 ALTER。
 

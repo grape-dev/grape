@@ -653,7 +653,7 @@ def test_engine_priorities_migration_declares_runtime_domain_and_postcheck():
 
     mig = next(m for m in db_setup._MIGRATIONS
                if m.name == "issue3564-agent-tasks-engine-priorities")
-    assert mig.version == "202611240016", "迁移号需为未占用的新号（旧 202611240003/011 已在 mgmt 盖章）"
+    assert mig.version == "202611240011", "迁移号需为未占用的新号（旧 202611240003 已在 mgmt 盖章）"
     assert mig.domains == ("runtime",), "agent_tasks 归属 runtime 域，迁移必须显式声明"
     assert mig.post_check is not None, "缺列迁移必须带 post_check（Issue #3648）"
 
@@ -665,11 +665,11 @@ def test_engine_priorities_migration_filtered_to_runtime_only(monkeypatch):
     monkeypatch.setenv("GRAPE_DOMAIN_LIB", "1")
     monkeypatch.setenv("GRAPE_MIGRATION_OWNER", "runtime")
     versions = {m.version for m in db_setup.filter_migration_registry(db_setup._MIGRATIONS)}
-    assert "202611240016" in versions
+    assert "202611240011" in versions
 
     monkeypatch.setenv("GRAPE_MIGRATION_OWNER", "mgmt")
     versions = {m.version for m in db_setup.filter_migration_registry(db_setup._MIGRATIONS)}
-    assert "202611240016" not in versions
+    assert "202611240011" not in versions
 
 
 def test_engine_priorities_migration_skips_view_and_checks_column(monkeypatch):

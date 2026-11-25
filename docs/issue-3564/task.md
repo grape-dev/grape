@@ -2,7 +2,7 @@
 
 - [x] T1 `pipeline_config.get_scene_engine_binding` 解析/归一化 `engine_priorities`
 - [x] T2 `engine_select.get_scene_engine_priorities` 输出任务级 JSON
-- [x] T3 `agent_tasks.engine_priorities`：schema DDL + `register_migration("202611240016")`
+- [x] T3 `agent_tasks.engine_priorities`：schema DDL + `register_migration("202611240011")`
 - [x] T4 `enqueue_task` 落列（未显式传时按场景解析）
 - [x] T5 `claim_by_tag` 优先级闸 + `claim guard [priority]` 决策日志 + 超时旁路
 - [x] T6 场景保存校验 + 复制清洗孤儿优先级键
@@ -19,7 +19,7 @@
       空池旧语义用例、归一化 helper strict 与非 strict 用例（合计 24 条）
 
 ## QA rebase 复审修复（2026-11-23）
-- [x] R1 迁移已改号 `202611240016`（基线占用旧号），同步更新 spec/plan/task 文档。
+- [x] R1 迁移已改号 `202611240011`（基线占用旧号），同步更新 spec/plan/task 文档。
 - [x] R2 实例 uid 绑定模式（D11 全 uid 提交、ids 清空）确认时同清 `engine_priorities`，
       避免后端 strict 校验 400；`applyDraftNodes` 逗号连接语句拆分为独立赋值。
 - [x] R3 `dbv-engprio-hint` 与优先级控件同 `v-if`（仅实例模式显示）。

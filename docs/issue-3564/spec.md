@@ -44,7 +44,7 @@
 - [x] 优先级解析只保留绑定引擎、非法值丢弃；未配置返回空。
 - [x] 前端引擎绑定弹窗仅勾选后出现优先级控件（高/中/低），zh/en 文案齐全。
 - [x] `claim guard [priority]` 决策日志可复现「为什么这台机器没接这个任务」。
-- [x] 加列走 `register_migration` + `_ensure_column`（`202611240016`），不改建表基线语义。
+- [x] 加列走 `register_migration` + `_ensure_column`（`202611240011`），不改建表基线语义。
 - [x] 不改动 legacy `pick_engine`。
 - [x] direct/failed 快照含 `engine_priorities` 占位（INSERT 契约静态守卫 + 落库回归）。
 
