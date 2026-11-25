@@ -91,6 +91,51 @@ def normalize_changes(raw_changes: dict) -> dict:
     return result
 
 
+_PR_CHANGE_OLD_KEYS = ("previous", "old", "from", "before")
+_PR_CHANGE_NEW_KEYS = ("current", "new", "to", "after")
+
+
+def _pr_change_pair(value):
+    """提取 changes 条目的 (旧值, 新值)，兼容 previous/current、old/new、from/to。"""
+    if not isinstance(value, dict):
+        return "", ""
+    old = ""
+    new = ""
+    for k in _PR_CHANGE_OLD_KEYS:
+        if k in value:
+            old = value.get(k)
+            break
+    for k in _PR_CHANGE_NEW_KEYS:
+        if k in value:
+            new = value.get(k)
+            break
+    return str(old or "").strip(), str(new or "").strip()
+
+
+def pr_target_branch_changed(payload: dict) -> bool:
+    """判断 PR 更新事件是否伴随目标分支变化（Issue #4185）。
+
+    仅当 changes 中确实出现 target_branch 变更条目时判定；兼容
+    previous/current、old/new、from/to 前后值形态。字段缺失或前后相等时
+    返回 False，保持旧行为（缺失/相等按未变化处理）；字段出现但取不到前后
+    值时视为已变更（宁可放行重新匹配，也不静默丢失订阅触发）。
+    """
+    if not isinstance(payload, dict):
+        return False
+    changes = payload.get("_changes")
+    if not isinstance(changes, dict) or "target_branch" not in changes:
+        changes = payload.get("changes")
+    if not isinstance(changes, dict) or "target_branch" not in changes:
+        return False
+    old, new = _pr_change_pair(changes.get("target_branch"))
+    if not new:
+        _obj = payload.get("object_attributes", {}) or {}
+        new = str(_obj.get("target_branch", "") or "").strip()
+    if old and new:
+        return old != new
+    return True
+
+
 SKILL_RESOLVE_FAILED = "skill_resolve_failed"
 
 

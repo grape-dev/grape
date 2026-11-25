@@ -79,6 +79,7 @@ class _DomainDbProxy:
 _rt_db = _DomainDbProxy()
 
 from src.domains.runtime.vcs.adapter import normalize_event, get_event_header
+from src.domains.runtime.vcs.event_types import pr_target_branch_changed as _pr_target_branch_changed
 from src.api.routing import NON_ISSUE_EVENT_ROUTE, PR_DEFAULT_AGENT, ISSUE_EVENT_TYPES, PR_EVENT_TYPES
 from src.api.event_store import get_issue_summary
 from src.kernel.session_manager import db, db_lock
@@ -2538,7 +2539,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     if event_type in PR_EVENT_TYPES:
         # PR 订阅触发条件：
         # - pull_request_opened：新建 PR，必定有首次 commit → 订阅
-        # - pull_request_updated：需有新 commit（oldrev 非空或有 commits 字段）→ 订阅，否则跳过
+        # - pull_request_updated：有新 commit（oldrev 非空或有 commits 字段）或目标分支变化
+        #   （Issue #4185：仅改目标分支也必须按新分支重新匹配）→ 订阅；两者皆无则跳过
         # - pull_request_merged：已合并，审查无意义 → 不订阅
         _pr_sub_payload = evt.get("payload", {}) or {}
         _pr_sub_action = str(_pr_sub_payload.get("_raw_action", "") or
@@ -2549,8 +2551,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         elif _pr_sub_action == "update" and event_type == "pull_request_updated":
             _pr_sub_oa = _pr_sub_payload.get("object_attributes", {}) or {}
             _pr_sub_has_commit = bool(_pr_sub_payload.get("commits")) or bool(_pr_sub_oa.get("oldrev"))
-            if not _pr_sub_has_commit:
-                log.info(f"Pipeline: PR subscription skip: no_commit_on_pr_update (action=update, no new commit)")
+            _pr_sub_branch_changed = _pr_target_branch_changed(_pr_sub_payload)
+            if not _pr_sub_has_commit and not _pr_sub_branch_changed:
+                log.info(f"Pipeline: PR subscription skip: no_commit_on_pr_update "
+                         f"(action=update, no new commit, target branch unchanged)")
                 _pr_sub_matches_early = []
             else:
                 _pr_sub_matches_early = _match_pr_subscription(repo_key, evt, event_type, _pr_branch_early)
@@ -2792,6 +2796,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 流水线必需环节（coding→qa），bot 动作回流默认拦唯独此通道保留（问题 3 原设计）。
     # S26/E2 精确语义：pull_request_updated 命中台账时若有新 commit（oldrev/commits）
     # 放行给 qa 复审（Issue #46 QA↔coding 回流闭环）——拦回声（纯文本编辑）不拦流转。
+    # Issue #4185：目标分支变化属人工动作（非系统回声），与「有新 commit」同等放行，
+    # 否则台账会在 PR 订阅匹配前拦下，目标分支订阅仍不触发。
     # 审查 D2 修正：事件名对齐 event_types.py 真实值（pull_request_opened/updated/merged，
     # 原 pr_opened/pr_updated/pr_merged 为不存在的假名——该段曾是死代码）。
     if event_type in ("issue_closed", "pull_request_opened", "pull_request_updated", "pull_request_merged",
@@ -2802,7 +2808,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             _pr_update_has_commit = False
             if event_type == "pull_request_updated":
                 _oa_pc = _payload.get("object_attributes", {}) or {}
-                _pr_update_has_commit = bool(_payload.get("commits")) or bool(_oa_pc.get("oldrev"))
+                _pr_update_has_commit = (bool(_payload.get("commits"))
+                                         or bool(_oa_pc.get("oldrev"))
+                                         or _pr_target_branch_changed(_payload))
             if not _pr_opened_exempt and not _pr_update_has_commit:
                 from src.kernel.repo_key import parse_repo_key
                 _provider_name = parse_repo_key(repo_key)[0] if repo_key else ""
@@ -2995,7 +3003,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     if event_type in PR_EVENT_TYPES:
         # PR 订阅触发条件（与 1.5 预匹配口径一致）：
         # - pull_request_merged：已合并，审查无意义 → 不订阅
-        # - pull_request_updated 无新 commit → 不订阅
+        # - pull_request_updated：无新 commit 且目标分支未变 → 不订阅
         _pr_sub_payload = evt.get("payload", {}) or {}
         _pr_sub_action = str(_pr_sub_payload.get("_raw_action", "") or
                              (_pr_sub_payload.get("object_attributes", {}) or {}).get("action", "")).lower()
@@ -3004,8 +3012,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         elif _pr_sub_action == "update" and event_type == "pull_request_updated":
             _pr_sub_oa = _pr_sub_payload.get("object_attributes", {}) or {}
             _pr_sub_has_commit = bool(_pr_sub_payload.get("commits")) or bool(_pr_sub_oa.get("oldrev"))
+            _pr_sub_branch_changed = _pr_target_branch_changed(_pr_sub_payload)
             _pr_sub_matches = (_match_pr_subscription(repo_key, evt, event_type, _pr_branch)
-                               if _pr_sub_has_commit else [])
+                               if (_pr_sub_has_commit or _pr_sub_branch_changed) else [])
         else:
             _pr_sub_matches = _match_pr_subscription(repo_key, evt, event_type, _pr_branch)
         if _pr_sub_matches:
