@@ -1,5 +1,4 @@
 """Webhook & A2A 端点 — 集成事件管道"""
-import hashlib
 import json, os, time
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -124,11 +123,34 @@ def _token_fingerprint(value: str) -> str:
     是「平台端 Secret 与 Grape 端配置不同」还是「请求根本没带 token」。两端各打指纹后，
     看一眼日志即可区分（相同 = 配置一致但比对失败的另一类问题；不同 = Secret 不一致；
     absent = 平台没带）。绝不打印明文（验收 C-3）。
+
+    Issue #3750：指纹实现收敛到 `insight.webhook_rejects.token_fingerprint`——日志与落库
+    （`obs_webhook_rejects.token_fp/expected_fp`）必须是**同一套**口径，否则按日志查表会错配。
+    本函数只保留薄包装（#3897 源级用例断言的是这个名字）。
     """
-    _v = str(value or "")
-    if not _v:
-        return "absent"
-    return "sha256:" + hashlib.sha256(_v.encode("utf-8")).hexdigest()[:12]
+    from src.domains.insight.public import token_fingerprint
+    return token_fingerprint(value)
+
+
+def _reject_reason(token: str) -> str:
+    """403 拒绝原因（`absent`/`mismatch`）：与落库口径共用 insight 侧唯一实现（Issue #3750）。"""
+    from src.domains.insight.public import reject_reason
+    return reject_reason(token)
+
+
+def _record_webhook_reject(repo: str, provider: str, event: str, ip: str,
+                           token: str, expected: str) -> None:
+    """落一条拒绝事实（Issue #3750）。诊断链路任何异常都不得影响 403 返回。
+
+    指纹/理由由 insight 侧统一计算（`record_webhook_reject`），本处只传原始值——
+    避免「日志里算一套、落库里算另一套」导致按日志查表错配。
+    """
+    try:
+        from src.domains.insight.public import record_webhook_reject
+        record_webhook_reject(repo_key=f"{provider}:{repo}", provider=provider,
+                              event=event, ip=ip, token=token, expected=expected)
+    except Exception as e:  # noqa: BLE001 - 拒绝事实是诊断数据，403 语义优先
+        log.debug(f"webhook reject ledger skipped repo={repo}: {e}")
 
 
 def _is_repo_delete_event(event_header: str, payload: dict) -> bool:
@@ -1100,17 +1122,25 @@ async def gitcode_webhook(request: Request):
 
     # 3. 未托管仓库拒绝：不在 managed_repos 的仓库不接收事件（防止幽灵 webhook / 无主事件 / 绕过校验）
     if not expected:
-        log.warning(f"Webhook rejected: unmanaged repo={repo}")
+        # Issue #3750：与 403 同口径带 event/ip——unmanaged 404 同样要能脱离 request_id 定位来源
+        log.warning(f"Webhook rejected: unmanaged repo={repo} event={event_header} "
+                    f"ip={client_host} xff={xff or 'none'}")
         return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
 
     # 4. token 对比验证（Issue #860：hmac.compare_digest 恒定时间比较，防时序侧信道）
     import hmac
     if not hmac.compare_digest(str(token), str(expected)):
         # Issue #3897：带两端指纹与来源 IP（不含明文），运维可直接定位 Secret 不一致。
+        # Issue #3750：再补 event/reason（absent=平台没带 token，mismatch=Secret 不一致），
+        # 并落一条拒绝事实（速率告警 + (ip, token_fp) 反查残留旧 secret）。
+        _reason = _reject_reason(token)
         log.warning(f"Webhook rejected: token mismatch for repo={repo} "
+                    f"event={event_header} "
                     f"expected={_token_fingerprint(expected)} "
                     f"actual={_token_fingerprint(token)} "
+                    f"reason={_reason} "
                     f"ip={client_host} xff={xff or 'none'}")
+        _record_webhook_reject(repo, "gitcode", event_header, client_host, token, expected)
         return JSONResponse(status_code=403, content={"code": 403, "message": "invalid webhook token"})
 
     log.info(f"Webhook: token OK, repo={repo}, event={event_header}")
@@ -1171,7 +1201,8 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
     expected = _expected_webhook_token(repo, "github")
 
     if not expected:
-        log.warning(f"GitHub Webhook rejected: unmanaged repo={repo}")
+        # Issue #3750：404 与 403 同口径带 event（本入口拿不到 client_host，见上方注释）
+        log.warning(f"GitHub Webhook rejected: unmanaged repo={repo} event={event_header}")
         return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
 
     # GitHub webhook 验证（安全加固）：至少提供一种凭据且校验通过才放行。
@@ -1187,13 +1218,21 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
     if signature:
         computed = hmac.new(expected.encode(), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(f"sha256={computed}", signature):
-            log.warning(f"GitHub Webhook rejected: signature mismatch for repo={repo}, body_size={len(body)}")
+            # Issue #3750：签名类拒绝不是 token 比对，不落 token 指纹行，但同样要能定位事件
+            log.warning(f"GitHub Webhook rejected: signature mismatch for repo={repo}, "
+                        f"event={event_header}, body_size={len(body)}")
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid signature"})
     else:
         if not hmac.compare_digest(str(token_header), str(expected)):
+            # Issue #3750：补 event/reason 并落拒绝事实（与 GitCode 同口径，ip 本入口不可得）
+            _reason = _reject_reason(token_header)
             log.warning(f"GitHub Webhook rejected: token mismatch for repo={repo} "
+                        f"event={event_header} "
                         f"expected={_token_fingerprint(expected)} "
-                        f"actual={_token_fingerprint(token_header)}")
+                        f"actual={_token_fingerprint(token_header)} "
+                        f"reason={_reason}")
+            _record_webhook_reject(repo, "github", event_header, client_host,
+                                   token_header, expected)
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid token"})
 
     log.info(f"GitHub Webhook: verified, repo={repo}, event={event_header}")
@@ -3414,7 +3453,10 @@ async def generic_vcs_webhook(provider: str, request: Request):
     # Issue #699 四进程：经 GSB 读 mgmt 域
     expected = _expected_webhook_token(repo, str(provider or "").lower())
     if not expected:
-        log.warning(f"generic webhook rejected: unmanaged repo={repo} provider={provider}")
+        # Issue #3750：unmanaged 拒绝补齐 event/来源 IP（与专用端点同口径）
+        _gip = request.client.host if request.client else "unknown"
+        log.warning(f"generic webhook rejected: unmanaged repo={repo} provider={provider} "
+                    f"event={event_header} ip={_gip}")
         return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
 
     # 验签策略分派（D12/S16）：hmac / token_compare
