@@ -88,7 +88,11 @@ from src.domains.runtime.engine import probe_dispatch as _probe_dispatch
 
 
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
-    """对本机引擎发起测试对话，返回探测结果（单点分派，无名字分支）。"""
+    """对本机引擎发起测试对话，返回探测结果（单点分派，无名字分支）。
+
+    [P0b B3] 探活分派知识单源=descriptor probe 域 + probe_dispatch；本函数仅转发。
+    opencode 模型预检（#3820）在 probe_dispatch 内做（F4 口径）。
+    """
     return _probe_dispatch.probe_deep(engine_name, cli_path)
 
 
@@ -1005,14 +1009,6 @@ def _attach_backend_capability(result: dict, engine_name: str) -> dict:
     return result
 
 
-
-def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
-    """对本机引擎发起测试对话，返回探测结果（单点分派，无名字分支）。
-
-    [P0b B3] 探活分派知识单源=descriptor probe 域 + probe_dispatch；本函数仅转发。
-    opencode 模型预检（#3820）在 probe_dispatch 内做（F4 口径）。
-    """
-    return _probe_dispatch.probe_deep(engine_name, cli_path)
 def _probe_backoff_seconds(fail_streak: int, base: float | None = None,
                            cap: float | None = None) -> float:
     """首探失败第 N 次重试前的等待秒数（指数退避 + 封顶，防止风暴式重试）。
