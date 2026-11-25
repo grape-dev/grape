@@ -219,6 +219,35 @@ def test_s9f_scene_uid_sentinel_zero(monkeypatch):
     assert session_store.get_issue_scene("gitcode:o/r", "#1") == ("s1", UID)
 
 
+def test_s9g_issue_owner_only_for_team_org(monkeypatch):
+    """组织需求才带创建人身份；个人空间必须保持原仓库身份。"""
+    import src.domains.runtime.public as rt_public
+
+    monkeypatch.setattr(rt_public, "read_one_any",
+                        lambda name, params: (UID, "team-org"))
+    monkeypatch.setattr(mgmt_public, "get_org_is_personal", lambda org_id: False)
+    assert event_pipeline._get_issue_owner_id("gitcode:o/r", "#7") == UID
+
+    monkeypatch.setattr(mgmt_public, "get_org_is_personal", lambda org_id: True)
+    assert event_pipeline._get_issue_owner_id("gitcode:o/r", "#7") == ""
+
+    monkeypatch.setattr(rt_public, "read_one_any", lambda name, params: None)
+    assert event_pipeline._get_issue_owner_id("gitcode:o/r", "#7") == ""
+
+
+def test_s9h_issue_owner_fails_closed(monkeypatch):
+    import src.domains.runtime.public as rt_public
+
+    monkeypatch.setattr(rt_public, "read_one_any",
+                        lambda name, params: (UID, "team-org"))
+
+    def _boom(org_id):
+        raise RuntimeError("mgmt contract down")
+
+    monkeypatch.setattr(mgmt_public, "get_org_is_personal", _boom)
+    assert event_pipeline._get_issue_owner_id("gitcode:o/r", "#7") == ""
+
+
 def test_s9b_adapter_never_raises(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("contract down")

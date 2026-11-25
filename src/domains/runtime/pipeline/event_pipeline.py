@@ -144,10 +144,11 @@ def _get_issue_creator(repo_key: str, issue_number: str) -> str:
 
 
 def _get_issue_owner_id(repo_key: str, issue_number: str) -> str:
-    """读取 Issue 创建人的 Grape 用户 id（组织成员身份随任务带入执行）。
+    """读取**团队组织**需求创建人的 Grape 用户 id。
 
-    外部/机器人建的 Issue 可能没有 Grape 账号（user_id=0），返回空串，由
-    ``_dispatch_ident`` 回退原有账号名解析链。只读 runtime 域自己的 issue 表。
+    仅组织需求携带创建人身份；个人空间/无组织/无法确认组织类型时返回空串，
+    保持个人仓库原来的“仓库身份（user_id=0）”行为不受影响。
+    外部/机器人建的 Issue 没有 Grape 账号时同样返回空串，由调用方回退。
     """
     num = str(issue_number or "").strip().lstrip("#")
     if not repo_key or not is_native_issue_ident(num):
@@ -157,9 +158,17 @@ def _get_issue_owner_id(repo_key: str, issue_number: str) -> str:
         # 直接 SELECT issue 读不到 owner 域权威行 → 身份恒 0）。
         from src.domains.runtime.public import read_one_any
 
-        row = read_one_any("issue_owner_id_row", (repo_key, num))
+        row = read_one_any("issue_owner_context_row", (repo_key, num))
         uid = str((row[0] if row else "") or "").strip()
-        return uid if uid and uid.lower() not in ("0", "none", "null") else ""
+        org_id = str((row[1] if row and len(row) > 1 else "") or "").strip()
+        if not uid or uid.lower() in ("0", "none", "null") or not org_id:
+            return ""
+        from src.domains.mgmt.public import get_org_is_personal
+
+        # 个人空间保持原行为；判定失败时 fail-closed，不把个人任务改写成用户身份。
+        if get_org_is_personal(org_id):
+            return ""
+        return uid
     except Exception as e:
         log.warning(f"resolve issue owner id failed repo={repo_key} issue=#{num}: {e}")
         return ""

@@ -2698,7 +2698,7 @@ _ANY_QUERIES: dict[str, str] = {
     'agent_runtime_name_by_id': 'SELECT name FROM agent_runtimes WHERE id=?',
     'issue_card_row': 'SELECT stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override, carried_context, status FROM issue WHERE repo_key=? AND issue_number=?',
     # 派发身份：Issue 创建人的 Grape user_id（跨域只读，四进程都读 owner 库权威行）
-    'issue_owner_id_row': 'SELECT user_id FROM issue WHERE repo_key=? AND issue_number=?',
+    'issue_owner_context_row': 'SELECT user_id, org_id FROM issue WHERE repo_key=? AND issue_number=?',
     'issue_card_exists': 'SELECT id FROM issue WHERE repo_key=? AND issue_number=?',
     'autopilot_execution_brief': 'SELECT id, task_id FROM autopilot_executions WHERE id=?',
     'autopilot_execution_findings': (
