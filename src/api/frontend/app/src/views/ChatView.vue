@@ -2080,8 +2080,8 @@ onMounted(function () {
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 10.5px;
-  color: var(--danger, #e5484d);
-  background: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent);
+  color: var(--c-danger);
+  background: var(--c-danger-soft);
 }
 .cv__scope-tabs {
   display: flex;
