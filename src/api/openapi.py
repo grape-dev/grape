@@ -7,11 +7,13 @@
 - 对外 operation 的 `operation_id` 由 routes 侧显式声明（契约友好，CLI 按 tag+动词命名）。
 - 版本号由 FastAPI `app.version` 承载（2.1.0），bump 触发 CLI 自动拉新。
 """
+import copy
 from datetime import datetime, timezone
 import json
 import logging
 import os
 import re
+import weakref
 
 from fastapi.openapi.utils import get_openapi
 
@@ -490,31 +492,54 @@ def operations_of(paths: dict) -> dict[str, tuple[str, str]]:
 PLUGIN_AGENT_OPERATIONS = ("plugins_agent_installed", "plugins_agent_report_missing")
 
 _CAPABILITY_CACHE_TTL = 30.0
+# id(app) -> (expires_at, weakref(app), payload)。带 weakref 是为了防 id() 复用：
+# 旧 app 被回收后 id 可能落到新 app 上，若不核对对象身份就会把旧能力位当成新 app 的。
 _capability_cache: dict = {}
 
+# 命名空间兜底路由（Issue #4081）的 endpoint 名与展开后路径，用于定位它在路由表中的
+# 位置；两者任一命中即视为兜底（改名/改前缀时守卫仍生效，不会静默退化为「只看存在性」）。
+_PLUGIN_AGENT_FALLBACK_ENDPOINT = "unimplemented_plugin_agent_operation"
+_PLUGIN_AGENT_FALLBACK_PATH = "/api/plugins/agent/{rest:path}"
 
-def _registered_pairs(app) -> set:
-    """app.routes → {(path, "METHOD")}：方法级注册面（含 include_in_schema=False 的路由）。
+
+def _route_index(app) -> tuple[dict, int | None]:
+    """app.routes → ({（path, METHOD）: 首个注册下标}, 兜底路由下标)。
 
     fastapi>=0.140 的 `include_router` 是惰性 `_IncludedRouter` 包装，必须经
     `_iter_routes` 展开才能看到 APIRoute（与契约渲染同一套取路由逻辑）。
     """
-    pairs = set()
+    index: dict = {}
+    fallback = None
+    i = 0
     for route in getattr(app, "routes", None) or []:
         for r in _iter_routes(route):
             path = getattr(r, "path", "") or ""
+            endpoint = getattr(r, "endpoint", None)
+            if fallback is None and (
+                    getattr(endpoint, "__name__", "") == _PLUGIN_AGENT_FALLBACK_ENDPOINT
+                    or path == _PLUGIN_AGENT_FALLBACK_PATH):
+                fallback = i
             for method in (getattr(r, "methods", None) or set()):
-                pairs.add((path, str(method).upper()))
-    return pairs
+                index.setdefault((path, str(method).upper()), i)
+            i += 1
+    return index, fallback
+
+
+def _registered_pairs(app) -> set:
+    """app.routes → {(path, "METHOD")}：方法级注册面（含 include_in_schema=False 的路由）。"""
+    return set(_route_index(app)[0])
 
 
 def plugin_agent_capabilities(app) -> dict:
-    """插件代理能力位：两端点在本实例是否已注册（operationId + method 匹配）。
+    """插件代理能力位：两端点在本实例是否可被真实命中（operationId + method 匹配）。
 
-    数据源 = `load_required_operations()`（#2081 单一事实源）+ app.routes 实际注册面，
-    与 `contract_integrity()` 的 missing_operations 判定同口径（`operationId` 存在且
-    method/path 未漂移）。供 `/api/ping`（全进程可达、免鉴权）对外announce：
-    调用侧先查后调，缺端点时确定性降级，而不是靠试错拿 404/405。
+    数据源 = `load_required_operations()`（#2081 单一事实源）+ app.routes 实际注册面。
+    与 `contract_integrity()` 的差异：后者用渲染后的 schema（`custom_openapi` 按
+    `_PUBLIC_AUTH_DEPS` 过滤），这里用全量路由表——探针不能依赖渲染（降级态会抛
+    `ContractDegradedError`）。两端点依赖都在白名单内，当前结论一致。对外经
+    `GET /api/plugins/agent/capabilities` 暴露（`/api/ping` 由 worker 进程承载、
+    没有本 router，见 deploy/nginx-grape-cluster.conf）：调用侧先查后调，缺端点时
+    确定性降级，而不是靠试错拿 404/405。
 
     30s TTL 缓存：路由表在进程生命周期内不变，避免每次探针都遍历 routes。
     """
@@ -523,10 +548,16 @@ def plugin_agent_capabilities(app) -> dict:
     now = _t.time()
     cached = _capability_cache.get(id(app))
     if cached and now < cached[0]:
-        return dict(cached[1])
+        ref = cached[1]
+        if ref is None or ref() is app:
+            return copy.deepcopy(cached[2])
     result = _build_plugin_agent_capabilities(app)
-    _capability_cache[id(app)] = (now + _CAPABILITY_CACHE_TTL, result)
-    return dict(result)
+    try:
+        ref = weakref.ref(app)
+    except TypeError:  # 不支持弱引用的对象（测试替身）：退化为不做身份核对
+        ref = None
+    _capability_cache[id(app)] = (now + _CAPABILITY_CACHE_TTL, ref, result)
+    return copy.deepcopy(result)
 
 
 def _build_plugin_agent_capabilities(app) -> dict:
@@ -536,7 +567,7 @@ def _build_plugin_agent_capabilities(app) -> dict:
         return {"available": False, "installed": False, "report_missing": False,
                 "missing_operations": [],
                 "error": f"required_operations_unavailable: {exc}"}
-    registered = _registered_pairs(app)
+    index, fallback = _route_index(app)
     missing, flags = [], {}
     for oid in PLUGIN_AGENT_OPERATIONS:
         pair = required.get(oid)
@@ -545,7 +576,10 @@ def _build_plugin_agent_capabilities(app) -> dict:
             flags[oid] = False
             continue
         path, method = pair
-        ok = (path, str(method).upper()) in registered
+        idx = index.get((path, str(method).upper()))
+        # 首个命中必须早于命名空间兜底：兜底若排在前面会先匹配并返 501，此时报
+        # available=true 就是「能力位说谎 + 端点被吞」（跨文件 include 顺序漂移）。
+        ok = idx is not None and (fallback is None or idx < fallback)
         if not ok:
             missing.append({"operationId": oid, "method": method, "path": path})
         flags[oid] = ok

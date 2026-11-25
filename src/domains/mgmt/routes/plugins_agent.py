@@ -32,6 +32,11 @@ from src.api.errors import (ERROR_NOT_IMPLEMENTED, NOT_IMPLEMENTED, api_error)
 
 logger = logging.getLogger(__name__)
 
+# 兜底路由的 WARNING 去重（Issue #4081 复审 Optional）：外部匿名扫描同一未登记路径
+# 反复命中时只留一条 WARNING，后续降为 debug；计数照旧全量进指标，不丢可观测性。
+_UNIMPLEMENTED_WARNED: set = set()
+_UNIMPLEMENTED_WARN_CAP = 256
+
 router = APIRouter(prefix="/api/plugins/agent", tags=["plugins"])
 
 # 上报结果标签（与 deploy/alerts.yml 的 GrapePluginMissingReportDegraded 口径一致）
@@ -140,6 +145,11 @@ def plugin_agent_capability(request: Request):
     `contracts/required_operations.json` × `app.routes`（见
     `src/api/openapi.py: plugin_agent_capabilities`），30s 缓存。
     旧构建没有本路由 → 调用侧拿 404，按「平台不支持插件代理」降级（不重试）。
+
+    鉴权：本探针**有意不加认证依赖**（#4081 复审已确认口径）——只暴露「本构建是否
+    实现这两个操作」的布尔位与 operationId/method/path 三元组，不含任何仓库、凭据或
+    业务数据；调用侧常在缺凭据的早期阶段就要先判断支持面。若后续要暴露更多信息，
+    必须重新评估鉴权。
     """
     from src.api.openapi import plugin_agent_capabilities
     return plugin_agent_capabilities(request.app)
@@ -149,7 +159,10 @@ def plugin_agent_capability(request: Request):
 # 必须是本文件的最后一条路由：已登记端点先匹配，兜底只接住「路径/方法未登记」的请求。
 # 只覆盖 /api/plugins/agent/* 命名空间，不改全局 404（SPA catch-all）语义。
 
-_UNIMPLEMENTED_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+# 方法集合必须覆盖客户端可能用来「探测端点是否存在」的全部动词（含 HEAD/OPTIONS）：
+# 漏掉的动词仍会拿裸 405，与「调用侧按 404/405/501 单一判定」的承诺留缝（复审 Optional）。
+# CORS 预检由 CORSMiddleware 在路由前拦截，不会落到这里。
+_UNIMPLEMENTED_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
 
 @router.api_route("/{rest:path}", methods=_UNIMPLEMENTED_METHODS,
@@ -166,9 +179,16 @@ def unimplemented_plugin_agent_operation(rest: str, request: Request):
     method = (request.method or "").upper()
     path = request.url.path
     PLUGIN_AGENT_UNIMPLEMENTED.labels(method=method).inc()
-    logger.warning(
-        "plugin agent endpoint not implemented (method=%s path=%s) -> 501 NOT_IMPLEMENTED",
-        method, path)
+    key = (method, path)
+    if key not in _UNIMPLEMENTED_WARNED and len(_UNIMPLEMENTED_WARNED) < _UNIMPLEMENTED_WARN_CAP:
+        _UNIMPLEMENTED_WARNED.add(key)
+        logger.warning(
+            "plugin agent endpoint not implemented (method=%s path=%s) -> 501 NOT_IMPLEMENTED",
+            method, path)
+    else:
+        logger.debug(
+            "plugin agent endpoint not implemented (method=%s path=%s) -> 501 NOT_IMPLEMENTED",
+            method, path)
     raise api_error(
         NOT_IMPLEMENTED,
         (f"Plugin agent endpoint {method} {path} is not implemented by this server build. "
