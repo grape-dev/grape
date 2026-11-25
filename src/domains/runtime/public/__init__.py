@@ -5478,10 +5478,18 @@ def dashboard_worker_rows(stale_cutoff: str, org_id=None, uname: str = "",
         if org_id:
             c.execute(_DASH_WORKER_COLS + " AND org_id=? ORDER BY id", (stale_cutoff, org_id))
         elif repo:
+            # 仓库级看板：global + 自己的 user + 该 repo 的 worker。
+            # repo_key 在库里存的是带平台前缀的键（gitcode:owner/repo），
+            # 而 UI/URL 传的是裸 owner/repo；必须按候选集比对，否则仓库级
+            # worker 永远不可见（Worker 卡片缺设备 / 设备管理页却能看到的根因）。
+            from src.kernel.repo_key import repo_key_candidates
+            _base = repo.split(":", 1)[1] if ":" in repo else repo
+            _cands = repo_key_candidates(_base)
+            _ph = ",".join("?" * len(_cands))
             c.execute(_DASH_WORKER_COLS +
-                      " AND (scope='global' OR (scope='user' AND owner_name=?) "
-                      "OR repo_key=? OR repo_key=?) ORDER BY id",
-                      (stale_cutoff, uname, repo_key, repo))
+                      f" AND (scope='global' OR (scope='user' AND owner_name=?) "
+                      f"OR repo_key IN ({_ph})) ORDER BY id",
+                      [stale_cutoff, uname] + list(_cands))
         else:
             c.execute(_DASH_WORKER_COLS +
                       " AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id",
