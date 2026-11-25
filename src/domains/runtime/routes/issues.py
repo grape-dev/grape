@@ -2809,6 +2809,11 @@ def _filter_pr_items(pr_items: list[dict], q: str, statuses_set: set) -> list[di
                or _needle in str(it.get("issue_number") or "")]
     return out
 
+# 分块上限 500：主键 IN 回读的批大小（来源 docs/issue-4022/plan.md:34「主键 IN、2 列、
+# 分批…分块上限 500」）。与既有分页常量并列登记、口径同一处裁决：
+#   _PR_SCAN_PAGE_SIZE = 50（src/domains/runtime/issues_center.py:2289，VCS 侧每页扫描）
+#   ISSUES_PER_PAGE_MAX = 100（src/domains/runtime/issues_center.py:4837，对外分页上限）
+# 本常量只约束内部状态快照的 IN 批大小，不参与对外分页，故可大于对外上限。
 _ISSUE_STATUS_REFRESH_CHUNK = 500
 
 # Issue #4022 QA Standards-1：缓存命中的核对走「短 TTL 状态快照 + 连接写代校验」——
