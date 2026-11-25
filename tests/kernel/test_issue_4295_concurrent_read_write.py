@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 
-import contextvars
 import threading
 import time
 
@@ -117,12 +116,17 @@ def test_reader_gets_503_semantics_instead_of_unbounded_queue(monkeypatch):
     assert 0.1 <= waited < 1.0, f"应在预算附近失败，实际 {waited:.3f}s"
 
 
+def _reader_entries(snap: list[dict], reader_tid: int) -> list[dict]:
+    """快照里归因到读方线程的条目；非空即说明读方线程被串扰（护栏判据）。"""
+    return [st for st in snap if st.get("tid") == reader_tid]
+
+
 def test_reader_context_isolated_from_writer_thread_state():
-    """写者线程的持锁状态不会污染读方快照（owner 归因按线程隔离）。"""
+    """写者的持锁状态按线程归因：读方线程在快照里没有自己的条目。"""
     lock = dlm.TrackedRLock(bound_in_request=True)
     ready = threading.Event()
     release = threading.Event()
-    reader_ctx = contextvars.copy_context()
+    reader_tid = threading.get_ident()
 
     def _writer():
         with lock:
@@ -134,10 +138,29 @@ def test_reader_context_isolated_from_writer_thread_state():
     assert ready.wait(5)
     try:
         snap = dlm.snapshot()
+        # snapshot() 是进程级全局快照：写者持锁期间必须恰好一条，且归因到写者线程
+        assert len(snap) == 1, f"写者持锁期间快照应恰好一条，实际 {snap}"
+        assert snap[0]["tid"] == w.ident, f"条目应归因到写者线程，实际 {snap[0]}"
+        assert snap[0]["owner"].startswith("bg:"), f"后台写者 owner 应以 bg: 开头：{snap[0]}"
+        assert not _reader_entries(snap, reader_tid), (
+            f"读方未持锁却出现了自身条目（线程归因串扰）：{_reader_entries(snap, reader_tid)}")
     finally:
         release.set()
         w.join(5)
 
-    assert len(snap) == 1
-    assert snap[0]["owner"].startswith("bg:")
-    assert reader_ctx.run(dlm.snapshot) == [] or True  # 读方自己没持锁 → 无自身条目
+    assert dlm.snapshot() == [], "写者释放后快照应清空"
+    # 读方自取自还：能看到自己的一条 depth=1，释放后不留残留
+    with lock:
+        mine = _reader_entries(dlm.snapshot(), reader_tid)
+        assert len(mine) == 1 and mine[0]["depth"] == 1, f"读方持锁时应恰好一条自身条目：{mine}"
+    assert dlm.snapshot() == [], "读方释放后不得残留自身条目"
+
+
+def test_reader_isolation_assertion_can_fail():
+    """反证：人为注入读方线程的残留条目时，隔离判据必须失败（护栏非恒真）。"""
+    reader_tid = threading.get_ident()
+    polluted = [{"owner": "bg:MainThread", "rid": "-", "tid": reader_tid,
+                 "since": time.perf_counter(), "depth": 1}]
+    assert _reader_entries(polluted, reader_tid), "注入的读方条目必须被识别为串扰"
+    with pytest.raises(AssertionError):
+        assert not _reader_entries(polluted, reader_tid), "读方不应有自身条目"
