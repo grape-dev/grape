@@ -5388,7 +5388,11 @@ def _mig_issue3349_issue_repo_title_index() -> None:
 
 register_migration(
     "202611240003", "issue3349_issue_repo_title_index", "safe",  # Issue #3349: renumbered from 202611190001 (below baseline max 202611240002)
-    _mig_issue3349_issue_repo_title_index)
+    _mig_issue3349_issue_repo_title_index,
+    # `issue` 台账归 runtime 域（configs/table_ownership.json），必须登记到 owner 域执行：
+    # 按默认 mgmt 域跑时连接里没有 issue 表，CREATE INDEX 抛错被兜底吞掉，迁移照样盖章，
+    # 结果「已执行」但索引不存在（建单查重继续退化成整仓扫描）。
+    domains=("runtime",))
 
 
 def _ensure_case_insensitive_indexes():
