@@ -62,6 +62,7 @@
     "repair_host_ok": "Hosting repaired",
     "repair_host_failed": "Repair failed, please retry later",
     "no_permission_host": "No permission to host. Please contact the administrator.",
+    "no_permission_host_title": "No hosting permission: requires the Maintainer role or higher on the repository, or the repository owner's credentials",
     "no_description": "No description"
   },
   "managed": {

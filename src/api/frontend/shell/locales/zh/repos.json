@@ -62,6 +62,7 @@
     "repair_host_ok": "托管已修复",
     "repair_host_failed": "修复失败，请稍后重试",
     "no_permission_host": "无权限托管，请联系管理员",
+    "no_permission_host_title": "无托管权限：需为仓库 Maintainer 及以上角色，或使用仓库所有者凭据",
     "no_description": "暂无描述"
   },
   "managed": {
