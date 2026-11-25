@@ -49,11 +49,14 @@ class CreateOrgBody(BaseModel):
 
 class UpdateOrgBody(BaseModel):
     name: str = ""
-    description: str = ""
+    # None/空串 = 不修改（兼容旧客户端）；显式清空走 clear_description。
+    description: str | None = None
+    clear_description: bool = False
     avatar_url: str = ""
-    max_members: int = 0
-    max_workers: int = 0
-    max_repos: int = 0
+    # None = 不修改；0 保留历史语义（不修改），避免旧客户端误把额度改成 0。
+    max_members: int | None = None
+    max_workers: int | None = None
+    max_repos: int | None = None
 
 
 class AddMemberBody(BaseModel):
@@ -474,15 +477,17 @@ def update_organization(org_id: str, body: UpdateOrgBody,
     # 不再用 require_org_admin（resolve_org_context 回退个人组织的上下文型鉴权，与路径脱钩可越权）
     from src.api.deps import require_path_org_admin
     require_path_org_admin(user["id"], org_id)
-    # 个人组织（默认工作空间）不支持编辑成员上限/Worker 上限，忽略这两个字段
+    # 个人组织（默认工作空间）不支持编辑成员上限/Worker 上限，忽略这几个字段
     from src.domains.mgmt.user.org_db import is_org_personal as _is_p
     if _is_p(org_id):
-        body.max_members = 0
-        body.max_workers = 0
-        body.max_repos = 0
-    ok = update_org(org_id, name=body.name, description=body.description, avatar_url=body.avatar_url,
+        body.max_members = None
+        body.max_workers = None
+        body.max_repos = None
+    ok = update_org(org_id, name=body.name, description=body.description,
+                    avatar_url=body.avatar_url,
                     max_members=body.max_members, max_workers=body.max_workers,
-                    max_repos=body.max_repos)
+                    max_repos=body.max_repos,
+                    clear_description=body.clear_description)
     if not ok:
         # update_org 影响行数为 0（Organization not found）→ 不得报成功
         raise HTTPException(status_code=404, detail={"code": 404, "message": "Organization not found"})

@@ -324,7 +324,7 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
             c = _rt_db.cursor()
             c.execute(
                 f"SELECT id, issue_number, stage, owner_agent, assignee, a2a_seq, scene_id, "
-                f"parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
+                f"parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override, org_id "
                 f"FROM issue WHERE repo_key IN ({placeholders}){_num_clause}",
                 repo_keys + _num_params)
             for r in c.fetchall():
@@ -337,6 +337,7 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
                     "scene_id": r[6] or "", "parent_issue_id": r[7] or "",
                     "is_subtask_mode": r[8] or 0, "scene_user_id": r[9] or 0,
                     "allow_scene_override": r[10] or 0,
+                    "org_id": str(r[11] or ""),
                 }
     except Exception as e:
         log.warning(f"issues: load issue table failed: {e}")
@@ -508,6 +509,9 @@ def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dic
     _native_num = native_issue_number(number)
     return {
         "number": _native_num,
+        # 组织下派详情需要 repo_key/org_id；深链直达详情不再依赖列表上下文。
+        "repo_key": str(repo_key or ""),
+        "org_id": str(stage.get("org_id") or ""),
         # Issue #569：内部需求卡片 id（issue 表主键）——awaiting-input/pending-review/review-pass
         # 的 --issue_id 用此值；与 GitCode 侧 issue number 语义不同，与 git-repo issues get 的
         # id（GitCode 侧 id）不可混用。无 issue 卡片行（过渡期兜底）时为 null。

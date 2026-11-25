@@ -35138,9 +35138,20 @@
             "default": ""
           },
           "description": {
-            "type": "string",
-            "title": "Description",
-            "default": ""
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "clear_description": {
+            "type": "boolean",
+            "title": "Clear Description",
+            "default": false
           },
           "avatar_url": {
             "type": "string",
@@ -35148,19 +35159,37 @@
             "default": ""
           },
           "max_members": {
-            "type": "integer",
-            "title": "Max Members",
-            "default": 0
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Members"
           },
           "max_workers": {
-            "type": "integer",
-            "title": "Max Workers",
-            "default": 0
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Workers"
           },
           "max_repos": {
-            "type": "integer",
-            "title": "Max Repos",
-            "default": 0
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Repos"
           }
         },
         "type": "object",
@@ -36297,7 +36326,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "d0839cec8e",
-  "x-generated-at": "2026-11-25T05:56:58.190658+00:00",
-  "tags": []
+  "x-source-commit": "4d348e8e1",
+  "x-generated-at": "2026-11-25T06:50:06.981770+00:00"
 }

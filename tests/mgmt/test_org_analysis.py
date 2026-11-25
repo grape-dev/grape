@@ -109,6 +109,9 @@ def test_save_ai_result_overwrites_and_records_status():
     rows = org_repo_map.list_repo_map(org["id"])["repos"]
     assert rows[0]["ai_status"] == "succeeded"
     assert rows[0]["ai_analyzed_at"]
+    docs = org_analysis.analysis_docs(org["id"])
+    assert docs["repos"][0]["core_functions"][0]["name"] == "下单"
+    assert docs["repos"][0]["core_responsibilities"]["not_owns"] == ["支付清结算"]
 
 
 def test_ensure_daily_task_is_idempotent():

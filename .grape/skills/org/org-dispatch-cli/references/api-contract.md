@@ -38,8 +38,13 @@ Endpoint: `GET /api/orgs/{id}/repo-analysis/docs`
 grape org repo analysis docs --org_id "$ORG_ID" --json-out
 ```
 
-返回 `repos[]`：`repo_key / full_name / purpose / domains / keywords / interfaces /
-depends_on / confidence / summary_md`（文档分支 `grape-org`）。
+返回 `repos[]`：`repo_key / full_name / purpose / core_functions /
+core_responsibilities / other_capabilities / routing / domains / keywords /
+interfaces / depends_on / confidence / summary_md`（文档分支 `grape-org`）。
+选仓时优先看 `purpose`、`core_functions[].task_examples / not_for /
+owned_entities` 与 `core_responsibilities`；`routing` 是仓库级判别器，
+`interfaces` / `keywords` 只作为命中和解释依据。选中的目标必须能指出
+「命中了哪个核心能力，以及为什么不是其他仓」。
 用于 AI 选仓与 `context.decisions` 理由；命令不可用时降级为仓库地图召回并标注。
 
 ## Scene Catalog

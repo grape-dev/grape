@@ -153,6 +153,56 @@ def _get_issue_creator(repo_key: str, issue_number: str) -> str:
         return ""
 
 
+def _get_issue_owner_id(repo_key: str, issue_number: str) -> str:
+    """读取**团队组织**需求的归属用户 id（``issue.user_id``）。
+
+    注意：该列是需求归属人口径（随 assignee/换手更新），并非不可变的 created_by；
+    组织下派需要的是“当前承接人”身份，故沿用该列。
+    仅团队组织需求携带用户身份；个人空间/无组织/无法确认组织类型时返回空串，
+    保持个人仓库原来的“仓库身份（user_id=0）”行为不受影响。
+    外部/机器人建的 Issue 没有 Grape 账号时同样返回空串，由调用方回退。
+    """
+    num = str(issue_number or "").strip().lstrip("#")
+    if not repo_key or not is_native_issue_ident(num):
+        return ""
+    try:
+        # 跨域/四进程：必须走 runtime public 具名查询（mgmt 进程的 _rt_db 是 mgmt 库，
+        # 直接 SELECT issue 读不到 owner 域权威行 → 身份恒 0）。
+        from src.domains.runtime.public import read_one_any
+
+        row = read_one_any("issue_owner_context_row", (repo_key, num))
+        uid = str((row[0] if row else "") or "").strip()
+        org_id = str((row[1] if row and len(row) > 1 else "") or "").strip()
+        if not uid or uid.lower() in ("0", "none", "null") or not org_id:
+            return ""
+        from src.domains.mgmt.public import get_org_is_personal
+
+        # 个人空间保持原行为；判定失败时 fail-closed，不把个人任务改写成用户身份。
+        if get_org_is_personal(org_id):
+            return ""
+        return uid
+    except Exception as e:
+        log.warning(f"resolve issue owner id failed repo={repo_key} issue=#{num}: {e}")
+        return ""
+
+
+def _scene_user_id(repo_key: str, issue_id: str, actor: str = ""):
+    """Issue 场景归属用户：优先 Issue 归属人的 Grape user_id（UUID）。
+
+    没有 Grape 归属（外部/机器人建单）时回退原有 VCS 登录名反查，保持兼容。
+    返回值可能是 UUID 字符串（D105 起 user_id 全局字符串化），调用方按原样透传。
+    """
+    _owner_uid = _get_issue_owner_id(repo_key, issue_id)
+    if _owner_uid:
+        return _owner_uid
+    try:
+        from src.domains.runtime.engine.engine_select import _repo_user_id
+
+        return _repo_user_id(repo_key, issue_creator=actor) or 0
+    except Exception:
+        return 0
+
+
 def _resolve_account_chain(candidates: list, repo_key: str, issue_number: str,
                            event_type: str = "", repository: str = "",
                            fallback: str = "", extra: dict = None,
@@ -668,8 +718,16 @@ def _dispatch_ident(evt, repo_key: str) -> "tuple[str, str, str]":
     try:
         from src.domains.runtime.pipeline.dispatch_identity import identity_for_actor
 
+        _payload = evt.get("payload") if isinstance(evt.get("payload"), dict) else {}
+        _issue_number = str(
+            evt.get("issue_id") or _payload.get("issue_number")
+            or evt.get("issue_number") or "").strip()
+        # 组织成员身份优先：Issue 创建人的 Grape user_id 随任务带入执行，
+        # 否则组织流水线 Agent 的 session token 会退化成 user_id=0（非组织成员）。
+        _owner_uid = _get_issue_owner_id(repo_key, _issue_number)
         account = resolve_actor_account(evt, repo_key) or ""
-        uid, source = identity_for_actor(account, str(evt.get("actor") or ""))
+        uid, source = identity_for_actor(
+            account, str(evt.get("actor") or ""), task_user_id=_owner_uid)
         return uid, source, account
     except Exception as e:  # noqa: BLE001 - 认人失败不得阻断派发
         log.debug(f"dispatch identity skipped: {e}")
@@ -3215,13 +3273,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         except Exception:
             pass
     # scene_user_id=0 时兜底反查（旧数据 is_join=0 导致 scene_user_id 未写入）
-    # 优先用 issue 创建者（actor）查 unified_user_mapping，避免多人仓库取错用户
+    # 优先 Issue 创建人的 Grape user_id；没有再按创建者登录名反查（兼容老数据）。
     if not _issue_scene_uid:
-        try:
-            from src.domains.runtime.engine.engine_select import _repo_user_id
-            _issue_scene_uid = _repo_user_id(repo_key, issue_creator=actor)
-        except Exception:
-            pass
+        _issue_scene_uid = _scene_user_id(repo_key, _early_issue_id, actor)
     log.info(f"Pipeline: scene resolved -> scene_id={_issue_scene} uid={_issue_scene_uid} issue={_early_issue_id or '(none)'}")
     # PR 订阅场景：直接从场景 nodes 取 skill，不走 agent_session / issue_scene
     _is_pr_sub = bool(evt.get("_pr_sub_scene_id"))
