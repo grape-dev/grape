@@ -8,7 +8,6 @@
  *   2. DashboardView 接线：详情页已有分支与新建分支入口都使用过滤结果，空态词条存在，新建/刷新清空搜索。
  *   3. 中英文 i18n 词条齐备。
  */
-const assert = require('assert')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
@@ -66,9 +65,16 @@ function ok(cond, name) {
 
   ok(empty !== list, '空关键字返回副本而非原数组引用')
 
+  // ---- 1b. 选中值对账（过滤后不得提交隐藏旧值）----
+  ok(mod.reconcileBranchSelection('main', hit) === 'feature/login', '选中值被过滤后回退首个可见项')
+  ok(mod.reconcileBranchSelection('Feature/PAY', hit) === 'Feature/PAY', '选中值仍在结果内则保持')
+  ok(mod.reconcileBranchSelection('main', []) === '', '可见列表为空时清空选中值')
+  ok(mod.reconcileBranchSelection(null, hit) === 'feature/login', '无选中值回退首个可见项')
+  ok(mod.reconcileBranchSelection('main', null) === '', '非数组容错为空选中值')
+
   // ---- 2. Vue 视图接线 ----
   const vue = fs.readFileSync(VIEW, 'utf8')
-  ok(/import \{ filterBranchesByPrefix \} from '\.\.\/lib\/branchFilter\.js'/.test(vue), '引入过滤纯函数')
+  ok(/import \{ filterBranchesByPrefix[^}]*\} from '\.\.\/lib\/branchFilter\.js'/.test(vue), '引入过滤纯函数')
   ok(/const existingBranchSearch = ref\(''\)/.test(vue), '已有分支搜索状态存在')
   ok(/const newBranchRefSearch = ref\(''\)/.test(vue), '新建分支参考搜索状态存在')
   ok(
@@ -95,6 +101,20 @@ function ok(cond, name) {
     '新建成功后清空搜索词保证列表回显'
   )
 
+  ok(
+    /import \{ filterBranchesByPrefix, reconcileBranchSelection \} from '\.\.\/lib\/branchFilter\.js'/.test(vue),
+    '引入选中值对账纯函数'
+  )
+  ok(/watch\(\s*\[filteredBranches, advWorkBranch\]/.test(vue), '已有分支选项变化时对账选中值')
+  ok(/watch\(\s*\[filteredNewBranchRefs, newBranchRef\]/.test(vue), '新建分支选项变化时对账选中值')
+  ok(/if \(next !== selected\) advWorkBranch\.value = next/.test(vue), '已有分支选中值对账接线')
+  ok(/if \(next !== selected\) newBranchRef\.value = next/.test(vue), '新建分支基准对账接线')
+  ok(/if \(!newBranchRef\.value\)/.test(vue), '无可选基准时阻止创建并提示')
+  ok(/refs: newBranchRef\.value,/.test(vue), '创建分支提交当前可见基准值')
+  ok(/type="search"/.test(vue), '搜索框使用 type=search')
+  ok(/clearBranchSearch\('existing'\)/.test(vue), '已有分支搜索有清除入口')
+  ok(/clearBranchSearch\('new'\)/.test(vue), '新建分支参考搜索有清除入口')
+
   // ---- 3. i18n 词条 ----
   for (const lang of ['zh', 'en']) {
     const dict = JSON.parse(
@@ -102,6 +122,7 @@ function ok(cond, name) {
     )
     ok(!!dict.branch_search_placeholder, `${lang} 有 branch_search_placeholder`)
     ok(!!dict.branch_no_match, `${lang} 有 branch_no_match`)
+    ok(!!dict.branch_ref_required, `${lang} 有 branch_ref_required`)
   }
 
   console.log(`\n${pass} passed, ${fail} failed`)

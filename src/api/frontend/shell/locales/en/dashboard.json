@@ -134,6 +134,7 @@
   "branch_name_empty": "Branch name cannot be empty",
   "branch_created": "Branch created",
   "branch_required": "Work branch is required",
+  "branch_ref_required": "Select a base branch first",
   "branch_search_placeholder": "Search branches (prefix match, case-insensitive)",
   "branch_no_match": "No matching branches",
   "adv_options_saved": "Advanced options saved",

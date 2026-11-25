@@ -23,3 +23,17 @@ export function filterBranchesByPrefix(list, keyword) {
     return normalize(name).startsWith(prefix)
   })
 }
+
+/**
+ * 对账选中值：选中项不在当前可见列表中时回退首个可见项，列表为空则清空。
+ * - 仅用于「所见即所提交」：过滤/加载导致选项集变化后，避免提交被隐藏的旧值。
+ */
+export function reconcileBranchSelection(selected, list) {
+  const items = Array.isArray(list) ? list : []
+  const names = items
+    .map((br) => (br && br.name !== undefined && br.name !== null ? String(br.name) : ''))
+    .filter((name) => name !== '')
+  const current = selected === null || selected === undefined ? '' : String(selected)
+  if (current && names.indexOf(current) !== -1) return current
+  return names.length ? names[0] : ''
+}

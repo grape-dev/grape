@@ -124,9 +124,29 @@
         </div>
         <div class="adv-row">
           <span class="adv-label">{{ t('work_branch') }}</span>
+          <div class="dbv-branch-searchwrap">
+            <input
+              v-model="existingBranchSearch"
+              type="search"
+              :aria-label="t('branch_search_placeholder')"
+              :placeholder="t('branch_search_placeholder')"
+              class="dbv-branch-search"
+            />
+            <button
+              v-if="existingBranchSearch"
+              class="dbv-branch-search-clear"
+              :aria-label="t('scene_search_clear')"
+              @click="clearBranchSearch('existing')"
+            >
+              ✕
+            </button>
+          </div>
           <select v-model="advWorkBranch" class="adv-select">
             <option v-if="!branches.length" value="main">main</option>
-            <option v-for="br in branches" :key="br.name" :value="br.name">
+            <option v-else-if="!filteredBranches.length" disabled value="">
+              {{ t('branch_no_match') }}
+            </option>
+            <option v-for="br in filteredBranches" :key="br.name" :value="br.name">
               {{ br.name }}{{ br.protected ? ' 🔒' : '' }}
             </option>
           </select>
@@ -136,9 +156,31 @@
         </div>
         <div v-if="newBranchOpen" class="dbv-newbranch">
           <input v-model="newBranchName" :placeholder="t('branch_name')" class="dbv-nb-input" />
+          <div class="dbv-nb-searchwrap">
+            <input
+              v-model="newBranchRefSearch"
+              type="search"
+              :aria-label="t('branch_search_placeholder')"
+              :placeholder="t('branch_search_placeholder')"
+              class="dbv-nb-search"
+            />
+            <button
+              v-if="newBranchRefSearch"
+              class="dbv-nb-search-clear"
+              :aria-label="t('scene_search_clear')"
+              @click="clearBranchSearch('new')"
+            >
+              ✕
+            </button>
+          </div>
           <select v-model="newBranchRef" class="dbv-nb-sel">
             <option v-if="!branches.length" value="main">main</option>
-            <option v-for="br in branches" :key="br.name" :value="br.name">{{ br.name }}</option>
+            <option v-else-if="!filteredNewBranchRefs.length" disabled value="">
+              {{ t('branch_no_match') }}
+            </option>
+            <option v-for="br in filteredNewBranchRefs" :key="br.name" :value="br.name">
+              {{ br.name }}
+            </option>
           </select>
           <button class="ap-btn" @click="createNewBranch()">{{ t('create') }}</button>
           <button class="ap-btn" @click="newBranchOpen = false">{{ t('cancel') }}</button>
@@ -446,11 +488,23 @@
           </div>
           <div class="adv-row">
             <span class="adv-label">{{ t('work_branch') }}</span>
-            <input
-              v-model="existingBranchSearch"
-              :placeholder="t('branch_search_placeholder')"
-              class="dbv-branch-search"
-            />
+            <div class="dbv-branch-searchwrap">
+              <input
+                v-model="existingBranchSearch"
+                type="search"
+                :aria-label="t('branch_search_placeholder')"
+                :placeholder="t('branch_search_placeholder')"
+                class="dbv-branch-search"
+              />
+              <button
+                v-if="existingBranchSearch"
+                class="dbv-branch-search-clear"
+                :aria-label="t('scene_search_clear')"
+                @click="clearBranchSearch('existing')"
+              >
+                ✕
+              </button>
+            </div>
             <select v-model="advWorkBranch" class="adv-select">
               <option v-if="!branches.length" :value="detailWorkBranch || 'main'">
                 {{ detailWorkBranch || 'main' }}
@@ -458,12 +512,7 @@
               <option v-else-if="!filteredBranches.length" disabled value="">
                 {{ t('branch_no_match') }}
               </option>
-              <option
-                v-for="br in filteredBranches"
-                :key="br.name"
-                :value="br.name"
-                :selected="br.name === detailWorkBranch"
-              >
+              <option v-for="br in filteredBranches" :key="br.name" :value="br.name">
                 {{ br.name }}{{ br.protected ? ' 🔒' : '' }}
               </option>
             </select>
@@ -473,11 +522,23 @@
           </div>
           <div v-if="newBranchOpen" class="dbv-newbranch">
             <input v-model="newBranchName" :placeholder="t('branch_name')" class="dbv-nb-input" />
-            <input
-              v-model="newBranchRefSearch"
-              :placeholder="t('branch_search_placeholder')"
-              class="dbv-nb-search"
-            />
+            <div class="dbv-nb-searchwrap">
+              <input
+                v-model="newBranchRefSearch"
+                type="search"
+                :aria-label="t('branch_search_placeholder')"
+                :placeholder="t('branch_search_placeholder')"
+                class="dbv-nb-search"
+              />
+              <button
+                v-if="newBranchRefSearch"
+                class="dbv-nb-search-clear"
+                :aria-label="t('scene_search_clear')"
+                @click="clearBranchSearch('new')"
+              >
+                ✕
+              </button>
+            </div>
             <select v-model="newBranchRef" class="dbv-nb-sel">
               <option v-if="!branches.length" value="main">main</option>
               <option v-else-if="!filteredNewBranchRefs.length" disabled value="">
@@ -1353,7 +1414,7 @@
 <script setup>
 import { providerFromRepoKey } from '../lib/repo-provider.js'
 import { stripRepoPrefix as stripRepoPrefixShared } from '../lib/repo-key.js'
-import { filterBranchesByPrefix } from '../lib/branchFilter.js'
+import { filterBranchesByPrefix, reconcileBranchSelection } from '../lib/branchFilter.js'
 import { pluginsEnabled } from '../lib/features.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 
@@ -1525,6 +1586,30 @@ const detailWorkBranch = ref('')
 const newBranchOpen = ref(false)
 const newBranchName = ref('')
 const newBranchRef = ref('main')
+// Issue #4372：选项集变化（搜索/加载）后对账选中值，确保所见即所保存/所创建，
+// 不提交被过滤隐藏的旧基准；无可选项时清空绑定值并交由提交前校验拦截。
+watch(
+  [filteredBranches, advWorkBranch],
+  ([list, selected]) => {
+    if (!branches.value.length) return
+    const next = reconcileBranchSelection(selected, list)
+    if (next !== selected) advWorkBranch.value = next
+  },
+  { immediate: true }
+)
+watch(
+  [filteredNewBranchRefs, newBranchRef],
+  ([list, selected]) => {
+    if (!branches.value.length) return
+    const next = reconcileBranchSelection(selected, list)
+    if (next !== selected) newBranchRef.value = next
+  },
+  { immediate: true }
+)
+function clearBranchSearch(which) {
+  if (which === 'existing') existingBranchSearch.value = ''
+  else newBranchRefSearch.value = ''
+}
 const advFields = ref([])
 const linkedRepos = ref([])
 const linkedRepoOptions = ref([])
@@ -2972,6 +3057,10 @@ function createNewBranch() {
     app().showToast(t('branch_name_empty'))
     return
   }
+  if (!newBranchRef.value) {
+    app().showToast(t('branch_ref_required'))
+    return
+  }
   API()
     .post(
       '/scenes/branches/' +
@@ -2981,7 +3070,7 @@ function createNewBranch() {
         branchQS(dashOwner.value, dashName.value),
       {
         branch_name: newBranchName.value.trim(),
-        refs: newBranchRef.value || 'main',
+        refs: newBranchRef.value,
       }
     )
     .then(function () {
@@ -5090,8 +5179,9 @@ onBeforeUnmount(function () {
 .adv-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 0;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  padding: var(--s-3) 0;
   border-bottom: 1px solid rgba(0, 0, 0, 0.04);
 }
 .adv-label {
@@ -5115,35 +5205,57 @@ onBeforeUnmount(function () {
   font-family: inherit;
 }
 .dbv-newbranch {
-  padding: 8px 0 4px 92px;
+  padding: var(--s-2) 0 var(--s-1) 92px;
   display: flex;
-  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2);
 }
 .dbv-nb-input {
-  flex: 1;
-  padding: 7px 12px;
+  flex: 1 1 var(--s-6);
+  min-width: 0;
+  padding: var(--s-2) var(--s-3);
   border: 1px solid var(--hairline);
-  border-radius: 10px;
-  font-size: 13px;
+  border-radius: var(--r-control);
+  font-size: var(--f-body);
   outline: none;
   background: var(--bg);
   font-family: inherit;
   color: var(--t);
+}
+.dbv-branch-searchwrap,
+.dbv-nb-searchwrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 var(--s-6);
+  min-width: 0;
 }
 .dbv-branch-search,
 .dbv-nb-search {
-  width: 200px;
-  padding: 7px 12px;
+  width: 100%;
+  min-width: 0;
+  padding: var(--s-2) var(--s-5) var(--s-2) var(--s-3);
   border: 1px solid var(--hairline);
-  border-radius: 10px;
-  font-size: 13px;
+  border-radius: var(--r-control);
+  font-size: var(--f-body);
   outline: none;
   background: var(--bg);
   font-family: inherit;
   color: var(--t);
 }
-.dbv-nb-search {
-  width: 140px;
+.dbv-branch-search-clear,
+.dbv-nb-search-clear {
+  position: absolute;
+  right: var(--s-1);
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--t3);
+  font-size: var(--f-caption);
+  line-height: 1;
 }
 .dbv-nb-sel {
   width: 120px;
@@ -5155,6 +5267,18 @@ onBeforeUnmount(function () {
   outline: none;
   cursor: pointer;
   font-family: inherit;
+}
+@media (max-width: 720px) {
+  .dbv-newbranch {
+    padding-left: 0;
+  }
+  .dbv-branch-searchwrap,
+  .dbv-nb-searchwrap {
+    flex-basis: 100%;
+  }
+  .adv-select {
+    max-width: none;
+  }
 }
 .dbv-advsec {
   padding: 12px 0 4px;
