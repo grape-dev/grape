@@ -73,7 +73,7 @@ def _registered(version: str):
 
 def test_events_payload_migration_registered_on_runtime_domain():
     mig = _registered(payload_mig.MIGRATION_VERSION)
-    assert mig is not None, "202611250001 未注册（存量库永远停在 TEXT）"
+    assert mig is not None, f"{payload_mig.MIGRATION_VERSION} 未注册（存量库永远停在 TEXT）"
     assert mig.name == payload_mig.MIGRATION_NAME
     assert "runtime" in mig.domains
     assert mig.post_check is payload_mig.verify_events_payload_mediumtext
@@ -81,7 +81,7 @@ def test_events_payload_migration_registered_on_runtime_domain():
 
 def test_card_payload_migration_registered_on_mgmt_domain():
     mig = _registered(card_mig.MIGRATION_VERSION)
-    assert mig is not None, "202611250002 未注册（存量卡片表永远停在 TEXT）"
+    assert mig is not None, f"{card_mig.MIGRATION_VERSION} 未注册（存量卡片表永远停在 TEXT）"
     assert mig.name == card_mig.MIGRATION_NAME
     assert "mgmt" in mig.domains
     assert mig.post_check is card_mig.verify_channel_outbound_card_payload_mediumtext

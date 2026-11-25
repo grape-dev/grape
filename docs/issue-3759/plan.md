@@ -29,7 +29,7 @@
 | `src/domains/runtime/pipeline/event_pipeline.py` | 修改 | `_vcs_get_issue` 熔断短路；404/401/403 落台账；成功清熔断 |
 | `src/domains/mgmt/public/__init__.py` | 修改 | 新增 `get_repo_vcs_health` / `set_repo_vcs_health`（列白名单 + 单库拓扑回落） |
 | `src/domains/mgmt/user/db.py` | 修改 | 新装库 DDL 带 8 列；`get_managed_repos` 暴露 `vcs_*` 字段 |
-| `src/domains/mgmt/migrations/repo_vcs_health_columns.py` | 新增 | 迁移 `202611250001`：存量库幂等补 8 列 + 后置校验 |
+| `src/domains/mgmt/migrations/repo_vcs_health_columns.py` | 新增 | 迁移 `202611250005`（原 202611250001 撞号已 renumber）：存量库幂等补 8 列 + 后置校验 |
 | `src/api/db_setup.py` | 修改 | 注册迁移（只接线，实现住 mgmt 域） |
 | `src/domains/mgmt/routes/repos.py` | 修改 | `/managed` 暴露 `vcs_missing` 等字段；新增 `POST /{o}/{r}/vcs-health/reset` |
 | `src/kernel/gsb/route_config.py` | 修改 | 登记两个新 public 原语（PUBLIC_PRIMITIVES） |

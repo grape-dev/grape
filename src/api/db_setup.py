@@ -1130,9 +1130,9 @@ def _create_indexes():
         # Issue #3750: webhook 验签拒绝按**时间窗口**计数（告警求值 + 14 天留存清理都是
         # `WHERE created_at >= ?` / `< ?` 且不带 repo_key 等值，故 created_at 必须在前；
         # repo_key 作覆盖列供 GROUP BY / 反查，放第二列不参与范围裁剪。反序
-        # (repo_key, created_at) 对这种查询用不上索引，只能全表扫）
-        "CREATE INDEX IF NOT EXISTS idx_obs_webhook_rejects_time_repo "
-        "ON obs_webhook_rejects(created_at, repo_key)",
+        # (repo_key, created_at) 对这种查询用不上索引，只能全表扫）。
+        # ⚠️ 索引本身已改注册式迁移 202611250006（PR #2157 门禁复审：写在这里的索引
+        # 存量库永不执行 → 生产仍全表扫）。仅保留本注释指向迁移，不再在此建索引。
         # ===== Issue #103: 知识写入队列索引 =====
         "CREATE INDEX IF NOT EXISTS idx_kwq_status_retry ON knowledge_write_queue(queue_status, next_retry_at)",
         "CREATE INDEX IF NOT EXISTS idx_kwq_dim_created ON knowledge_write_queue(repo_key, scope, agent_type, issue_num, created_at)",
@@ -4717,9 +4717,15 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
     检查项（域内目标表必须存在——QA：整表缺失 = 迁移目标没建出来，
     不能用 _table_present 包裹后静默 log.info 通过，必须判为失败）：
     - mgmt（单库/不筛域）：分类字典表必须存在，且一级活跃必须恰好 KEEP_L1_IDS；
+    - mgmt（单库/不筛域）：autopilot_tasks 状态三列的 COLUMN_DEFAULT 必须是空串
+      （`autopilot_dispatch_state.state_column_defaults_converged`）。加这一项的
+      原因：202611240011 的判据在 PR #2157 前几版里把 NULL 与 '' 折成同一态，
+      迁移空转却盖章（假绿），那些「已盖章」的库启动时不会再跑 fn——只有把同一
+      后置校验挂到台账之外的核对点，旧判据盖章的库才会在启动日志暴露漂移；
+      SQLite 侧列定义本身带 DEFAULT ''，该函数直接通过（N/A）。
     - runtime（单库/不筛域）：skill 表必须存在，且必须含 cat_l1_id / cat_l2_id。
 
-    实现口径：两个检查项各委托属主域迁移模块的后置校验函数（表缺失/
+    实现口径：检查项各委托属主域迁移模块的后置校验函数（表缺失/
     集合不对/缺列均以 RuntimeError 报出，这里转成失败清单），api 层不再
     复制域内 SQL / id 字面量（tests/arch P0-2 棘轮 + QA C-1 单一真源）。
     表整张缺失 = 迁移目标没建出来，同样判失败（QA：不允许 _table_present
@@ -4753,6 +4759,16 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
                 verify_org_repo_create_columns(conn=conn)
             except Exception as e:  # noqa: BLE001
                 failures.append(f"mgmt organization 仓库创建选项列后置校验失败: {e}")
+            try:
+                # PR #2157 复审 Required：台账之外再核一次状态三列默认值。旧判据
+                # （把 COLUMN_DEFAULT NULL 当已收敛）盖章的库不会重跑 202611240011，
+                # 只有这里能让「已盖章但目标未到位」在启动日志暴露。
+                from src.domains.mgmt.migrations.autopilot_dispatch_state import (
+                    state_column_defaults_converged,
+                )
+                state_column_defaults_converged(conn=conn)
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"mgmt autopilot 状态列默认值后置校验失败: {e}")
         if dom in ("", "runtime"):
             try:
                 from src.domains.runtime.migrations.skill_detail_tables import (
@@ -4767,7 +4783,8 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
         if raise_on_fail:
             raise RuntimeError(msg)
     else:
-        log.info("迁移目标后置校验通过（分类一级集合 / skill 分类列 / organization 仓库列）")
+        log.info("迁移目标后置校验通过（分类一级集合 / skill 分类列 / organization 仓库列"
+                 " / autopilot 状态列默认值）")
     return failures
 
 
@@ -12165,6 +12182,9 @@ register_migration(
 # 修法同 #3731/#3773：改成注册式迁移（kind=safe + post_check，五列在才盖章）。
 # version/name/kind 用字面量登记（不用 `**_MIGRATION`），否则
 # tests/api/test_migration_track_guard.py 的版本号唯一性/格式守卫解析不出该条。
+# 202611250001 由本条独占（PR #2157 门禁复审 Critical：同号另有 repo-vcs-health
+# / events-payload-mediumtext / payload-guard 三条，已分别 renumber 到
+# 202611250005 / 202611250003 / 202611250004）。
 from src.domains.runtime.migrations.events_cascade_columns import (
     add_events_cascade_columns as _fn_events_cascade_columns,
     verify_events_cascade_columns as _post_events_cascade_columns,
@@ -12185,13 +12205,21 @@ register_migration(
 # MySQL 库靠本条收敛：类型探测短路（已 mediumtext 零 DDL）+ _destructive_ddl
 # 收口（min_code_version 门槛）+ ALTER 后复检 DATA_TYPE（未生效就不盖章）。
 # 迁移 fn/常量/方言分支都在 runtime 域模块（events 归 runtime）。
+#
+# 版本号 202611250003（PR #2157 门禁复审 Critical）：本条与
+# repo-vcs-health-breaker-columns / events-cascade-compensation-columns /
+# create-autopilot-payload-guard-table 四条曾共用 202611250001——版本台账以
+# version 为键（INSERT OR REPLACE），同号后登记者会被判「已执行」永久跳过。
+# 现号段：001=events-cascade-compensation-columns（保留原号）、
+# 002=卡片表 payload mediumtext、003=本条、004=payload-guard 建表、
+# 005=repo-vcs-health-breaker-columns。
 # ============================================================================
 from src.domains.runtime.migrations.events_payload_mediumtext import (  # noqa: E402
     migrate_events_payload_mediumtext as _fn_events_payload_mediumtext,
     verify_events_payload_mediumtext as _post_events_payload_mediumtext,
 )
 register_migration(
-    version="202611250001",
+    version="202611250003",
     name="issue4339-events-payload-mediumtext",
     kind="safe",
     fn=_fn_events_payload_mediumtext,
@@ -12637,10 +12665,95 @@ def _fn_create_autopilot_payload_guard_table() -> None:
         conn.commit()
 
 
+def _postcheck_create_autopilot_payload_guard_table() -> None:
+    """post_check：台账表在位才盖章（Issue #3818 / PR #2157 复审 Critical）。
+
+    建表 fn 是「表在则零写」，但执行器以「fn 正常返回 = 盖章」为约定：没有后置
+    校验时，守卫跳过 / 撞号顶替的库只会留一行 ERROR，版本号照盖、下次不再重试。
+    本迁移曾是 202611250001 的四条同号迁移里**唯一没有 post_check** 的一条，
+    不收敛也只能靠日志发现，故补上：表缺失即 raise，不盖章、下次启动重试。
+    """
+    if _owned_skip("autopilot_payload_guard", "post_check"):
+        return
+    conn = _migration_conn("runtime")
+    cursor = conn.cursor()
+    # 不显式关游标（与建表 fn / verify_repo_vcs_health_columns 同口径）：池化连接上
+    # close 失败会掩盖校验结论，而 arch 静默 except 棘轮也不允许为此新增吞异常。
+    if not _table_present(cursor, "autopilot_payload_guard"):
+        raise RuntimeError(
+            "autopilot_payload_guard 缺失（建表迁移未生效，不盖章，下次启动重试）")
+
+
 register_migration(
-    version="202611250001",
+    # 202611250004（PR #2157 门禁复审 Critical）：原与本条同批三条迁移共用
+    # 202611250001，被台账按 version 判「已执行」永久跳过；重新编号后首跑必执行，
+    # 且补了 post_check，不收敛会显式不盖章。
+    version="202611250004",
     name="create-autopilot-payload-guard-table",
     kind="safe",
     domains=("runtime",),
     fn=_fn_create_autopilot_payload_guard_table,
+    post_check=_postcheck_create_autopilot_payload_guard_table,
+)
+
+
+# ===== Issue #3750：obs_webhook_rejects(created_at, repo_key) 时间窗索引 =====
+# 该索引此前只写在**冻结老轨** `_create_indexes()` 里：存量库已盖 legacy-stamp
+# 202610300001，启动时不跑老轨，于是 #3750 的「按时间窗计数」（告警求值 + 14 天
+# 留存清理都是 `WHERE created_at >= ?`）在生产实际仍是全表扫 —— 正是
+# tests/api/test_migration_track_guard.py::test_legacy_index_ddl_is_frozen 恒红的
+# 原因（该守卫禁止往老轨新增索引）。改注册式迁移后，存量库下次启动即补齐并盖章
+# （先探测再建，幂等；三库模式下切到 insight 域连接）。
+# 版本号 202611250006：202611250001..005 已被本批迁移占用（见上面各条注释）。
+_OBS_WEBHOOK_REJECTS_TIME_INDEX = "idx_obs_webhook_rejects_time_repo"
+
+
+def _fn_obs_webhook_rejects_time_index() -> None:
+    """Issue #3750：补 webhook 验签拒绝台账的时间窗索引（幂等）。"""
+    from src.kernel.session_manager import db as _db, db_lock
+
+    conn = _migration_conn("insight", default=_db)
+    with (db_lock if conn is _db else nullcontext()):
+        c = conn.cursor()
+        if _index_present(c, "obs_webhook_rejects", _OBS_WEBHOOK_REJECTS_TIME_INDEX):
+            return
+        if _mysql_backend():
+            # repo_key / created_at 是 TEXT，MySQL 建索引必须带前缀（1170）；迁移走
+            # db_registry._CompatCursor，mysql_compat「自动补 (191)」的特判不生效。
+            ddl = (f"CREATE INDEX {_OBS_WEBHOOK_REJECTS_TIME_INDEX} "
+                   "ON obs_webhook_rejects(created_at(191), repo_key(191))")
+        else:
+            ddl = (f"CREATE INDEX {_OBS_WEBHOOK_REJECTS_TIME_INDEX} "
+                   "ON obs_webhook_rejects(created_at, repo_key)")
+        try:
+            c.execute(ddl)
+        except Exception as e:  # noqa: BLE001
+            if "1061" in str(e) or "already exists" in str(e).lower():
+                log.info(f"{_OBS_WEBHOOK_REJECTS_TIME_INDEX} 已存在（1061），视为建成")
+            else:
+                conn.rollback()
+                raise
+        conn.commit()
+
+
+def _postcheck_obs_webhook_rejects_time_index() -> None:
+    """post_check：索引在位才盖章（不在位 raise，不盖章、下次启动重试）。"""
+    from src.kernel.session_manager import db as _db, db_lock
+
+    conn = _migration_conn("insight", default=_db)
+    with (db_lock if conn is _db else nullcontext()):
+        c = conn.cursor()
+        if not _index_present(c, "obs_webhook_rejects",
+                              _OBS_WEBHOOK_REJECTS_TIME_INDEX):
+            raise RuntimeError(
+                f"{_OBS_WEBHOOK_REJECTS_TIME_INDEX} 缺失（索引未建成，不盖章，下次启动重试）")
+
+
+register_migration(
+    version="202611250006",
+    name="obs-webhook-rejects-time-repo-index",
+    kind="safe",
+    domains=("insight",),
+    fn=_fn_obs_webhook_rejects_time_index,
+    post_check=_postcheck_obs_webhook_rejects_time_index,
 )

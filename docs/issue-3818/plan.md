@@ -10,7 +10,7 @@
 | `src/domains/runtime/engine/scheduler.py` | 派发前闸门（审查 → 熔断），早于 `_create_execution`；手动触发同门；拦截写 `blocked_payload(_repeat)` + `[autopilot-alert]` |
 | `src/domains/runtime/engine/direct_executor.py` | `prompt built` 改为只输出长度 + payload hash 前缀 + 技能；fake completion 降级 failed 时登记同载荷失败（仅 autopilot 合成 seq） |
 | `src/domains/runtime/routes/task_logs.py` | 执行详情回显 prompt 同源脱敏（长度保留原值） |
-| `src/domains/runtime/schema_ddl.py` / `src/api/db_setup.py` / `configs/table_ownership.json` | 新表 DDL + 存量迁移 `202611250001`（runtime 域）+ 归属登记 |
+| `src/domains/runtime/schema_ddl.py` / `src/api/db_setup.py` / `configs/table_ownership.json` | 新表 DDL + 存量迁移 `202611250004`（runtime 域，原 202611250001 撞号已 renumber；含 post_check）+ 归属登记 |
 
 ## 关键决策
 

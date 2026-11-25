@@ -243,3 +243,34 @@ def test_state_column_ddl_uses_varchar_with_default():
     for col, ddl in mig.STATE_COLUMNS:
         assert ddl.upper().startswith("VARCHAR"), f"{col} 应为 VARCHAR: {ddl}"
         assert "NOT NULL" in ddl.upper() and "DEFAULT ''" in ddl, f"{col} 缺默认值: {ddl}"
+
+
+def test_schema_ddl_state_columns_match_varchar_ddl():
+    """建表 DDL 与迁移 DDL 必须同型（PR #2157 门复审 ④）。
+
+    `_AUTOPILOT_TASKS_DDL` 走 `mysql_compat` 翻译建表：三列若仍写 TEXT，MySQL 不接受
+    TEXT 的字面量 DEFAULT，翻译层会把 `DEFAULT ''` 包成表达式默认值 → 新装库的
+    `COLUMN_DEFAULT` 读不到 `''`，strict 下 1364 只等迁移 202611240011 补刀。
+    这里锁死两边一致，避免「迁移改了、建表没改」再让新装库回到假绿。
+    """
+    from src.domains.mgmt.migrations import autopilot_dispatch_state as mig
+    from src.domains.mgmt.schema_ddl import _AUTOPILOT_TASKS_DDL as ddl
+
+    body = " ".join(ddl.split())
+    for col, column_ddl in mig.STATE_COLUMNS:
+        assert f"{col} {column_ddl}" in body, (
+            f"建表 DDL 的 {col} 与迁移 DDL 不一致（应为 {column_ddl}）: {body[:400]}")
+
+
+def test_schema_ddl_translated_for_mysql_keeps_literal_default():
+    """MySQL 翻译后三列仍是 `VARCHAR(255) NOT NULL DEFAULT ''`（不是表达式默认值）。"""
+    import re
+
+    from src.domains.mgmt.schema_ddl import _AUTOPILOT_TASKS_DDL as ddl
+    from src.kernel import mysql_compat
+
+    translated = mysql_compat._translate_create_table(ddl)
+    text = " ".join(translated.split())
+    for col in ("dispatch_state", "dispatch_state_reason", "dispatch_state_at"):
+        m = re.search(rf"\b{col} VARCHAR\(255\) NOT NULL DEFAULT ''", text)
+        assert m, f"MySQL 翻译后 {col} 默认值不保真: {text[:400]}"

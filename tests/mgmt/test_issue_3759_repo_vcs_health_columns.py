@@ -36,7 +36,10 @@ def test_migration_is_idempotent():
     from src.domains.mgmt.migrations.repo_vcs_health_columns import (
         MIGRATION, add_repo_vcs_health_columns, verify_repo_vcs_health_columns)
 
-    assert MIGRATION["version"] == "202611250001"
+    # 202611250005（PR #2157 门禁复审 Critical）：原为 202611250001，与
+    # events-cascade / events-payload-mediumtext / payload-guard 三条撞号；
+    # 001 保留给 events-cascade-compensation-columns。
+    assert MIGRATION["version"] == "202611250005"
     assert MIGRATION["domains"] == ("mgmt",)
     # 列已在位 → 再跑一次零改动且不抛错（盖章后重跑/新库双路径都安全）
     add_repo_vcs_health_columns()
