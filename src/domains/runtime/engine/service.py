@@ -3412,8 +3412,9 @@ def _build_cascade_terminal_update(cols: set, values: dict):
     for _col, _frag, _has_param, _val in _specs:
         if _known and _col not in _known:
             continue
-        if _col not in values:
-            # 可选列（如 failure_info）未提供值 = 本次不写，保留历史值
+        if _col == "failure_info" and _col not in values:
+            # 可选列（Issue #3433）：非 failed 终态未提供值 = 本次不写，保留历史值；
+            # 其余列（含 report_missing 这类无参常量）始终写。
             continue
         _sets.append(_frag)
         if _has_param:
