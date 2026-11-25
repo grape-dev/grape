@@ -34,6 +34,7 @@ CID = 0
 def _clean_env(monkeypatch):
     for k in ("RUNTIME_NO_PROGRESS_TIMEOUT", "RUNTIME_NO_PROGRESS_RETRIES",
               "RUNTIME_NO_PROGRESS_ENABLED", "RUNTIME_NO_PROGRESS_REPEAT_STEPS",
+              "RUNTIME_NO_PROGRESS_REPEAT_WINDOW",
               "GRAPE_TASK_TIMEOUT_CONFIG", "TERMINAL_EXEC_REVERSE_GRACE_SECONDS"):
         monkeypatch.delenv(k, raising=False)
     _clean()
@@ -393,3 +394,195 @@ class TestReverseZombieExec:
         scheduler._reap_terminal_exec_running_tasks()
         assert _task_row(tid1)[0] == "running"     # 宽限内不动
         assert _task_row(tid2)[0] == "completed"   # 已终态不动
+
+
+# ── PR #2160 复审 ①：窗口与阈值解耦（115s/步真实节奏） ──────────
+
+def _cadence_spec(n=8, step_secs=115, tool="bash",
+                  inp='{"command": "sleep 115; tail -5 /tmp/x.log; pgrep -f act.py"}',
+                  tail_ago=5):
+    """按真实节奏（每步 step_secs 秒）生成 n 条相同指纹的 tool_use，最新一条在 tail_ago。"""
+    return [("tool_use", tool, inp, tail_ago + (n - 1 - i) * step_secs)
+            for i in range(n)]
+
+
+class TestRepeatWindowConfig:
+    def test_default_is_auto(self):
+        assert tt.no_progress_repeat_window_sec({"skill": "s", "repo_key": "r"},
+                                                cfg={}) == 0
+
+    def test_top_level_and_task_env_override(self):
+        t = {"skill": "s", "repo_key": "r"}
+        assert tt.no_progress_repeat_window_sec(t, cfg={"no_progress_repeat_window_sec": 1200}) == 1200
+        t_env = {"skill": "s", "repo_key": "r",
+                 "env_extra": json.dumps({"RUNTIME_NO_PROGRESS_REPEAT_WINDOW": "1500"})}
+        assert tt.no_progress_repeat_window_sec(t_env, cfg={"no_progress_repeat_window_sec": 1200}) == 1500
+
+    def test_per_skill_and_bad_value(self):
+        cfg = {"per_skill": {"s": {"no_progress_repeat_window_sec": 300}}}
+        assert tt.no_progress_repeat_window_sec({"skill": "s", "repo_key": "r"}, cfg=cfg) == 300
+        t = {"skill": "s", "repo_key": "r"}
+        assert tt.no_progress_repeat_window_sec(t, cfg={"no_progress_repeat_window_sec": -5}) == 0
+        assert tt.no_progress_repeat_window_sec(t, cfg={"no_progress_repeat_window_sec": "bad"}) == 0
+
+
+class TestRepeatWindowResolve:
+    def test_auto_covers_steps_at_115s_cadence(self):
+        # 600s 阈值 ÷ 115s/步 ≈ 5 步 → 8 步阈值必须靠窗口下界兜住
+        assert scheduler._no_progress_repeat_window(600, 8) == 8 * 120
+
+    def test_threshold_wins_when_larger(self):
+        assert scheduler._no_progress_repeat_window(6000, 8) == 6000
+
+    def test_explicit_window_wins(self):
+        assert scheduler._no_progress_repeat_window(600, 8, 1200) == 1200
+
+
+class TestRealCadenceDetection:
+    """主场景回归：115s/步、8 步同命令，默认 600s 阈值下必须命中。"""
+
+    def test_probe_geometry_old_window_misses(self):
+        tid = "t_i3741_cad_probe"
+        _seed_messages(tid, _cadence_spec(8))
+        with db_lock:
+            c = db.cursor()
+            # 旧口径（窗口 = 阈值 600s）：窗口内只有 ~6 步，8 步阈值必然 miss
+            assert ta.repeated_tool_steps(c, tid, 600, 8, now_epoch=time.time()) is None
+            # 新口径（窗口与阈值解耦）：8 步全部落在窗口内 → 命中
+            got = ta.repeated_tool_steps(c, tid, 960, 8, now_epoch=time.time())
+        assert got is not None and got["repeats"] == 8
+
+    def test_sweep_detects_at_default_threshold(self, monkeypatch):
+        monkeypatch.setenv("RUNTIME_NO_PROGRESS_RETRIES", "0")
+        tid, seq, eid = "t_i3741_cad_sweep", SEQ_BASE + 40, SEQ_BASE + 40
+        _seed_runtime(busy=1)
+        _seed_task(tid, seq, started_secs_ago=1200)   # 默认阈值 600s
+        _seed_messages(tid, _cadence_spec(8))
+        _seed_exec(eid, tid, status="running")
+
+        scheduler._sweep_no_progress_tasks(now_epoch=time.time())
+
+        row = _task_row(tid)
+        assert row[0] == "failed"
+        diag = _diag(row[2], "NO_PROGRESS_FAILED")
+        assert diag is not None
+        assert diag["reason"] == "repeated_step"
+        assert diag["repeats"] == 8
+        assert diag["repeat_threshold"] == 8
+        assert diag["repeat_window"] == 960        # 窗口与 600s 阈值解耦
+        assert diag["first_seq"] == 1 and diag["last_seq"] == 8
+        assert _busy() == 0
+
+
+# ── PR #2160 复审 ②：retries=0 语义与 EXHAUSTED 诊断自洽 ────────
+
+class TestRetriesZeroSemantics:
+    def test_zero_finalizes_and_diagnostic_is_consistent(self, monkeypatch):
+        monkeypatch.setenv("RUNTIME_NO_PROGRESS_TIMEOUT", "60")
+        monkeypatch.setenv("RUNTIME_NO_PROGRESS_RETRIES", "0")
+        tid, seq = "t_i3741_zero_sem", SEQ_BASE + 41
+        _seed_runtime(busy=1)
+        _seed_task(tid, seq, started_secs_ago=900)
+        _seed_messages(tid, _repeated_spec(8))
+
+        scheduler._sweep_no_progress_tasks(now_epoch=time.time())
+
+        row = _task_row(tid)
+        assert row[0] == "failed"                  # 0 = 不重派、命中即收口
+        assert _diag(row[2], "NO_PROGRESS_REQUEUE") is None
+        exhaust = _diag(row[2], "NO_PROGRESS_EXHAUSTED")
+        final = _diag(row[2], "NO_PROGRESS_FAILED")
+        assert exhaust is not None and final is not None
+        # 两条诊断不得互相矛盾：EXHAUSTED 不能再声称「交给原失败路径」
+        assert "finalized as failed" in exhaust["note"]
+        assert "original failure path" not in exhaust["note"]
+        assert final["reason"] == "repeated_step"
+
+
+# ── PR #2160 复审 ③：新增终止路径受 no_progress_enabled 门禁 ────
+
+class TestTerminationGates:
+    def _disabled_task(self, tid, seq, **kw):
+        _seed_task(tid, seq, env_extra=json.dumps({"RUNTIME_NO_PROGRESS_ENABLED": "0"}), **kw)
+
+    def test_poll_timeout_skips_terminate_when_disabled(self):
+        tid, seq, eid = "t_i3741_gate_poll", SEQ_BASE + 50, SEQ_BASE + 50
+        _seed_runtime(busy=1)
+        self._disabled_task(tid, seq, started_secs_ago=900)
+        _seed_exec(eid, tid, status="dispatched")
+
+        async def _run():
+            return await scheduler._poll_dispatched_completion(
+                eid, timeout=0.15, poll_interval=0.02)
+
+        assert asyncio.run(_run()) == "failed"     # exec 仍按原语义 failed
+        row = _task_row(tid)
+        assert row[0] == "running"                 # 任务不动（整体回滚）
+        assert "WORKER_TIMEOUT_TERMINATED" not in _codes(row[2])
+        assert _busy() == 1
+
+    def test_reverse_sweep_skips_when_disabled(self):
+        tid, seq, eid = "t_i3741_gate_rev", SEQ_BASE + 51, SEQ_BASE + 51
+        _seed_runtime(busy=1)
+        self._disabled_task(tid, seq, started_secs_ago=900)
+        _seed_exec(eid, tid, status="failed", started_secs_ago=900, completed_secs_ago=600)
+
+        assert scheduler._reap_terminal_exec_running_tasks() == 0
+        row = _task_row(tid)
+        assert row[0] == "running"
+        assert "TERMINAL_EXEC_RUNNING_TASK" not in _codes(row[2])
+        assert _busy() == 1
+
+
+# ── PR #2160 复审 ⑤：started_at 乐观条件 / 指标归因 ─────────────
+
+class TestOptimisticStartedAtGuard:
+    def test_terminate_skips_when_execution_superseded(self):
+        tid, seq = "t_i3741_guard_term", SEQ_BASE + 60
+        _seed_runtime(busy=1)
+        _seed_task(tid, seq, started_secs_ago=900)
+        stale = _task_row(tid)[1]
+
+        ok = scheduler._terminate_stuck_agent_task(
+            tid, "stale execution", expected_started_at=stale + "0")
+
+        assert ok is False
+        row = _task_row(tid)
+        assert row[0] == "running"
+        # 旧执行的诊断不得串到新执行上（守卫在终态/大字段写入之前就短路）
+        assert "TASK_TERMINATED_STUCK" not in _codes(row[2])
+        assert _busy() == 1
+
+    def test_finalize_skips_when_started_at_changed(self):
+        tid, seq = "t_i3741_guard_final", SEQ_BASE + 61
+        _seed_runtime(busy=1)
+        _seed_task(tid, seq, started_secs_ago=900)
+        stale = _task_row(tid)[1]
+
+        diag = {"error_code": "NO_PROGRESS_FAILED", "task_id": tid,
+                "reason": "repeated_step", "repeats": 8, "first_seq": 1, "last_seq": 8,
+                "tool": "bash", "step_fingerprint": "deadbeef"}
+        assert scheduler._finalize_no_progress(tid, stale + "0", diag) is False
+        row = _task_row(tid)
+        assert row[0] == "running"
+        assert "NO_PROGRESS_FAILED" not in _codes(row[2])
+        assert _busy() == 1
+
+    def test_reverse_sweep_metric_carries_runtime_id(self, monkeypatch):
+        import src.domains.insight.public as insight_public
+        seen = []
+
+        def _spy(task_id, source, runtime_id, failure_reason=""):
+            seen.append((task_id, source, runtime_id, failure_reason))
+
+        monkeypatch.setattr(insight_public, "record_task_failed", _spy)
+        tid, seq, eid = "t_i3741_metric_rt", SEQ_BASE + 62, SEQ_BASE + 62
+        _seed_runtime(busy=1)
+        _seed_task(tid, seq, started_secs_ago=900)
+        _seed_exec(eid, tid, status="failed", started_secs_ago=900, completed_secs_ago=600)
+
+        scheduler._reap_terminal_exec_running_tasks()
+
+        assert _task_row(tid)[0] == "failed"
+        assert seen and seen[0][2] == RT            # 不再写 0（保留引擎归因）
+        assert seen[0][3] == "terminal_exec_running_task"
