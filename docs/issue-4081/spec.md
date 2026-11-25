@@ -22,7 +22,11 @@
 2. **告警规则**（`deploy/alerts.yml` 两条，severity=warning，`for: 5m`）：
    - `GrapePluginMissingReportDegraded`：降级（comment 通道回退）增量 > 0；
    - `GrapePluginAgentEndpointMissing`：`grape_plugin_agent_unimplemented_total` 增量 > 0
-     （本构建未实现 → 501），或已登记路由模板上出现 `404/405/501`（未升级的旧构建）。
+     （本构建未实现 → 501），或 Alloy 从 nginx access.log 派生的
+     `nginx_upstream_requests_total{path=~"/api/plugins/agent/.*", status=~"404|405|501"}`
+     增量 > 0（未升级的旧构建）。**不能**用应用侧
+     `grape_http_requests_total{route=~...}`：它的 `route` 是路由模板，旧构建 GET 落
+     SPA catch-all → `/{path}`、POST 未匹配 → `unmatched`，永不匹配该前缀。
 3. **能力位**：`GET /api/plugins/agent/capabilities`（`include_in_schema=False`，不改端点计数）
    返回 `{available, installed, report_missing, missing_operations[]}`，数据源 =
    `contracts/required_operations.json` + `app.routes` 实际注册面（与
@@ -46,7 +50,8 @@
 ## Acceptance Criteria
 
 - [x] `report-missing` 返回 200（submitted/degraded 两分支不变），指标按 result 正确递增，`/metrics` 可查；
-- [x] `deploy/alerts.yml` 两条规则可加载，表达式引用真实指标名（用例断言，防表达式漂移）；
+- [x] `deploy/alerts.yml` 两条规则可加载，表达式引用真实指标名且选择器能命中真实标签
+  （用例按 PromQL 语义求值 + SPA-only app 行为级验证）；
 - [x] 能力位正确报告两端点可用性；缺任一操作时 `missing_operations` 给出 `operationId+method+path`；
 - [x] 未实现端点返回 `501 + error_code=NOT_IMPLEMENTED`（用例覆盖 GET/POST/错误方法）；
 - [x] 全局 404 语义不变（命名空间外仍 404）；

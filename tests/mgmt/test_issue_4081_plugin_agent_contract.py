@@ -8,10 +8,14 @@
 本用例覆盖交付的四件事（Spec In Scope 1/3/4 + 告警）：
 
 1. `report-missing` 结果计数：`grape_plugin_missing_report_total{result=submitted|degraded}`；
-2. 能力位：`GET /api/ping` 的 `plugin_agent` 段（两端点注册面 + missing_operations）；
+2. 能力位：`GET /api/plugins/agent/capabilities`（两端点注册面 + missing_operations；
+   `/api/ping` 由 worker 进程承载、没有本 router，故不放 ping）；
 3. 过渡期语义：`/api/plugins/agent/*` 下未实现的路径/方法 → `501 + error_code=NOT_IMPLEMENTED`
    （不再裸 404/405），并计入 `grape_plugin_agent_unimplemented_total{method}`；
-4. `deploy/alerts.yml` 两条规则与上述指标名一致（表达式漂移看护）。
+4. `deploy/alerts.yml` 两条规则与上述指标名一致（表达式漂移看护），且旧构建分支
+   的选择器能命中真实标签（应用侧 route 是路由模板，旧构建永远不匹配 → 只能用
+   Alloy 从 nginx access.log 派生的 `nginx_upstream_requests_total{path,status}`）；
+5. 命名空间兜底与已登记端点的注册顺序约束（跨文件 include 顺序漂移守卫）。
 """
 import os
 import sys
@@ -138,6 +142,15 @@ class TestUnimplementedNamespaceSemantics:
         resp = client.get("/api/plugins/agentish/whatever")
         assert resp.status_code == 404
 
+    def test_probe_methods_head_and_options_are_501(self, client):
+        """复审 Optional：探测动词（HEAD/OPTIONS）不得留下裸 405 缝。"""
+        for method, path in (("HEAD", "/api/plugins/agent/unknown-op"),
+                             ("OPTIONS", "/api/plugins/agent/unknown-op"),
+                             ("HEAD", "/api/plugins/agent/installed"),
+                             ("OPTIONS", "/api/plugins/agent/installed")):
+            resp = client.request(method, path)
+            assert resp.status_code == 501, (method, path, resp.status_code)
+
 
 class TestPluginAgentCapabilityBit:
     """切片③：能力位（调用侧先查后调）。
@@ -214,6 +227,35 @@ class TestPluginAgentCapabilityBit:
         assert first == second
         assert first is not second          # 返回副本，调用方不得污染缓存
 
+    def test_cached_payload_is_deep_copied(self):
+        """复审 Optional：嵌套 missing_operations 列表不得与缓存共享引用。"""
+        from fastapi import FastAPI
+        from src.api.openapi import plugin_agent_capabilities
+        empty_app = FastAPI()
+        first = plugin_agent_capabilities(empty_app)
+        assert first["missing_operations"]        # 空 app → 两端点都缺
+        first["missing_operations"].clear()
+        second = plugin_agent_capabilities(empty_app)
+        assert len(second["missing_operations"]) == 2, "缓存被调用方改动污染"
+
+    def test_cache_key_does_not_reuse_freed_id(self):
+        """复审 Optional：id(app) 复用时不得把旧 app 的能力位当成新 app 的。"""
+        import gc
+        from fastapi import FastAPI
+        from src.api.openapi import plugin_agent_capabilities, _capability_cache
+
+        empty_app = FastAPI()
+        stale = plugin_agent_capabilities(empty_app)
+        assert stale["available"] is False
+        stale_id = id(empty_app)
+        del empty_app, stale
+        gc.collect()
+        _capability_cache.pop(stale_id, None)   # 隔离 id 复用这一条路径
+
+        from src.api.main import app as real_app
+        fresh = plugin_agent_capabilities(real_app)
+        assert fresh["available"] is True
+
 
 class TestAlertsRules:
     """切片④：deploy/alerts.yml 两条规则与指标名一致。"""
@@ -251,6 +293,177 @@ class TestAlertsRules:
     def test_rule_names_unique(self):
         names = [r.get("alert") for r in self._rules() if r.get("alert")]
         assert len(names) == len(set(names)), "告警规则名重复"
+
+    # ===== 复审 Critical：告警表达式必须能命中真实标签，而不只是「字符串出现」 =====
+
+    def _endpoint_rule(self):
+        rule = next((r for r in self._rules()
+                     if r.get("alert") == "GrapePluginAgentEndpointMissing"), None)
+        assert rule is not None, "alerts.yml 缺少 GrapePluginAgentEndpointMissing"
+        return rule
+
+    @staticmethod
+    def _selector_matches(matcher: str, labels: dict) -> bool:
+        """把 `<metric>{k=~"re"|k="v", ...}` 的标签选择器按 PromQL 语义求值。"""
+        import re as _re
+        body = matcher.split("{", 1)[1].rsplit("}", 1)[0]
+        for part in [p.strip() for p in body.split(",") if p.strip()]:
+            m = _re.match(r'^(\w+)\s*(=~|=)\s*"([^"]*)"$', part)
+            assert m, f"无法解析选择器片段: {part}"
+            key, op, pattern = m.group(1), m.group(2), m.group(3)
+            value = labels.get(key)
+            if value is None:
+                return False
+            if op == "=" and value != pattern:
+                return False
+            if op == "=~" and not _re.fullmatch(pattern, value):
+                return False
+        return True
+
+    def test_legacy_branch_uses_nginx_derived_metric(self):
+        """旧构建没有本 router，应用侧 route 标签永远不匹配 → 必须走网关派生指标。"""
+        expr = self._endpoint_rule()["expr"]
+        assert "nginx_upstream_requests_total" in expr, (
+            "旧构建分支必须用 Alloy 派生的 nginx_upstream_requests_total"
+            "（应用侧 route 是路由模板 /{path}、unmatched）")
+        assert "grape_http_requests_total" not in expr, (
+            "旧构建的 404/405 不会以 /api/plugins/agent/* 作为 route 标签进应用指标（#3847）")
+        assert 'path=~"/api/plugins/agent/.*"' in expr.replace(" ", "")
+        assert 'status=~"404|405|501"' in expr.replace(" ", "")
+
+    def test_spa_only_app_route_labels_do_not_satisfy_selector(self, monkeypatch):
+        """行为级：模拟旧构建（只有 SPA catch-all），GET 404 / POST 405 的 route 取值
+        不满足告警选择器 —— Critical 的可证伪用例。"""
+        monkeypatch.setenv("METRICS_ADDR", "127.0.0.1:0")
+        from fastapi import FastAPI, HTTPException
+        from fastapi.testclient import TestClient
+        from src.domains.insight.observability import (
+            HTTP_REQUESTS_TOTAL, metrics_middleware)
+
+        def snapshot() -> dict:
+            return {(tuple(sorted((k, str(v)) for k, v in s.labels.items())))
+                    for m in HTTP_REQUESTS_TOTAL.collect() for s in m.samples
+                    if s.name == "grape_http_requests_total"}
+
+        legacy = FastAPI()
+
+        @legacy.get("/{path:path}")
+        def spa_catch_all(path: str):
+            # 与 src/api/spa.py 同语义：api/ 前缀的未命中路由 404
+            if path.startswith("api/"):
+                raise HTTPException(status_code=404)
+            return {"ok": True}
+
+        metrics_middleware(legacy)
+        client = TestClient(legacy)
+        before = snapshot()
+        assert client.get("/api/plugins/agent/installed").status_code == 404
+        resp = client.post("/api/plugins/agent/report-missing", json={})
+        assert resp.status_code == 405, "旧构建无该路由时 Starlette 直接 405"
+
+        new_labels = [dict(kv) for kv in snapshot() - before]
+        assert new_labels, "旧构建请求未产生新的 grape_http_requests_total 样本"
+        routes = {labels["route"] for labels in new_labels}
+        # 旧构建实测：route 是**路由模板**——GET 落 SPA catch-all → "/{path}"；
+        # POST 只有 partial match（GET 的 catch-all），route 也不是请求路径。
+        assert routes <= {"/{path}", "unmatched"}, routes
+        assert "/{path}" in routes
+        for labels in new_labels:
+            assert not self._selector_matches(
+                'grape_http_requests_total{route=~"/api/plugins/agent/.*", status=~"404|405|501"}',
+                labels), (
+                f"旧构建样本 {labels} 不得满足应用侧选择器"
+                "（否则说明告警分支选错了指标）")
+
+    def test_nginx_selector_matches_real_request_path(self):
+        """网关派生指标：path 是真实请求路径，选择器必须能命中旧构建样本。"""
+        legacy_samples = [
+            {"path": "/api/plugins/agent/installed", "status": "404"},
+            {"path": "/api/plugins/agent/report-missing", "status": "405"},
+        ]
+        for labels in legacy_samples:
+            assert self._selector_matches(
+                'nginx_upstream_requests_total{path=~"/api/plugins/agent/.*", status=~"404|405|501"}',
+                labels), labels
+        # 否定样本：同名前缀的其它命名空间不能被误收
+        assert not self._selector_matches(
+            'nginx_upstream_requests_total{path=~"/api/plugins/agent/.*"}',
+            {"path": "/api/plugins/agentish/x", "status": "404"})
+
+    def test_alloy_derives_metric_with_path_and_status_labels(self):
+        """告警选择器的标签必须真实由 Alloy 产出（否则规则永远无样本）。"""
+        alloy = open(os.path.join(os.path.dirname(__file__), "..", "..",
+                                  "deploy", "alloy-config.alloy"), encoding="utf-8").read()
+        assert 'name        = "nginx_upstream_requests_total"' in alloy
+        assert 'values = { status = "", path = "" }' in alloy
+        collector = alloy.split('name        = "nginx_upstream_requests_total"', 1)[0]
+        selector = collector.rsplit("stage.match", 1)[1]
+        assert "plugins/agent" in selector, (
+            "Alloy 采集面必须包含 /api/plugins/agent/，否则旧构建分支无数据")
+
+
+class TestNamespaceRegistrationOrder:
+    """复审 Required：兜底只保证文件内最后，跨文件 include 顺序漂移必须被守卫。
+
+    `src/api/main.py` 在 `plugins_agent_router` 之后仍 include 了多个 router；若其中任一
+    再定义 `/api/plugins/agent/*`，兜底会先匹配返 501（端点被吞）而能力位仍报可用。
+    """
+
+    def test_namespace_pairs_all_precede_fallback(self):
+        from src.api.main import app
+        from src.api.openapi import _route_index, load_required_operations
+
+        index, fallback = _route_index(app)
+        assert fallback is not None, "未找到命名空间兜底路由（unimplemented_plugin_agent_operation）"
+
+        required = load_required_operations()
+        namespace = {p: (m, i) for (p, m), i in index.items()
+                     if p == "/api/plugins/agent" or p.startswith("/api/plugins/agent/")}
+        assert namespace, "命名空间内未注册任何路由"
+
+        for oid in ("plugins_agent_installed", "plugins_agent_report_missing"):
+            path, method = required[oid]
+            idx = index.get((path, str(method).upper()))
+            assert idx is not None, f"{oid} 未注册：{method} {path}"
+            assert idx < fallback, (
+                f"{oid} ({method} {path}) 注册下标 {idx} 不早于兜底 {fallback}："
+                "兜底会先吞掉该端点（main.py 中该 router 必须 include 在 plugins_agent 之前）")
+
+        after = {p for p, (_m, i) in namespace.items() if i > fallback}
+        assert not after, f"兜底之后仍注册了命名空间路由：{sorted(after)}"
+
+    def test_capability_reports_unavailable_when_fallback_shadows(self, monkeypatch):
+        """结构性防御：即使顺序漂移，能力位也不得报 available=true。"""
+        from fastapi import FastAPI
+        from src.api.openapi import (
+            _build_plugin_agent_capabilities, PLUGIN_AGENT_OPERATIONS,
+            load_required_operations)
+        from src.domains.mgmt.routes.plugins_agent import (
+            router as plugins_agent_router)
+
+        # 先挂兜底（模拟顺序漂移），再挂已登记端点
+        shadowed = FastAPI()
+        fallback_only = FastAPI()
+        fallback_only.include_router(plugins_agent_router)
+        for route in fallback_only.routes:
+            if getattr(route, "path", "") == "/api/plugins/agent/{rest:path}":
+                shadowed.router.routes.append(route)
+        tokens = FastAPI()
+        tokens.include_router(plugins_agent_router)
+        for route in tokens.routes:
+            if getattr(route, "path", "") in (
+                    "/api/plugins/agent/installed", "/api/plugins/agent/report-missing"):
+                shadowed.router.routes.append(route)
+
+        cap = _build_plugin_agent_capabilities(shadowed)
+        assert cap["available"] is False
+        assert {m["operationId"] for m in cap["missing_operations"]} ==             set(PLUGIN_AGENT_OPERATIONS)
+        assert load_required_operations()          # 清单可读（非清单缺失路径）
+
+    def test_fallback_does_not_swallow_declared_endpoints(self, client):
+        """端到端：兜底在最后，已登记端点仍命中原处理器（方法级）。"""
+        assert client.get("/api/plugins/agent/installed").status_code == 200
+        assert client.get("/api/plugins/agent/capabilities").status_code == 200
 
 
 class TestApiErrorErrorCode:
