@@ -25,7 +25,7 @@
 | Critical（建单 INSERT） | `c5593a941` | `routes/autopilot.py` / `org_analysis.py`：建单与组织分析 INSERT 显式写三列为空串 | 路由用例（真实落库三列为 `''`） |
 | Critical（列 DDL） | `5f524d107` | 建单 DDL 改 `VARCHAR(255) NOT NULL DEFAULT ''`（TEXT 在 MySQL 8.0.46 上落地成 `DEFAULT NULL`） | DDL 断言 + `_ensure_column` 用例 |
 | Required（reason 断言） | `fb7638995` | 用例对齐稳定 reason code（`blocked_empty_instruction`） | `tests/mgmt/test_issue3733_autopilot_dispatch_state_route.py` |
-| Critical（迁移撞号） | 本轮 | 四条迁移共用 `202611250001` → 重新编号：`001`=events-cascade、`002`=卡片 payload、`003`=events payload mediumtext、`004`=payload-guard 建表（并补 post_check）、`005`=repo-vcs-health、`006`=obs_webhook_rejects 时间窗索引 | `tests/api/test_migration_track_guard.py`（静态 + 运行时双守卫） |
+| Critical（迁移撞号） | 本轮 | 四条迁移共用 `202611250001` → 重新编号：`001`=events-cascade、`002`=卡片 payload、`003`=events payload mediumtext、`004`=payload-guard 建表（并补 post_check）、`005`=repo-vcs-health、`006`=grape_t_obs_webhook_rejects 时间窗索引 | `tests/api/test_migration_track_guard.py`（静态 + 运行时双守卫） |
 | Required（已盖章库漂移） | 本轮 | `db_setup.verify_migration_targets` mgmt 分支加 `state_column_defaults_converged`，旧判据盖章的库启动即暴露漂移 | `test_verify_migration_targets_exposes_state_default_drift` |
 | Optional（1406 预检） | 本轮 | `_precheck_state_column_lengths`：MODIFY 前统一量存量长度，超长即报「列/行数/最长」且零 DDL | `test_ensure_reports_overlong_values_before_any_ddl` |
-| Optional（老轨索引） | 本轮 | `idx_obs_webhook_rejects_time_repo` 从冻结老轨 `_create_indexes()` 改为注册式迁移 `202611250006`（存量库才会执行） | `test_legacy_index_ddl_is_frozen` 转绿 |
+| Optional（老轨索引） | 本轮 | `idx_grape_t_obs_webhook_rejects_time_repo` 从冻结老轨 `_create_indexes()` 改为注册式迁移 `202611250006`（存量库才会执行） | `test_legacy_index_ddl_is_frozen` 转绿 |

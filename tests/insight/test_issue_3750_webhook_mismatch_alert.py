@@ -24,7 +24,7 @@ def _clean():
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM obs_webhook_rejects")
+        c.execute("DELETE FROM grape_t_obs_webhook_rejects")
         c.execute("DELETE FROM obs_alert_events WHERE rule_name=?", (RULE,))
         db.commit()
 
@@ -38,15 +38,20 @@ def _set_rule(name, **fields):
         db.commit()
 
 
+def _uuid():
+    import uuid
+    return uuid.uuid4().hex
+
+
 def _insert_rejects(repo_key, n, seconds_ago=0):
     from src.kernel.session_manager import db, db_lock
     ts = (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
     with db_lock:
         c = db.cursor()
         for _ in range(n):
-            c.execute("INSERT INTO obs_webhook_rejects (repo_key, provider, event, ip,"
-                      " token_fp, expected_fp, reason, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                      (repo_key, "gitcode", "Push Hook", "203.0.113.9",
+            c.execute("INSERT INTO grape_t_obs_webhook_rejects (id, repo_key, provider, event, ip,"
+                      " token_fp, expected_fp, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                      (_uuid(), repo_key, "gitcode", "Push Hook", "203.0.113.9",
                        "sha256:aaaaaaaaaaaa", "sha256:bbbbbbbbbbbb", "mismatch", ts))
         db.commit()
 
@@ -163,7 +168,7 @@ class TestLifecycle(_LedgerCase):
         from src.kernel.session_manager import db, db_lock
         old = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
         with db_lock:
-            db.cursor().execute("UPDATE obs_webhook_rejects SET created_at=?", (old,))
+            db.cursor().execute("UPDATE grape_t_obs_webhook_rejects SET created_at=?", (old,))
             db.commit()
         r = al.evaluate_rules()
         assert r["resolved"] >= 1, r
@@ -193,7 +198,7 @@ class TestLifecycle(_LedgerCase):
         from src.kernel.session_manager import db, db_lock
         old = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
         with db_lock:
-            db.cursor().execute("UPDATE obs_webhook_rejects SET created_at=?", (old,))
+            db.cursor().execute("UPDATE grape_t_obs_webhook_rejects SET created_at=?", (old,))
             db.commit()
         assert al._repo_metrics().get(REPO, {}).get("webhook_token_mismatch") is None, \
             "滑出存在期后该维度本轮不应再出现"

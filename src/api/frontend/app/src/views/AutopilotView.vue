@@ -971,7 +971,7 @@ import { providerFromRepoKey, repoKeyOf } from '../lib/repo-provider.js'
 import { stripRepoPrefix } from '../lib/repo-key.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 // Issue #3812：会话感知轮询器（401 停机 / 连续失败降频 / 会话事件订阅）
-import { createSessionPoller } from '../lib/pollGuard.js'
+import { createSessionPoller, DEGRADE_FACTOR } from '../lib/pollGuard.js'
 
 const G = globalThis
 
@@ -1065,9 +1065,12 @@ const detailCustomFields = ref([])
 // 停机时整表清空（Object.keys(logPollers).length === 0），恢复时按打开态重建。
 const sessionExpired = ref(false)
 const APV_LOG_POLL_INTERVAL_MS = 2000 // 日志弹窗
-const APV_LOG_POLL_DEGRADE_MS = 10000
 const APV_EXEC_POLL_INTERVAL_MS = 3000 // 执行卡片内联日志
-const APV_EXEC_POLL_DEGRADE_MS = 10000
+// 降频间隔与 pollGuard.DEGRADE_FACTOR 同源推导（2s→6s / 3s→9s），不再各自硬编码 10s。
+// 不直接用 POLL_DEGRADE_INTERVAL_MS(60s)：日志/执行是用户正在看的交互面板，1 分钟粒度
+// 会让「还在跑吗」不可见；60s 档留给后台列表类轮询。
+const APV_LOG_POLL_DEGRADE_MS = APV_LOG_POLL_INTERVAL_MS * DEGRADE_FACTOR
+const APV_EXEC_POLL_DEGRADE_MS = APV_EXEC_POLL_INTERVAL_MS * DEGRADE_FACTOR
 const logPollers = {}
 // 弹窗状态
 const dlg = reactive({

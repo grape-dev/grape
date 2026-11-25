@@ -2790,6 +2790,17 @@ def reset_repo_vcs_health(owner: str, repo: str,
     except Exception as exc:  # noqa: BLE001 - 缓存清理失败只是延迟 30s 生效，不影响写结果
         log.debug(f"vcs-health reset: runtime cache not dropped ({repo_key}): {exc}")
     after = {**cleared, **dict(get_repo_vcs_health(repo_key) or {})}
+    # C3（PR #2157 架构守护）：运维写操作必须可追溯操作者与 before/after；
+    # detail 只放状态字段，不含任何 token/凭据。
+    try:
+        from src.domains.mgmt.auth.audit import log_audit
+        log_audit("repos_vcs_health_reset", user_id=user["id"], operator_id=user["id"],
+                  detail=(f"repo={repo_key} before_status={before.get('vcs_status') or '-'} "
+                          f"before_fail={int(before.get('vcs_fail_count') or 0)} "
+                          f"after_status={after.get('vcs_status') or '-'} "
+                          f"after_fail={int(after.get('vcs_fail_count') or 0)}"))
+    except Exception as exc:  # noqa: BLE001 - 审计失败不改变运维操作结果，但必须留痕
+        log.warning(f"vcs-health reset: audit write failed ({repo_key}): {exc}")
     return {
         "repo_key": repo_key,
         "before": {"vcs_status": before.get("vcs_status") or "",

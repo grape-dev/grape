@@ -5,7 +5,7 @@
 
 契约（403 语义与响应体不变，只是把拒绝「说清楚 + 记下来」）：
   1. WARNING 带 `event=` / `reason=`（absent|mismatch）/ 两端指纹 / 来源 IP；
-  2. 每次 403 落一条 `obs_webhook_rejects`（repo_key/provider/event/ip/指纹/reason）；
+  2. 每次 403 落一条 `grape_t_obs_webhook_rejects`（repo_key/provider/event/ip/指纹/reason）；
   3. 落库链路异常**不影响** 403 返回（响应体与状态码不变）；
   4. 404 unmanaged 同样带 `event=` / `ip=`（不再只能靠 request_id 反查）。
 """
@@ -31,7 +31,7 @@ WRONG = "stale-secret-3750"
 def _clean():
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        db.cursor().execute("DELETE FROM obs_webhook_rejects")
+        db.cursor().execute("DELETE FROM grape_t_obs_webhook_rejects")
         db.commit()
 
 
@@ -40,7 +40,7 @@ def _rows(repo_key=REPO_KEY):
     with db_lock:
         c = db.cursor()
         c.execute("SELECT repo_key, provider, event, ip, token_fp, expected_fp, reason"
-                  " FROM obs_webhook_rejects WHERE repo_key=?", (repo_key,))
+                  " FROM grape_t_obs_webhook_rejects WHERE repo_key=?", (repo_key,))
         cols = [d[0] for d in c.description]
         return [dict(zip(cols, r)) for r in c.fetchall()]
 

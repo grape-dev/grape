@@ -835,7 +835,7 @@ def reject_reason(token: Any) -> str:
 
 def record_webhook_reject(repo_key: str, provider: str = "", event: str = "", ip: str = "",
                           token: str = "", expected: str = "") -> bool:
-    """记录一次 webhook 验签拒绝（#3750）：有界队列落 `obs_webhook_rejects` + 计数器自增。
+    """记录一次 webhook 验签拒绝（#3750）：有界队列落 `grape_t_obs_webhook_rejects` + 计数器自增。
 
     幂等键由调用方流量天然保证（每次 403 一条事实）；任何异常都不上抛，绝不改变 403 返回。
     """

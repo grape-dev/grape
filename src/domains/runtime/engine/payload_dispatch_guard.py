@@ -19,12 +19,13 @@ failed，autopilot 下一 tick 立刻新建 exec 再投同一份载荷（1 小�
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import datetime, timezone
 
 from src.kernel.config import log
 from src.kernel.db_registry import cursor_for as _rt_cursor_for
 
-TABLE = "autopilot_payload_guard"
+TABLE = "grape_t_autopilot_payload_guard"
 
 STATUS_ACTIVE = "active"
 STATUS_DEAD_LETTER = "dead_letter"
@@ -37,11 +38,14 @@ AUTOPILOT_EVENT_SEQ_BASE = 900_000_000
 
 _ENV_ENABLED = "GRAPE_AUTOPILOT_PAYLOAD_GUARD_ENABLED"
 _ENV_LIMIT = "GRAPE_AUTOPILOT_PAYLOAD_DISPATCH_LIMIT"
+#: 同载荷连续失败阈值：1 次可能是瞬时（探测/网络抖动），2 次仍可能同源抖动，
+#: 3 次即视为同一载荷的稳定复现（设计默认，env 可覆盖）。失败间隔分布尚未实测 →
+#: <undecided: 同载荷重复投递的失败间隔 P50/P95 实测>。
 DEFAULT_LIMIT = 3
 
 DDL = """
-CREATE TABLE IF NOT EXISTS autopilot_payload_guard (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS grape_t_autopilot_payload_guard (
+    id VARCHAR(32) NOT NULL PRIMARY KEY,
     payload_hash VARCHAR(64) NOT NULL,
     task_id INTEGER NOT NULL DEFAULT 0,
     repo_key VARCHAR(255) NOT NULL DEFAULT '',
@@ -151,10 +155,10 @@ def _upsert(payload_hash: str, task_id: int, repo_key: str,
             with _rt_cursor_for("runtime", write=True) as c:
                 c.execute(
                     "INSERT INTO " + TABLE + " "
-                    "(payload_hash, task_id, repo_key, dispatch_count, failure_count, "
+                    "(id, payload_hash, task_id, repo_key, dispatch_count, failure_count, "
                     "status, reason, first_seen_at, last_seen_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)",
-                    (payload_hash, int(task_id or 0), repo_key or "",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)",
+                    (uuid.uuid4().hex, payload_hash, int(task_id or 0), repo_key or "",
                      dispatch_inc, failure_inc, STATUS_ACTIVE, now, now, now))
             break
         except Exception as _e:  # noqa: BLE001 - 并发插入撞 UNIQUE → 回到 UPDATE

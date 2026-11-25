@@ -139,8 +139,18 @@ def test_ops_reset_clears_ledger_through_mgmt(monkeypatch):
         "src.domains.mgmt.user.db.resolve_managed_repo_key", lambda o, r: RK)
     monkeypatch.setattr("src.api.deps.check_repo_access", lambda user, rk: True)
 
+    # C3（PR #2157 架构守护）：运维写操作必须落审计（操作者 + before/after）
+    audits: list = []
+    import src.domains.mgmt.auth.audit as audit_mod
+    monkeypatch.setattr(audit_mod, "log_audit",
+                        lambda ev, **kw: audits.append((ev, kw)), raising=True)
+
     resp = repos_route.reset_repo_vcs_health("issue3759", "repo-vcs-health",
                                              user={"id": 3759})
+    assert [a[0] for a in audits] == ["repos_vcs_health_reset"], f"未落审计: {audits}"
+    detail = audits[0][1].get("detail") or ""
+    assert RK in detail and "before_status=vcs_missing" in detail and "after_status=ok" in detail
+    assert "token" not in detail.lower(), f"审计 detail 不应含凭据字样: {detail}"
     assert resp["repo_key"] == RK
     assert resp["before"]["vcs_status"] == "vcs_missing"
     assert resp["after"]["vcs_status"] == "ok"

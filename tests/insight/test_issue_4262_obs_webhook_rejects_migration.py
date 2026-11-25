@@ -1,4 +1,4 @@
-"""Issue #4262 / PR #2157 复审 C2 + R1：`obs_webhook_rejects` 存量库注册式建表。
+"""Issue #4262 / PR #2157 复审 C2 + R1：`grape_t_obs_webhook_rejects` 存量库注册式建表。
 
 事故（C2）：本表此前**只**登记在 `db_setup._NEW_TABLES`，而 `_create_tables()` 只在新装库
 首跑——存量库启动不跑它，于是 202611250006 的 `CREATE INDEX` 每次 1146（no such table）、
@@ -125,8 +125,8 @@ def test_verify_table_rejects_absent_table(tmp_path):
 def test_verify_migration_targets_reports_insight_drift(monkeypatch):
     """insight 检查项接进启动失败清单（否则「台账盖章但目标缺失」只剩日志静默）。"""
     def _boom(conn=None):
-        raise RuntimeError("obs_webhook_rejects 缺失")
+        raise RuntimeError("grape_t_obs_webhook_rejects 缺失")
 
     monkeypatch.setattr(wr, "verify_time_index", _boom)
     failures = D.verify_migration_targets(domain="insight")
-    assert any("insight obs_webhook_rejects" in f for f in failures), failures
+    assert any("insight grape_t_obs_webhook_rejects" in f for f in failures), failures

@@ -736,8 +736,8 @@ _WEBHOOK_INBOX_INDEXES = (
 # 调度器在「建 execution 之前」按归一化 payload hash 计数，超阈值停派并告警；
 # fake completion 降级 failed 也写同一行（failure_count），避免拒绝被无限重试放大。
 _AUTOPILOT_PAYLOAD_GUARD_DDL = """
-CREATE TABLE IF NOT EXISTS autopilot_payload_guard (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS grape_t_autopilot_payload_guard (
+    id VARCHAR(32) NOT NULL PRIMARY KEY,
     payload_hash VARCHAR(64) NOT NULL,
     task_id INTEGER NOT NULL DEFAULT 0,
     repo_key VARCHAR(255) NOT NULL DEFAULT '',

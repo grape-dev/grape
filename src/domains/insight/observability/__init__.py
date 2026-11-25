@@ -389,7 +389,7 @@ REPO_DISPATCH_BUSY = Counter(
 )
 
 # Issue #3750：webhook 验签拒绝计数（token 不匹配 / 未带 token），按仓库一维。
-# 语义：一次 403 拒绝 = 一次自增；与落库 `obs_webhook_rejects` 同源不同路
+# 语义：一次 403 拒绝 = 一次自增；与落库 `grape_t_obs_webhook_rejects` 同源不同路
 # （落库失败仍计数，指标反映真实拒绝量）。deploy/alerts.yml 的
 # GrapeWebhookTokenMismatch 消费本指标；应用内按仓库速率规则见 alerts.SEED_RULES。
 WEBHOOK_TOKEN_MISMATCH_TOTAL = Counter(

@@ -25,7 +25,7 @@
 1. **403 拒绝日志可诊断化（补全）**：`repo`、`event`、`ip`（附 `xff`）、`token_fp`/`expected_fp`
    （`sha256:` 短指纹，实收/期望两侧都记）、`reason=absent|mismatch`；404 unmanaged 分支补
    `event`/`ip`（GitHub 入口同时可拿到 client host）。
-2. **拒绝事实落库** `obs_webhook_rejects`：token 比对 403 每次落一行（`repo_key`/`event`/`ip`/
+2. **拒绝事实落库** `grape_t_obs_webhook_rejects`：token 比对 403 每次落一行（`repo_key`/`event`/`ip`/
    `token_fp`/`expected_fp`/`reason`/`provider`/`created_at`），支撑速率统计与「哪条旧 secret 在发事件」反查。
    例外：GitHub 的 `X-Hub-Signature-256` **签名**不一致 403 不是 token 比对（无 token 指纹可比），
    只补日志（`repo`/`event`/`ip`/`body_size`），不落拒绝行、不计入速率告警。
@@ -44,7 +44,7 @@
 - [ ] 404 unmanaged 日志含 `event`/`ip`（GitCode 与 GitHub 两个入口均如此）
 - [ ] 日志与落库均无完整 token 及任意长度前缀/子串；#860 / #3897 回归用例全绿
 - [ ] 403 响应体 `{"code":403,"message":"invalid webhook token"}` 与 `compare_digest` 校验不变
-- [ ] token 比对 403 每次落一条 `obs_webhook_rejects`（GitHub 签名不一致 403 除外，见 §2 例外）；
+- [ ] token 比对 403 每次落一条 `grape_t_obs_webhook_rejects`（GitHub 签名不一致 403 除外，见 §2 例外）；
       写库异常/队满不影响 403 返回（有界队列丢弃并计数）
 - [ ] 60s 内 >10 次且持续 5 分钟 → firing（`warning`, `repo:<repo_key>`）；回落 resolved；跨仓库不聚合
 - [ ] `promtool check rules deploy/alerts.yml` 通过；种子规则可幂等 seed
@@ -56,7 +56,7 @@
 |------|------|------|
 | 指纹形式 | `sha256(token)[:12]` + `sha256:` 前缀 | 复用 #3897 已验收形态，不可逆、恒长、可区分新旧 secret |
 | 指纹归属 | 收敛到 insight 的 `webhook_rejects.token_fingerprint`，路由侧保留同名薄包装 | 单一实现，避免落库与日志两套口径漂移 |
-| 拒绝事实载体 | 新建 `obs_webhook_rejects` | `obs_log` 按文本检索，无法高效做窗口计数 |
+| 拒绝事实载体 | 新建 `grape_t_obs_webhook_rejects` | `obs_log` 按文本检索，无法高效做窗口计数 |
 | 写入方式 | 有界队列 + daemon 线程批量落库（队满丢弃计数） | 403 在请求路径上，绝不能阻塞事件循环/拖慢拒绝 |
 | 告警维度 | 按仓库（`repo:<repo_key>`） | 全局计数会被正常流量稀释导致漏报 |
 | 403 行为 | 保持拒绝 | 安全优先，降级放行等于关闭鉴权 |
@@ -65,7 +65,7 @@
 
 | 模块 | 改动类型 |
 |------|---------|
-| `src/domains/insight/schema_ddl.py` + `src/api/db_setup.py` | 新增 `obs_webhook_rejects` DDL 与建表登记 |
+| `src/domains/insight/schema_ddl.py` + `src/api/db_setup.py` | 新增 `grape_t_obs_webhook_rejects` DDL 与建表登记 |
 | `src/domains/insight/observability/webhook_rejects.py` | 新增：指纹、拒绝台账写入（有界队列）、窗口计数、留存清理 |
 | `src/domains/insight/public/__init__.py` | 对外暴露 `token_fingerprint` / `record_webhook_reject` |
 | `src/domains/runtime/routes/webhook.py` | 403 落库 + 日志补 `event`/`reason`；404 补 `event`/`ip` |

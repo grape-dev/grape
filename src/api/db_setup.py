@@ -564,7 +564,7 @@ CREATE TABLE IF NOT EXISTS user_feedback (
     # ===== Issue #150: Autopilot 定时自动化任务表 =====
     ("autopilot_tasks", _AUTOPILOT_TASKS_DDL),
     ("autopilot_executions", _AUTOPILOT_EXECUTIONS_DDL),
-    ("autopilot_payload_guard", _AUTOPILOT_PAYLOAD_GUARD_DDL),
+    ("grape_t_autopilot_payload_guard", _AUTOPILOT_PAYLOAD_GUARD_DDL),
     ("autopilot_subscriptions", _AUTOPILOT_SUBSCRIPTIONS_DDL),
 ]
 
@@ -654,7 +654,7 @@ _NEW_TABLES.extend([
 # 403 token mismatch 的每次拒绝落一行，供「同仓库 mismatch 速率」告警与
 # (ip, token_fp) 反查残留旧 secret；只存 sha256 短指纹，不存明文/前缀。
 _NEW_TABLES.extend([
-    ("obs_webhook_rejects", _OBS_WEBHOOK_REJECTS_DDL),
+    ("grape_t_obs_webhook_rejects", _OBS_WEBHOOK_REJECTS_DDL),
 ])
 
 # 需要 org_id 列的核心表
@@ -4800,7 +4800,7 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
                 )
                 verify_webhook_rejects_index()
             except Exception as e:  # noqa: BLE001
-                failures.append(f"insight obs_webhook_rejects 表/时间窗索引后置校验失败: {e}")
+                failures.append(f"insight grape_t_obs_webhook_rejects 表/时间窗索引后置校验失败: {e}")
     if failures:
         msg = "迁移目标后置校验失败（台账与目标不一致，需按域重跑）: " + "; ".join(failures)
         log.error(msg)
@@ -4808,7 +4808,7 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
             raise RuntimeError(msg)
     else:
         log.info("迁移目标后置校验通过（分类一级集合 / skill 分类列 / organization 仓库列"
-                 " / autopilot 状态列默认值 / obs_webhook_rejects 时间窗索引）")
+                 " / autopilot 状态列默认值 / grape_t_obs_webhook_rejects 时间窗索引）")
     return failures
 
 
@@ -12805,24 +12805,24 @@ register_migration(
     fn=_fn_add_agent_tasks_event_seq_status_index,
 )
 
-def _fn_create_autopilot_payload_guard_table() -> None:
-    """Issue #3818：存量库补建 runtime 域表 autopilot_payload_guard。
+def _fn_create_grape_t_autopilot_payload_guard_table() -> None:
+    """Issue #3818：存量库补建 runtime 域表 grape_t_autopilot_payload_guard。
 
     autopilot 定时任务反复投递同一份凭据外传载荷（1h 66 次、88+ 轮），调度侧无
     dead-letter / 熔断。台账表归 runtime，由 owner 连接建；CREATE IF NOT EXISTS 幂等，
     存量库重跑零写入（调度器首次使用还有一层惰性建表兜底）。
     """
-    if _owned_skip("autopilot_payload_guard", "create table"):
+    if _owned_skip("grape_t_autopilot_payload_guard", "create table"):
         return
     conn = _migration_conn("runtime")
     with (db_lock if conn is db else nullcontext()):
         c = conn.cursor()
-        if not _table_present(c, "autopilot_payload_guard"):
+        if not _table_present(c, "grape_t_autopilot_payload_guard"):
             c.execute(_AUTOPILOT_PAYLOAD_GUARD_DDL)
         conn.commit()
 
 
-def _postcheck_create_autopilot_payload_guard_table() -> None:
+def _postcheck_create_grape_t_autopilot_payload_guard_table() -> None:
     """post_check：台账表在位才盖章（Issue #3818 / PR #2157 复审 Critical）。
 
     建表 fn 是「表在则零写」，但执行器以「fn 正常返回 = 盖章」为约定：没有后置
@@ -12830,15 +12830,15 @@ def _postcheck_create_autopilot_payload_guard_table() -> None:
     本迁移曾是 202611250001 的四条同号迁移里**唯一没有 post_check** 的一条，
     不收敛也只能靠日志发现，故补上：表缺失即 raise，不盖章、下次启动重试。
     """
-    if _owned_skip("autopilot_payload_guard", "post_check"):
+    if _owned_skip("grape_t_autopilot_payload_guard", "post_check"):
         return
     conn = _migration_conn("runtime")
     cursor = conn.cursor()
     # 不显式关游标（与建表 fn / verify_repo_vcs_health_columns 同口径）：池化连接上
     # close 失败会掩盖校验结论，而 arch 静默 except 棘轮也不允许为此新增吞异常。
-    if not _table_present(cursor, "autopilot_payload_guard"):
+    if not _table_present(cursor, "grape_t_autopilot_payload_guard"):
         raise RuntimeError(
-            "autopilot_payload_guard 缺失（建表迁移未生效，不盖章，下次启动重试）")
+            "grape_t_autopilot_payload_guard 缺失（建表迁移未生效，不盖章，下次启动重试）")
 
 
 register_migration(
@@ -12849,12 +12849,35 @@ register_migration(
     name="create-autopilot-payload-guard-table",
     kind="safe",
     domains=("runtime",),
-    fn=_fn_create_autopilot_payload_guard_table,
-    post_check=_postcheck_create_autopilot_payload_guard_table,
+    fn=_fn_create_grape_t_autopilot_payload_guard_table,
+    post_check=_postcheck_create_grape_t_autopilot_payload_guard_table,
 )
 
 
-# ===== Issue #3750：obs_webhook_rejects 建表 + (created_at, repo_key) 时间窗索引 =====
+def _migration_202611250011_payload_guard_uuid_pk() -> None:
+    """A6/A12：旧表（自增 id、无 grape_t_ 前缀）→ `grape_t_autopilot_payload_guard`（UUID 主键）。"""
+    from src.domains.runtime.migrations.payload_guard_uuid_pk import migrate
+
+    migrate()
+
+
+def _postcheck_202611250011_payload_guard_uuid_pk() -> None:
+    from src.domains.runtime.migrations.payload_guard_uuid_pk import converged
+
+    converged()
+
+
+register_migration(
+    version="202611250011",
+    name="payload-guard-uuid-pk",
+    kind="cleanup",
+    domains=("runtime",),
+    fn=_migration_202611250011_payload_guard_uuid_pk,
+    post_check=_postcheck_202611250011_payload_guard_uuid_pk,
+)
+
+
+# ===== Issue #3750：grape_t_obs_webhook_rejects 建表 + (created_at, repo_key) 时间窗索引 =====
 # 该索引此前只写在**冻结老轨** `_create_indexes()` 里：存量库已盖 legacy-stamp
 # 202610300001，启动时不跑老轨，于是 #3750 的「按时间窗计数」（告警求值 + 14 天
 # 留存清理都是 `WHERE created_at >= ?`）在生产实际仍是全表扫 —— 正是
@@ -12871,10 +12894,10 @@ register_migration(
 #     在位（台账已盖章/建表被跳过的库也能补齐），post_check 复核表 + 索引。
 # SQL 住属主域（insight）：`webhook_rejects.ensure_table / ensure_time_index / verify_*`。
 from src.domains.insight.observability.webhook_rejects import (  # noqa: E402
-    ensure_table as _fn_obs_webhook_rejects_table,
-    verify_table as _postcheck_obs_webhook_rejects_table,
-    ensure_time_index as _fn_obs_webhook_rejects_time_index,
-    verify_time_index as _postcheck_obs_webhook_rejects_time_index,
+    ensure_table as _fn_grape_t_obs_webhook_rejects_table,
+    verify_table as _postcheck_grape_t_obs_webhook_rejects_table,
+    ensure_time_index as _fn_grape_t_obs_webhook_rejects_time_index,
+    verify_time_index as _postcheck_grape_t_obs_webhook_rejects_time_index,
 )
 
 register_migration(
@@ -12882,8 +12905,8 @@ register_migration(
     name="create-obs-webhook-rejects-table",
     kind="safe",
     domains=("insight",),
-    fn=_fn_obs_webhook_rejects_table,
-    post_check=_postcheck_obs_webhook_rejects_table,
+    fn=_fn_grape_t_obs_webhook_rejects_table,
+    post_check=_postcheck_grape_t_obs_webhook_rejects_table,
 )
 
 register_migration(
@@ -12891,8 +12914,33 @@ register_migration(
     name="obs-webhook-rejects-time-repo-index",
     kind="safe",
     domains=("insight",),
-    fn=_fn_obs_webhook_rejects_time_index,
-    post_check=_postcheck_obs_webhook_rejects_time_index,
+    fn=_fn_grape_t_obs_webhook_rejects_time_index,
+    post_check=_postcheck_grape_t_obs_webhook_rejects_time_index,
+)
+
+
+# ===== PR #2157 架构守护：表名前缀 + 字符串 UUID 主键（A6/A12）=====
+# 旧表（自增 id、无 grape_t_ 前缀）若已落库，搬行到新表并生成 UUID 主键后 DROP 旧表；
+# 未落库的库由 schema_ddl 的 CREATE IF NOT EXISTS 直接建新表，本迁移空转即盖章。
+def _migration_202611250010_webhook_rejects_uuid_pk() -> None:
+    from src.domains.insight.migrations.webhook_rejects_uuid_pk import migrate
+
+    migrate()
+
+
+def _postcheck_202611250010_webhook_rejects_uuid_pk() -> None:
+    from src.domains.insight.migrations.webhook_rejects_uuid_pk import converged
+
+    converged()
+
+
+register_migration(
+    version="202611250010",
+    name="webhook-rejects-uuid-pk",
+    kind="cleanup",   # 内含 DROP TABLE（危险 DDL，只走 _destructive_ddl）
+    domains=("insight",),
+    fn=_migration_202611250010_webhook_rejects_uuid_pk,
+    post_check=_postcheck_202611250010_webhook_rejects_uuid_pk,
 )
 
 

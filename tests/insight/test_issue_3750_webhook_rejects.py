@@ -1,4 +1,4 @@
-"""Issue #3750：webhook 验签拒绝事实台账（`obs_webhook_rejects`）。
+"""Issue #3750：webhook 验签拒绝事实台账（`grape_t_obs_webhook_rejects`）。
 
 钉死四件容易回归的事：
 1. **只存指纹不存明文**：`token_fp`/`expected_fp` 恒为 `sha256:<12>` 或 `absent`，
@@ -21,10 +21,15 @@ EXPECTED = "expected-secret-3750"
 WRONG = "stale-secret-3750"
 
 
+def _uuid():
+    import uuid
+    return uuid.uuid4().hex
+
+
 def _clean():
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        db.cursor().execute("DELETE FROM obs_webhook_rejects")
+        db.cursor().execute("DELETE FROM grape_t_obs_webhook_rejects")
         db.commit()
 
 
@@ -33,7 +38,7 @@ def _rows(repo_key=REPO):
     with db_lock:
         c = db.cursor()
         c.execute("SELECT repo_key, provider, event, ip, token_fp, expected_fp, reason,"
-                  " created_at FROM obs_webhook_rejects WHERE repo_key=?", (repo_key,))
+                  " created_at FROM grape_t_obs_webhook_rejects WHERE repo_key=?", (repo_key,))
         cols = [d[0] for d in c.description]
         return [dict(zip(cols, r)) for r in c.fetchall()]
 
@@ -42,9 +47,9 @@ def _insert(repo_key, created_at, token_fp="sha256:aaaaaaaaaaaa"):
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         db.cursor().execute(
-            "INSERT INTO obs_webhook_rejects (repo_key, provider, event, ip, token_fp,"
-            " expected_fp, reason, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (repo_key, "gitcode", "Push Hook", "203.0.113.9", token_fp,
+            "INSERT INTO grape_t_obs_webhook_rejects (id, repo_key, provider, event, ip,"
+            " token_fp, expected_fp, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (_uuid(), repo_key, "gitcode", "Push Hook", "203.0.113.9", token_fp,
              "sha256:bbbbbbbbbbbb", "mismatch", created_at))
         db.commit()
 
@@ -223,19 +228,19 @@ class TestSchemaRegistration:
     def test_ddl_registered_for_creation(self):
         from src.api import db_setup
         names = {n for n, _ddl in db_setup._NEW_TABLES}
-        assert "obs_webhook_rejects" in names
+        assert "grape_t_obs_webhook_rejects" in names
 
     def test_table_exists_after_init(self):
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             row = db.cursor().execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
-                " AND name='obs_webhook_rejects'").fetchone()
+                " AND name='grape_t_obs_webhook_rejects'").fetchone()
         assert row is not None
 
     def test_owner_is_insight(self):
         from src.kernel import table_ownership as own
-        assert own.owner_of("obs_webhook_rejects") == "insight"
+        assert own.owner_of("grape_t_obs_webhook_rejects") == "insight"
 
     def test_index_covers_time_range_then_repo(self):
         """窗口计数与留存清理都是 `WHERE created_at >= / <`（不带 repo_key 等值），
@@ -244,7 +249,7 @@ class TestSchemaRegistration:
         with db_lock:
             rows = db.cursor().execute(
                 "SELECT name, sql FROM sqlite_master WHERE type='index'"
-                " AND name='idx_obs_webhook_rejects_time_repo'").fetchall()
+                " AND name='idx_grape_t_obs_webhook_rejects_time_repo'").fetchall()
         assert rows, "缺 (created_at, repo_key) 索引：窗口计数会全表扫"
         sql = (rows[0][1] or "").replace(" ", "").lower()
         assert "(created_at,repo_key)" in sql, sql

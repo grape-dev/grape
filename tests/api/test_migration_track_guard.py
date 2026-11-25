@@ -368,7 +368,7 @@ def test_create_table_migration_must_carry_post_check(monkeypatch):
     monkeypatch.setattr(ds, "_table_present", lambda c, table: False)
     with pytest.raises(RuntimeError) as ei:
         mig.post_check()
-    assert "autopilot_payload_guard" in str(ei.value)
+    assert "grape_t_autopilot_payload_guard" in str(ei.value)
 
     monkeypatch.setattr(ds, "_table_present", lambda c, table: True)
     mig.post_check()  # 表在位 → 不抛（盖章放行）

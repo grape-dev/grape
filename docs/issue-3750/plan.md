@@ -2,17 +2,17 @@
 
 ## 1. 结论
 
-代码侧交付三件事：**拒绝事实落库**（`obs_webhook_rejects`）、**按仓库速率告警**（insight 指标 +
+代码侧交付三件事：**拒绝事实落库**（`grape_t_obs_webhook_rejects`）、**按仓库速率告警**（insight 指标 +
 种子规则 + Prometheus 规则）、**拒绝日志字段补全**（`event`/`reason`，404 补 `event`/`ip`）。
 403 的 token 指纹（#3897）与 `hmac.compare_digest`（#860）保持现状，一张表 + 一条规则 + 一处日志
 收口，不引入新链路。
 
 ## 2. 数据层
 
-### 2.1 表 `obs_webhook_rejects`（归 insight 域）
+### 2.1 表 `grape_t_obs_webhook_rejects`（归 insight 域）
 
 ```sql
-CREATE TABLE IF NOT EXISTS obs_webhook_rejects (
+CREATE TABLE IF NOT EXISTS grape_t_obs_webhook_rejects (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_key    TEXT NOT NULL DEFAULT '',   -- gitcode:owner/repo
     provider    TEXT NOT NULL DEFAULT '',   -- gitcode / github

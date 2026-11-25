@@ -126,7 +126,7 @@ def _token_fingerprint(value: str) -> str:
     absent = 平台没带）。绝不打印明文（验收 C-3）。
 
     Issue #3750：指纹实现收敛到 `insight.webhook_rejects.token_fingerprint`——日志与落库
-    （`obs_webhook_rejects.token_fp/expected_fp`）必须是**同一套**口径，否则按日志查表会错配。
+    （`grape_t_obs_webhook_rejects.token_fp/expected_fp`）必须是**同一套**口径，否则按日志查表会错配。
     本函数只保留薄包装（#3897 源级用例断言的是这个名字）。
     """
     from src.domains.insight.public import token_fingerprint
@@ -1192,7 +1192,7 @@ async def _process_github_webhook(body: bytes, headers, request: Optional[Reques
     """GitHub Webhook 核心处理逻辑（body 已消费，直接传入）。
 
     `request` 可选：路由入口传入后即可拿到 `client.host`，使 403/404 日志与
-    `obs_webhook_rejects.ip` 与 GitCode 入口同口径（否则该列恒空、无法按来源反查残留 hook）。
+    `grape_t_obs_webhook_rejects.ip` 与 GitCode 入口同口径（否则该列恒空、无法按来源反查残留 hook）。
     直接调用的测试/内部路径不传时退化为空 IP（行为与改造前一致）。
     """
     event_header = headers.get("X-GitHub-Event", "unknown")

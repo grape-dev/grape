@@ -245,8 +245,8 @@ CREATE TABLE IF NOT EXISTS obs_log (
 # 只存 sha256 短指纹，**绝不存明文 token / 任意长度前缀**（#860 脱敏口径，#3750 验收）。
 # created_at 由写入方统一写 ISO(UTC)：字符串比较即时间比较（SQLite/MySQL 同语义）。
 _OBS_WEBHOOK_REJECTS_DDL = """
-CREATE TABLE IF NOT EXISTS obs_webhook_rejects (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS grape_t_obs_webhook_rejects (
+    id          VARCHAR(32) NOT NULL PRIMARY KEY,
     repo_key    TEXT NOT NULL DEFAULT '',
     provider    TEXT NOT NULL DEFAULT '',
     event       TEXT NOT NULL DEFAULT '',

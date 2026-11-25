@@ -49,7 +49,13 @@ export function pollIntervalFor(action) {
 export const SESSION_EXPIRED_EVENT = 'grape:session-expired'
 export const SESSION_RESTORED_EVENT = 'grape:session-restored'
 
-/** 缺省降频倍数（PR #2157 复审 C3 数值证据门）：无显式 degradeIntervalMs 时按 base × 3 放大。 */
+/**
+ * 缺省降频倍数（PR #2157 复审 C3 数值证据门）：无显式 degradeIntervalMs 时按 base × 3 放大。
+ *
+ * 依据：非 401 连续失败一次即说明后端/网络异常，3 倍是「还能自愈」与「少打扰后端」的
+ * 折中（5s→15s、2s→6s、3s→9s）；再大则恢复感知超过 10s 量级，再小则几乎不减负。
+ * 401 速率与轮询命中率未实测 → <undecided: 401 速率 / 轮询命中率实测>。
+ */
 export const DEGRADE_FACTOR = 3
 
 /** 高频轮询的降频步长：显式值优先（5s→15s / 2s→10s / 3s→10s），缺省按 base × DEGRADE_FACTOR。 */

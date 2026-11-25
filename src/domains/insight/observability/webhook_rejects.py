@@ -1,4 +1,4 @@
-"""Webhook 验签拒绝事实（`obs_webhook_rejects`）——Issue #3750。
+"""Webhook 验签拒绝事实（`grape_t_obs_webhook_rejects`）——Issue #3750。
 
 背景：`grape-dev/grape` 1 小时内 54 次 `Webhook rejected: token mismatch`（403）。同仓库仍有
 正常事件通过，说明是「同一仓库配了多条 webhook、残留旧 secret」的配置侧问题；webhook 无重放，
@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 import os
 import queue
 import threading
@@ -32,11 +33,17 @@ from src.kernel.config import log
 
 #: 拒绝行留存期（与 obs_log 的 14 天对齐；只服务速率告警与近期排障）
 RETENTION_DAYS = 14
-#: 清理最多每小时一次（由采样循环调用 maybe_cleanup）
+#: 清理最多每小时一次（由采样循环调用 maybe_cleanup）：留存 14 天与 obs_log 对齐，
+#: 单小时最多清掉 1/336 的窗口，DELETE 规模受留存窗口约束，不随 403 速率线性放大。
+#: 403 峰值速率未实测 → <undecided: 峰值 403 速率与单轮 DELETE 行数实测>。
 CLEANUP_INTERVAL_SEC = 3600
-#: 队列上限：宁可丢诊断行，也不在请求路径上排队
+#: 队列上限：宁可丢诊断行，也不在请求路径上排队。1024 行 × 单行 ~200B ≈ 200KB 内存，
+#: 相对 1 次 403 突发（单请求 1 行）留 3 个数量级余量；峰值 QPS 未实测 →
+#: <undecided: 403 峰值 QPS 与突发行数实测>。
 QUEUE_MAXSIZE = 1024
-#: 单批落库上限
+#: 单批落库上限：executemany 一批 100 行 = SQLite/MySQL 各一次往返；批量再大对
+#: 单行 200B 的诊断行无收益。落库吞吐未实测 →
+#: <undecided: 单批 100 行的落库耗时实测>。
 BATCH_SIZE = 100
 
 #: 写入模式：`1`（默认）= 有界队列 + 后台线程；`sync` = 同步落库（测试/无法起后台线程
@@ -49,9 +56,11 @@ _SYNC_MODE = _MODE == "sync"
 #: 拒绝原因取值——absent=请求没带 token；mismatch=带了但与托管配置不一致
 REASONS = ("absent", "mismatch")
 
-_INSERT_SQL = ("INSERT INTO obs_webhook_rejects "
-               "(repo_key, provider, event, ip, token_fp, expected_fp, reason, created_at) "
-               "VALUES (?,?,?,?,?,?,?,?)")
+#: 主键为字符串 UUID（A12：新增表禁自增 id，多实例/分库汇总时 id 需全局唯一）。
+#: 由写入方生成 uuid4().hex（32 位），SQLite/MySQL 同宽。
+_INSERT_SQL = ("INSERT INTO grape_t_obs_webhook_rejects "
+               "(id, repo_key, provider, event, ip, token_fp, expected_fp, reason, created_at) "
+               "VALUES (?,?,?,?,?,?,?,?,?)")
 
 
 def token_fingerprint(value: Any) -> str:
@@ -87,6 +96,8 @@ def _write_rows(rows: List[tuple]) -> bool:
     """
     if not rows:
         return True
+    # A12：字符串 UUID 主键由写入方生成（一次批量内逐行唯一，跨实例不撞号）
+    rows = [(uuid.uuid4().hex,) + tuple(r) for r in rows]
     try:
         from src.kernel.db_registry import cursor_for
 
@@ -254,7 +265,7 @@ def count_recent_split(cursor, window_sec: float = 60.0,
     presence_cutoff = _iso_before(seconds=presence_sec)
     cursor.execute("SELECT repo_key,"
                    " SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END)"
-                   " FROM obs_webhook_rejects"
+                   " FROM grape_t_obs_webhook_rejects"
                    " WHERE created_at >= ? GROUP BY repo_key",
                    (window_cutoff, presence_cutoff))
     out: Dict[str, int] = {}
@@ -287,7 +298,7 @@ def maybe_cleanup(interval: int = CLEANUP_INTERVAL_SEC, days: int = RETENTION_DA
         from src.kernel.db_registry import cursor_for
 
         with cursor_for("insight", write=True) as c:
-            c.execute("DELETE FROM obs_webhook_rejects WHERE created_at != ''"
+            c.execute("DELETE FROM grape_t_obs_webhook_rejects WHERE created_at != ''"
                       " AND created_at < ?", (cutoff,))
             n = int(c.rowcount or 0)
         if n:
@@ -302,13 +313,13 @@ def maybe_cleanup(interval: int = CLEANUP_INTERVAL_SEC, days: int = RETENTION_DA
 # 建表/建索引语句若写在 `src/api/db_setup.py` 会被 tests/arch/test_foreign_table_refs.py
 # 判成 api 层新增跨域引用；注册（register_migration）仍由 db_setup 做，本模块只导出实现。
 #
-# 事故形态（PR #2157 复审 C2）：obs_webhook_rejects 此前只登记在 `_NEW_TABLES`，
+# 事故形态（PR #2157 复审 C2）：grape_t_obs_webhook_rejects 此前只登记在 `_NEW_TABLES`，
 # 而 `_create_tables()` 只在新装库首跑——存量库启动不跑它，于是 202611250006 的
 # `CREATE INDEX` 每次都 1146（no such table），失败不盖章、每次启动重试，写侧也只剩
 # 「obs webhook rejects ingest failed」WARNING 丢诊断行。
 
-TABLE = "obs_webhook_rejects"
-TIME_INDEX = "idx_obs_webhook_rejects_time_repo"
+TABLE = "grape_t_obs_webhook_rejects"
+TIME_INDEX = "idx_grape_t_obs_webhook_rejects_time_repo"
 #: MySQL 索引前缀长度：repo_key / created_at 是 TEXT，不带前缀会 1170。
 _MYSQL_INDEX_PREFIX = 191
 
