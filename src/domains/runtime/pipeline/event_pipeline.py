@@ -145,14 +145,27 @@ def _get_issue_creator(repo_key: str, issue_number: str) -> str:
 
 def _resolve_account_chain(candidates: list, repo_key: str, issue_number: str,
                            event_type: str = "", repository: str = "",
-                           fallback: str = "", extra: dict = None) -> str:
+                           fallback: str = "", extra: dict = None,
+                           allow_owner_fallback: bool = False,
+                           alert: bool = True) -> str:
     """Issue #1819: ACCOUNT 公共回退链（候选校形 → Issue creator → 结构化告警）。
 
     ``candidates`` 为 (来源标签, 原始值) 列表；非法候选（非空但含 ``/`` / ``\\`` /
     空白）被拒绝后继续回退，最终仍不可得则留空并输出 ``ACCOUNT_MISSING``。
     ``event_pipeline.resolve_actor_account`` 与 ``build_task_env`` 共用本实现，
     避免手写回退链与告警字段双实现漂移。
+
+    ``allow_owner_fallback``（Issue #3905）：仅无 actor 的 autopilot 路径显式放行
+    「回退仓库属主」——此时三级回退（actor → payload.account → issue_creator）全空
+    才会命中，命中输出 ``ACCOUNT_OWNER_FALLBACK``（info）留审计；人工/事件驱动路径
+    保持默认 False（Issue #1819 语义：禁止把仓库属主当成触发人）。
+
+    ``alert=False``（Issue #3905）：调用方已用带事件上下文的 ``resolve_actor_account``
+    做过权威解析与告警（直连/失败快照），这里只取值不再重复告警，避免同一任务两条
+    ``ACCOUNT_MISSING``。
     """
+    from src.domains.runtime.pipeline.account_env import owner_account_for_repo
+
     rejected = []
     account = ""
     for name, raw in candidates:
@@ -166,7 +179,14 @@ def _resolve_account_chain(candidates: list, repo_key: str, issue_number: str,
     if not account:
         account = _normalize_account(_get_issue_creator(repo_key, issue_number))
 
+    owner_fallback_used = False
+    if not account and allow_owner_fallback:
+        account = owner_account_for_repo(repo_key)
+        owner_fallback_used = bool(account)
+
     _extra = extra or {}
+    if not alert:
+        return account
     if rejected:
         _log_account_alert(
             "ACCOUNT_INVALID",
@@ -178,6 +198,18 @@ def _resolve_account_chain(candidates: list, repo_key: str, issue_number: str,
             resolved=bool(account),
             **_extra,
         )
+    if owner_fallback_used:
+        # 审计口径：owner 回退不是「正常认人」，必须可区分（Issue #1819 安全语义）
+        _log_account_alert(
+            "ACCOUNT_OWNER_FALLBACK",
+            level="info",
+            event_type=event_type or "unknown",
+            issue_number=issue_number,
+            repository=repository,
+            repo_key=repo_key,
+            account_source="repo_owner",
+            **_extra,
+        )
     if not account:
         _log_account_alert(
             "ACCOUNT_MISSING",
@@ -185,14 +217,15 @@ def _resolve_account_chain(candidates: list, repo_key: str, issue_number: str,
             issue_number=issue_number,
             repository=repository,
             repo_key=repo_key,
-            fallback=fallback,
-            owner_fallback=False,
+            fallback=(fallback + "->repo_owner") if allow_owner_fallback else fallback,
+            owner_fallback=allow_owner_fallback,
             **_extra,
         )
     return account
 
 
-def resolve_actor_account(evt: dict, repo_key: str = "") -> str:
+def resolve_actor_account(evt: dict, repo_key: str = "",
+                          allow_owner_fallback: bool | None = None) -> str:
     """Issue #1668/#1819: 统一解析 ACCOUNT/actor（a2a_event 兜底链）。
 
     优先级：a2a_event 为 payload.account → evt.actor → Issue creator；
@@ -200,12 +233,18 @@ def resolve_actor_account(evt: dict, repo_key: str = "") -> str:
     所有候选值均过账号形态校验（非空且不含 ``/``），非法值（如仓库全名）
     被拒绝后继续回退；仍为空时输出结构化告警（event_type/issue_number），
     **禁止回退仓库属主**。
+
+    Issue #3905：``allow_owner_fallback`` 显式控制「回退仓库属主」；
+    传 None 时按事件类型自动判定——仅 ``autopilot_event``（无 actor 的定时派发）
+    放行，其余事件默认禁止（保留 #1819 安全语义）。
     结果不写入 evt 缓存：Issue 建档前解析为空不应被永久缓存（下次调用会重新查库）。
     """
     if not isinstance(evt, dict):
         evt = {}
     payload = evt.get("payload") if isinstance(evt.get("payload"), dict) else {}
     event_type = str(evt.get("type") or evt.get("event_type") or "")
+    if allow_owner_fallback is None:
+        allow_owner_fallback = event_type.strip().lower().startswith("autopilot")
     issue_number = str(
         payload.get("issue_number")
         or evt.get("issue_id")
@@ -226,7 +265,7 @@ def resolve_actor_account(evt: dict, repo_key: str = "") -> str:
     return _resolve_account_chain(
         candidates, repo_key, issue_number,
         event_type=event_type, repository=evt.get("repository", ""),
-        fallback=fallback,
+        fallback=fallback, allow_owner_fallback=allow_owner_fallback,
     )
 
 
@@ -747,9 +786,30 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     # Issue #3770 审查 R2：写入侧收口——direct 快照行不再落明文 "{}"（命中验收口径
     # 「非空且非 enc:v1:」）；空对象也落 enc:v1 信封，加密失败降级空串 + 计数
     # write_refused，绝不回落明文。
+    #
+    # Issue #3905：快照内容不再为空——direct 快照是重派 / 接管 / 超时收口等读侧的唯一
+    # env 来源（worker 侧 decrypt_env_extra(task.env_extra) 直接吃这份快照），写空对象
+    # 等于让整条 issue 任务链在消费端「degraded env」（ACCOUNT / GRAPE_ISSUE_ID /
+    # GRAPE_WORK_BRANCH 全缺）。改为与 build_task_env 同源组装，再补事件级扩展与
+    # Issue/PR 编号（含内部卡片 id），杜绝第二套实现漂移。
+    _snapshot_env = {}
+    try:
+        _snapshot_env = build_task_env(
+            repo_key, agent_type, issue_id, runtime_id=engine_id or 0,
+            account=_dispatch_acct, suppress_account_alerts=True,
+        )
+        _ext_env = evt.get("_env_extra") or {}
+        if isinstance(_ext_env, dict):
+            _snapshot_env.update(_ext_env)
+        if repo_key:
+            _snapshot_env.setdefault("REPO_KEY", repo_key)
+        _inject_issue_pr_env(_snapshot_env, evt, repo_key)
+    except Exception as _env_e:  # noqa: BLE001 - 组装失败仍建任务（快照降级为空，不阻断派发）
+        log.warning(f"create_direct_task: env snapshot assemble failed task={task_id}: {_env_e}")
+        _snapshot_env = {}
     try:
         from src.domains.runtime.engine.service import _encrypt_env_extra_for_write
-        _env_sealed = _encrypt_env_extra_for_write({})
+        _env_sealed = _encrypt_env_extra_for_write(_snapshot_env)
     except Exception as _enc_e:
         _env_sealed = ""
         try:
@@ -854,22 +914,18 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
         cwd = ""
 
     # env_extra
-    repository = evt.get("repository", "")
-    # Issue #1660：REPO_OWNER/REPO_NAME 一律由 REPO_FULL_NAME 派生（缺失回退 repo_key），
-    # 禁止以触发人账号充当 REPO_OWNER；REPO_FULL_NAME 归一（剥 provider 前缀）供 runbook 拼 URL。
-    from src.kernel.repo_key import derive_repo_identity as _derive
-    _full_name, _owner, _repo_name = _derive(repository, repo_key)
+    # Issue #3905：失败快照是重派/接管的唯一 env 来源，此前只含 REPO_* + ACCOUNT，
+    # 缺 ISSUE_NUMBER / PR_NUMBER / GRAPE_ISSUE_ID / GRAPE_WORK_BRANCH，重派后
+    # 契约三变量必然回落为空。改为与 build_task_env（重派/对话入队同源）组装，
+    # 再按事件补 Issue/PR 编号与内部卡片 id，快照字段只增不减。
     _resolved_account = resolve_actor_account(evt, repo_key)
-    env_extra = {
-        # 沙箱 clone 必须知道平台：REPO_FULL_NAME 是剥前缀的裸名（runbook 拼 URL 用），
-        # 只有 REPO_KEY 带 provider 前缀；缺它时 sandbox 会按 parse_repo_key 默认 gitcode。
-        "REPO_KEY": repo_key,
-        "REPO_FULL_NAME": _full_name,
-
-        "REPO_OWNER": _owner,
-        "REPO_NAME": _repo_name,
-        "ACCOUNT": _resolved_account,
-    }
+    env_extra = build_task_env(repo_key, agent_type, issue_id,
+                               runtime_id=runtime_id or 0,
+                               account=_resolved_account,
+                               suppress_account_alerts=True)
+    if repo_key:
+        env_extra.setdefault("REPO_KEY", repo_key)
+    _inject_issue_pr_env(env_extra, evt, repo_key)
 
     # repo_gitcode_token（按 provider 分流，用户 token 写空由运行时实时获取）
 
@@ -4735,7 +4791,7 @@ def _read_scene_linked_repos(repo_key: str, issue_id: str = "") -> list:
 
 def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: int = 0,
                    account: str = "", issue_number: str = "", pr_number: str = "",
-                   scene_id_override: str = "") -> dict:
+                   scene_id_override: str = "", suppress_account_alerts: bool = False) -> dict:
     """构建任务完整 env_extra（正常入队/重派/对话入队共用，防重派丢变量）。
 
     2026-10-10 事故：events.py 重派路径 enqueue_task(env_extra={}) 丢了
@@ -4749,7 +4805,10 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
     - BOT_USERNAME/AGENT_NAME（Issue #573）：与正常入队同逻辑（全部 devops agent）
     - evt._env_extra 事件级扩展：重派无 evt，无法还原（快照已在 prompt 里），不注入
     - scene_id_override（Issue #427）：重派 PR 订阅任务时传旧任务/事件的订阅场景，
-      防止 env 被重新解析回 Issue 场景；空串回退 issue_id 解析（普通任务零破坏）。
+      防止 env 被重新解析回 Issue 场景；空串回退 issue_id 解析（普通任务零破坏）
+    - suppress_account_alerts（Issue #3905）：直连/失败快照的调用方已用
+      resolve_actor_account（带事件上下文）做过权威解析与告警，这里不再重复告警，
+      避免每个 direct 任务多两条 ACCOUNT_MISSING 噪声。
     """
     import json as _json
     env = {}
@@ -4769,6 +4828,7 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
         [("account", account)], repo_key, issue_number or issue_id,
         event_type="build_task_env", fallback="account->issue_creator",
         extra={"issue_id": issue_id},
+        alert=not suppress_account_alerts,
     )
     from src.kernel.prompt_builder import resolve_task_server_env
     # Issue #1577：GRAPE_SERVER_URL=业务 API 基址，RUNTIME_SERVER_URL=worker runtime 基址。
