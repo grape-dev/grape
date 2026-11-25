@@ -118,6 +118,13 @@
                 :title="dispatchReasonText(t.dispatch_state_reason, 'list')"
                 >⚠</span
               >
+              <!-- Issue #3909：解绑记录查询失败 → 列表显式降级（不与「无解绑」同形） -->
+              <span
+                v-if="t.engine_detached_degraded"
+                class="apv-warn"
+                :title="tt('detail.engine_detached_unavailable')"
+                >⚠</span
+              >
               <span v-if="t.enabled" class="apv-on">●</span>
               <span v-else class="apv-off">○</span>
             </div>
