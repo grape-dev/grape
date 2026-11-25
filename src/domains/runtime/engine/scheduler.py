@@ -28,6 +28,10 @@ from typing import Optional
 
 from src.kernel.config import log
 
+from src.kernel.issue_ident import (
+    AUTOPILOT_EVENT_SEQ_BASE, SYNTHETIC_CARD_PREFIX,
+)
+
 from src.kernel.session_manager import db, db_lock
 
 # Issue #3733：空指令 → 显式不可派发状态。状态值与原因文案的单一事实源在 mgmt 域
@@ -509,12 +513,14 @@ def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
 
 # Autopilot 任务来源标记（Issue #3744）：agent_tasks.issue_id 合成键前缀。
 # 与下方 event_seq 高位命名空间同为「任务来源」单一判定依据，供场景校正入口短路。
-_AUTOPILOT_ISSUE_ID_PREFIX = "autopilot-"
+# Issue #3908：前缀/命名空间常量下沉 kernel 单点，这里保留符号为别名，既有
+# 静态守护用例（test_autopilot_event_seq_namespace.py）继续有效。
+_AUTOPILOT_ISSUE_ID_PREFIX = SYNTHETIC_CARD_PREFIX
 
 # Autopilot 不使用 events 表，但 agent_tasks.event_seq 需要非 0 且不能与真实事件
 # 序号碰撞（历史实现直接传 exec_id，重放/已有 events 的库会命中旧事件状态，
 # 被 executor 误判为 event:failed 而提前 kill）。用高位命名空间隔离。
-_AUTOPILOT_EVENT_SEQ_BASE = 900_000_000
+_AUTOPILOT_EVENT_SEQ_BASE = AUTOPILOT_EVENT_SEQ_BASE
 
 
 def _autopilot_event_seq(exec_id: int) -> int:

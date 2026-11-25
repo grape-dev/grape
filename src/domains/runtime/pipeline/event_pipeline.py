@@ -92,6 +92,7 @@ from src.kernel.issue_ident import (
     is_native_issue_ident, is_actionable_issue_number, native_issue_number,
     normalize_issue_ident,
     deliverable_comment_ident,  # Issue #4065：可回帖口径（数字平台只认数字）
+    is_autopilot_event_seq, is_autopilot_issue_ref,  # Issue #3908：autopilot 命名空间判据
 )
 # Issue #4065：结果评论投递指标（reason 限枚举 + 连续失败告警），kernel 可安装收集器
 from src.kernel import comment_metrics as _comment_metrics
@@ -6610,26 +6611,18 @@ def _is_autopilot_task(issue_id: str = "", event_seq: int = 0) -> bool:
     （`skip_event_config=True`）。因此场景校正必须在入口按来源短路，不得查询 events
     （否则每次必然查空并产生 WARNING）。
 
-    识别口径（常量单一来源 = scheduler，禁止硬编码观测值）：
-    - 主判据：`agent_tasks.issue_id` 前缀 `autopilot-`（任务级权威标记）；
-    - 辅助判据：`event_seq >= _AUTOPILOT_EVENT_SEQ_BASE`（高位命名空间兜底，
-      兼容历史/无 issue_id 的 autopilot 任务）。
+    识别口径（常量单一来源 = kernel.issue_ident，禁止硬编码观测值）：
+    - 主判据：`agent_tasks.issue_id` 为合成键 `autopilot-<字母>`（任务级权威标记）；
+    - 辅助判据：`event_seq >= AUTOPILOT_EVENT_SEQ_BASE`（高位命名空间兜底），
+      仅当 issue_id 不是真实 Issue 编号时成立——Issue #3908：autopilot 命名空间 +
+      真实 Issue 绑定的任务必须继续走正常场景校正。
     """
     _issue = str(issue_id or "")
-    try:
-        from src.domains.runtime.engine.scheduler import (
-            _AUTOPILOT_EVENT_SEQ_BASE, _AUTOPILOT_ISSUE_ID_PREFIX)
-    except Exception as e:
-        # 常量不可用时不误杀真实任务，保守按非 autopilot 处理
-        log.debug(f"[scene-env] autopilot source constants unavailable: {e}")
-        return False
-    if (_issue.startswith(_AUTOPILOT_ISSUE_ID_PREFIX)
-            and len(_issue) > len(_AUTOPILOT_ISSUE_ID_PREFIX)):
+    if is_autopilot_issue_ref(_issue):
         return True
-    try:
-        return bool(event_seq) and int(event_seq) >= int(_AUTOPILOT_EVENT_SEQ_BASE)
-    except (TypeError, ValueError):
+    if is_native_issue_ident(_issue):
         return False
+    return is_autopilot_event_seq(event_seq)
 
 def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
                            event_type: str = "", title: str = "",
@@ -6648,6 +6641,9 @@ def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
     4. 关联 events 行的 event_type / title 命中 2/3；
     5. 事件行不可用（event_seq=0/缺失）时，回退任务 prompt 快照中的订阅标记。
 
+    Issue #3908：autopilot 合成 seq（`>= AUTOPILOT_EVENT_SEQ_BASE`）在 events 表必然
+    不存在，进入查询前直接判 False（明确「非 PR 订阅」），不查表、不打 missing WARNING。
+
     `task_id` / `repo_key` 仅用于缺行告警的可定位字段（Issue #3744），不参与判定。
     """
     if _PR_SUB_ISSUE_ID_RE.match(str(issue_id or "")):
@@ -6662,6 +6658,8 @@ def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
         return True
     if any(_m in str(prompt or "") for _m in _PR_SUB_PROMPT_MARKERS):
         return True
+    if is_autopilot_event_seq(event_seq):
+        return False
     if event_seq:
         try:
             from src.kernel.session_manager import db, db_lock
@@ -6710,8 +6708,9 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     `agent_tasks → issue 当前归属场景`（`get_issue_bound_scene`，与
     `issues detail.scene_id` 同源且不回退 dev_scene）重算并覆盖陈旧快照；
     PR 订阅任务保持订阅场景语义不校正；Issue 未绑定场景时按「未选定=空串」口径处理；
-    autopilot 任务（合成 issue_id / 高位合成 seq，设计上不写 events 表）在入口按来源
-    短路并保留快照（Issue #3744）；
+    autopilot 任务（合成回链键 `autopilot-<字母>`，设计上不写 events 表）按来源短路并
+    保留快照（Issue #3744 / #3908）；autopilot 高位合成 seq + 真实 Issue 编号的任务仍走
+    正常校正（Issue #3908，`_pr_subscription_state` 已按命名空间判 False，不查 events）；
     PR 订阅判定未定（events 查询异常/事件行缺失）或 Issue 归属查询异常时一律跳过，
     不覆盖快照，避免误清空正确的 GRAPE_SCENE_ID。
 
@@ -6736,14 +6735,20 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     _event_seq = _row[2] or 0
     _event_type = _row[3] or ""
     _prompt = _row[4] or ""
-    if _is_autopilot_task(_issue_id, _event_seq):
-        # autopilot 不写 events 表：入口短路，避免必然查空的 events 查询与 WARNING
+    if is_autopilot_issue_ref(_issue_id):
+        # Issue #3908：合成回链键不对应真实 Issue，静默跳过（设计内常态，debug 级）
         log.debug(f"[scene-env] skip scene reconcile: autopilot task={task_id} "
                   f"issue={_issue_id or '-'} event_seq={_event_seq} "
                   f"scene_reconciled=false reason=autopilot_source "
                   f"snapshot_scene={_snapshot or '-'}")
         return _snapshot
     if not _repo_key or not _issue_id:
+        if is_autopilot_event_seq(_event_seq):
+            # 高位命名空间但无 Issue 绑定：同样按 autopilot 来源短路，不查 events
+            log.debug(f"[scene-env] skip scene reconcile: autopilot task={task_id} "
+                      f"issue={_issue_id or '-'} event_seq={_event_seq} "
+                      f"scene_reconciled=false reason=autopilot_event_seq "
+                      f"snapshot_scene={_snapshot or '-'}")
         return _snapshot
     if _pr_subscription_state(_issue_id, _event_seq, _event_type,
                               prompt=_prompt, task_id=task_id,
