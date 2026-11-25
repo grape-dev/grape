@@ -536,9 +536,20 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # workspace 不可用及原因，杜绝「工作区没建起来 → 标只读 → 任务 completed 缺交付物」。
     if _wt_wanted and not _wt:
         _wu_reason = _wt_err or "ensure_issue_worktree returned no workspace"
+        # Issue #4353：真冲突（拒绝降级）必须带稳定 error_code 上报，供调度侧聚合/告警；
+        # 同时**不**标只读——拒绝降级与只读标记互斥。
+        _conflict = {}
+        try:
+            from src.domains.runtime.engine import repogit as _rg4353
+            _conflict = _rg4353.degrade_refused(repo_key, issue_num=_gnum,
+                                               agent_type=agent_type)
+        except Exception as _crf:
+            log.warning(f"Exec agent: degrade refusal lookup failed: {_crf}")
+        _wu_code = (_conflict or {}).get("code") or ""
         _wu_msg = (f"[workspace_unavailable] Issue #{_gnum} {agent_type} 工作区不可用："
                    f"git worktree 创建失败（{_wu_reason[:300]}）；任务置 failed，"
-                   f"不以只读 completed 收尾")
+                   f"不以只读 completed 收尾"
+                   + (f"；error_code={_wu_code}" if _wu_code else ""))
         log.error(f"Exec agent: {_wu_msg}")
         if task_id:
             try:
@@ -546,10 +557,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 _fail_task(task_id, _wu_msg, exit_code=1)
             except Exception as _fte:
                 log.warning(f"Exec agent: fail_task for workspace unavailable failed: {_fte}")
-        _fail_event(seq, _wu_msg, diag={
-            "code": "workspace_unavailable",
-            "agent_type": agent_type, "repo_key": repo_key,
-            "issue_number": str(_gnum), "reason": _wu_reason[:300]})
+        _diag = {"code": "workspace_unavailable",
+                 "agent_type": agent_type, "repo_key": repo_key,
+                 "issue_number": str(_gnum), "reason": _wu_reason[:300]}
+        if _wu_code:
+            _diag["error_code"] = _wu_code
+        _fail_event(seq, _wu_msg, diag=_diag)
         return
 
     # Issue #3482（A）：物化整体下移到建树之后——`.skills` / `.project-info` /
@@ -616,12 +629,25 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except Exception as _rge:
         log.warning(f"Exec agent: worktree reset context inject failed: {_rge}")
     # Issue #2245（M2）：git 写权限自检——只读会话注入标记与降级提示，避免编码中途失败
+    # Issue #4353：日志口径统一走 repogit.describe_git_write_mode——refuse degrade
+    # （真冲突，error_code=WORKSPACE_WORKTREE_CONFLICT）与 read-only mode marked
+    # 互斥，冲突/缺失路径不再出现 read-only 措辞（杜绝「拒绝降级又标只读继续跑」）。
     try:
-        from src.domains.runtime.engine.repogit import inject_git_write_context
+        from src.domains.runtime.engine.repogit import (
+            describe_git_write_mode, inject_git_write_context,
+        )
+        _task_view = {"repo_key": repo_key, "agent_type": agent_type,
+                      "issue_id": issue_id, "worktree_dir": _wt or "",
+                      "task_id": task_id or "", "pr_number": _pr_num or ""}
         prompt, _git_write = inject_git_write_context(_task_view, env_extra, prompt)
         if _git_write and not _git_write.get("writable"):
-            log.warning(f"Exec agent: git worktree is read-only "
-                        f"({_git_write.get('reason', '')}), read-only mode marked")
+            _gw_level, _gw_msg = describe_git_write_mode(_git_write)
+            if _gw_level == "error":
+                log.error(f"Exec agent: {_gw_msg} "
+                          f"(issue={issue_id} agent={agent_type})")
+            else:
+                log.warning(f"Exec agent: {_gw_msg} "
+                            f"(issue={issue_id} agent={agent_type})")
     except Exception as _gwe:
         log.warning(f"Exec agent: git write context inject failed: {_gwe}")
 

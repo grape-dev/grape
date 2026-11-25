@@ -1927,7 +1927,8 @@ def _is_platform_asset_name(name: str) -> bool:
     return name.startswith(_PLATFORM_ASSET_PREFIXES)
 
 
-def dispose_occupied_workdir_target(repo_key: str, issue_dir: str) -> dict:
+def dispose_occupied_workdir_target(repo_key: str, issue_dir: str,
+                                   suffix: str = "") -> dict:
     """Issue #3482（B）：`git worktree add` 前处置「目标目录已存在且无 `.git`」。
 
     判据走 stat（存在/非空/无 `.git`），**不依赖 git 的 stderr 文案**——文案是漏判来源
@@ -1971,8 +1972,8 @@ def dispose_occupied_workdir_target(repo_key: str, issue_dir: str) -> dict:
             return out
         out["action"] = "cleared"
         return out
-    from datetime import datetime, timezone
-    stale = f"{issue_dir}.stale-{_utc_stamp()}"
+    # Issue #4353：隔离目录名可带本轮派发标识（task_id），跨轮留证不互相覆盖/不可混淆
+    stale = f"{issue_dir}.stale-{suffix or _utc_stamp()}"
     try:
         os.rename(issue_dir, stale)
     except OSError as e:
@@ -1980,6 +1981,179 @@ def dispose_occupied_workdir_target(repo_key: str, issue_dir: str) -> dict:
                    unknown=unknown)
         return out
     out.update(action="quarantined", stale_path=stale, unknown=unknown)
+    return out
+
+
+def _registered_worktree_paths(base: str, token: str = "") -> set:
+    """Issue #4353：`git worktree list --porcelain` 的已登记路径集合（realpath）。
+
+    判定「已是本仓合法 worktree」不能只看磁盘上有没有 `.git`：`.git` 指针可以指向
+    已被删除的 gitdir（假的可用），而真正的冲突/残留要同时看 base 的登记表。
+    """
+    r = _run_git(["-C", base, "worktree", "list", "--porcelain"], token=token,
+                 timeout=_GIT_WRITE_PROBE_TIMEOUT)
+    if r is None or r.returncode != 0:
+        return set()
+    out = set()
+    for line in (r.stdout or "").splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):].strip()
+            if path:
+                out.add(os.path.realpath(path))
+    return out
+
+
+def _gitdir_belongs_to_repo(gitdir: str, base: str, issue_dir: str) -> bool:
+    """gitdir 是否属于「本仓 + 本工作区」：共享 common dir = base，或会话级 gitdir。
+
+    linked worktree 的 admin dir 里**没有** `objects/`（对象库在 common dir），所以
+    这里不能用 `_is_git_dir`（它要求 HEAD + objects）；判据走 `commondir` 解析。
+    `_create_worktree_with_session_gitdir` 建的 `.git-session` 是 base 的共享 clone，
+    其 commondir 指向自身而不是 base，但仍是本工作区的合法版本库（复用不得清掉）。
+    """
+    if not gitdir or not os.path.isdir(gitdir):
+        return False
+    _real = os.path.realpath(gitdir)
+    if _real.startswith(os.path.realpath(issue_dir) + os.sep):
+        return os.path.isfile(os.path.join(_real, "HEAD"))
+    common = git_common_dir(gitdir)
+    return bool(common) and os.path.realpath(common) == os.path.realpath(base)
+
+
+def classify_worktree_target(repo_key: str, base: str, issue_dir: str,
+                             token: str = "") -> dict:
+    """Issue #4353：`git worktree add` 前判定目标路径，输出可区分、可观测的决策。
+
+    返回 ``{"decision": absent|legal|residual|conflict, "reason", "registered",
+    "gitdir"}``：
+
+    - ``absent``：路径不存在 → 直接建树；
+    - ``legal``：**本仓的合法 worktree**（`.git` 指向存在且归属本仓的 gitdir，
+      含会话级 `.git-session`）→ 复用，不重复 add；
+    - ``residual``：路径被上一轮派发的产物占住（无 `.git`，或 `.git` 指向已失效的
+      gitdir）→ prune + 安全移走后建树；
+    - ``conflict``：真冲突（非目录 / `.git` 属于其它仓库 / 无法安全处置）→ 判 failed。
+    """
+    out = {"decision": "absent", "reason": "", "registered": False, "gitdir": ""}
+    if not os.path.lexists(issue_dir):
+        return out
+    if not os.path.isdir(issue_dir):
+        out.update(decision="conflict",
+                   reason="target path occupied by a non-directory (file/symlink)")
+        return out
+    out["registered"] = os.path.realpath(issue_dir) in _registered_worktree_paths(
+        base, token=token)
+    gitdir = resolve_gitdir(issue_dir)
+    out["gitdir"] = gitdir
+    if _gitdir_belongs_to_repo(gitdir, base, issue_dir):
+        out.update(decision="legal")
+        return out
+    if gitdir and os.path.isdir(gitdir):
+        # `.git` 指向**存在但不属于本仓**的 gitdir → 别人的工作树，禁止处置
+        out.update(decision="conflict", reason=f"foreign git dir: {gitdir}")
+        return out
+    out.update(decision="residual",
+               reason="stale gitdir pointer" if gitdir else "no .git")
+    return out
+
+
+def _prune_worktree_registrations(base: str, token: str = "") -> int:
+    """Issue #4353：`git worktree prune`（失效登记回收），返回移除条数（尽力而为）。
+
+    prune 只清「路径已不存在」的登记：残留目录必须先被移走再来一次，否则登记还在、
+    `git worktree add` 仍报 `already exists`（本地实测）。
+    """
+    r = _run_git(["-C", base, "worktree", "prune", "-v"], token=token,
+                 timeout=_GIT_WRITE_PROBE_TIMEOUT)
+    if r is None or r.returncode != 0:
+        log.warning(f"repogit: worktree prune failed {base}: "
+                    f"{(((r.stderr if r is not None else '') or 'git exec failed'))[:200]}")
+        return 0
+    return sum(1 for line in (r.stdout or "").splitlines()
+               if line.strip().lower().startswith("removing "))
+
+
+def _quarantine_worktree_dir(issue_dir: str, suffix: str = "") -> str:
+    """把目标目录整体移走（保留其中 `.skills`/`.project-info` 等会话资产），返回新路径。
+
+    移走而非删除：#3482 的「迁移不删除」红线——残留里可能有上一轮的物化产物与
+    未追踪文件，留证优先。移走成功才允许后续 prune 回收登记。
+    """
+    stale = f"{issue_dir}.stale-{suffix or _utc_stamp()}"
+    if os.path.exists(stale):
+        stale = f"{stale}-{os.getpid()}-{threading.get_ident()}"
+    try:
+        os.rename(issue_dir, stale)
+        return stale
+    except OSError as e:
+        log.warning(f"repogit: quarantine worktree target failed "
+                    f"{issue_dir} -> {stale}: {e}")
+        return ""
+
+
+def prepare_worktree_target(repo_key: str, base: str, issue_dir: str,
+                            token: str = "", issue_num=None,
+                            agent_type: str = "", task_id: str = "") -> dict:
+    """Issue #4353：`git worktree add` 前的目标路径处置（三条路径各一条结构化日志）。
+
+    Returns:
+        ``{"ok": bool, "action": absent|legal|residual_cleaned|conflict,
+        "stale_path": str, "reason": str, "decision": str}``
+    """
+    ctx = (f"repo={repo_key or '-'} issue={issue_num or '-'} "
+           f"agent={agent_type or '-'} task={task_id or '-'} path={issue_dir}")
+    out = {"ok": True, "action": "absent", "stale_path": "", "reason": "",
+           "decision": ""}
+    cls = classify_worktree_target(repo_key, base, issue_dir, token=token)
+    out["decision"] = cls["decision"]
+    if cls["decision"] == "absent":
+        log.info(f"repogit workspace.worktree_target_absent {ctx} decision=absent")
+        return out
+    if cls["decision"] == "legal":
+        # 路径一：已是本仓合法 worktree → 复用，不重复 add（不再撞 already exists）
+        log.info(f"repogit workspace.worktree_target_legal {ctx} decision=legal "
+                 f"registered={cls['registered']} gitdir={cls['gitdir'] or '-'}")
+        out["action"] = "legal"
+        return out
+    if cls["decision"] == "conflict":
+        # 路径三：真冲突 → 调用方判 failed + error_code=WORKSPACE_WORKTREE_CONFLICT
+        log.error(f"repogit workspace.worktree_target_conflict {ctx} decision=conflict "
+                  f"reason={cls['reason']} error_code={WORKSPACE_WORKTREE_CONFLICT}")
+        out.update(ok=False, action="conflict", reason=cls["reason"])
+        return out
+    # 路径二：残留（上一轮派发产物）→ prune + 安全移走（保留会话资产）后建树
+    pruned = _prune_worktree_registrations(base, token=token)
+    disp = dispose_occupied_workdir_target(repo_key, issue_dir,
+                                           suffix=task_id or _utc_stamp())
+    if disp.get("action") == "failed":
+        reason = disp.get("reason") or "dispose residual target failed"
+        log.error(f"repogit workspace.worktree_target_conflict {ctx} decision=conflict "
+                  f"reason={reason} error_code={WORKSPACE_WORKTREE_CONFLICT}")
+        out.update(ok=False, action="conflict", reason=reason)
+        return out
+    stale = disp.get("stale_path") or ""
+    # 「清空式」处置后目录还在（空壳）：只要它仍被登记（或还有内容），就必须整体移走——
+    # 登记存在时 prune 不会回收，`git worktree add` 依旧报 already exists。
+    if os.path.isdir(issue_dir) and (cls["registered"] or os.listdir(issue_dir)):
+        stale = stale or _quarantine_worktree_dir(issue_dir,
+                                                 suffix=task_id or _utc_stamp())
+        if not stale:
+            reason = "quarantine residual target failed"
+            log.error(f"repogit workspace.worktree_target_conflict {ctx} "
+                      f"decision=conflict reason={reason} "
+                      f"error_code={WORKSPACE_WORKTREE_CONFLICT}")
+            out.update(ok=False, action="conflict", reason=reason)
+            return out
+    _pruned_after = _prune_worktree_registrations(base, token=token)
+    # 「清空式」处置后移走的只是空壳：清空它是为解除 worktree 登记，不留空目录垃圾。
+    if stale and os.path.isdir(stale) and not os.listdir(stale):
+        shutil.rmtree(stale, ignore_errors=True)
+        stale = ""
+    log.warning(f"repogit workspace.worktree_target_residual_cleaned {ctx} "
+                f"decision=residual reason={cls['reason']} "
+                f"registered={cls['registered']} stale={stale or '-'} "
+                f"pruned={pruned}+{_pruned_after}")
+    out.update(action="residual_cleaned", stale_path=stale)
     return out
 
 
@@ -2012,17 +2186,28 @@ def _recover_worktree_already_exists(repo_key: str, issue_dir: str, base: str,
             except OSError as e:
                 log.warning(f"repogit: quarantine previous collided-asset backup failed "
                             f"{repo_key}: {e}")
+        # Issue #4353：目标目录已被前置处置（prepare_worktree_target）移走时，
+        # 只需 prune 回收指向该路径的失效登记再重放 add，无需二次迁移/回滚。
+        _pre_absent = not os.path.isdir(issue_dir)
         moved = False
-        try:
-            os.rename(issue_dir, backup)
+        if _pre_absent:
             moved = True
-            log.warning(f"repogit: worktree target occupied by non-git assets "
-                        f"(no .git), moved aside for rebuild {repo_key}: "
-                        f"{issue_dir} -> {backup}")
-        except OSError as e:
-            log.warning(f"repogit: move occupied dir aside failed, fallback to "
-                       f"session gitdir {repo_key}: {e}")
+            log.warning(f"repogit: worktree target already moved aside by preflight, "
+                        f"replay after prune {repo_key}: {issue_dir}")
+        else:
+            try:
+                os.rename(issue_dir, backup)
+                moved = True
+                log.warning(f"repogit: worktree target occupied by non-git assets "
+                            f"(no .git), moved aside for rebuild {repo_key}: "
+                            f"{issue_dir} -> {backup}")
+            except OSError as e:
+                log.warning(f"repogit: move occupied dir aside failed, fallback to "
+                           f"session gitdir {repo_key}: {e}")
         if moved:
+            # Issue #4353：目录已被移走 → 现在 prune 才能回收仍指向本路径的失效登记
+            #（登记存在时 `git worktree add` 必报 already exists，prune 是重放的前置）。
+            _prune_worktree_registrations(base, token=token)
             if branch_reused:
                 r = _run_git(["-C", base, "worktree", "add", "--force", issue_dir,
                               branch], token=token)
@@ -2030,7 +2215,8 @@ def _recover_worktree_already_exists(repo_key: str, issue_dir: str, base: str,
                 r = _run_git(["-C", base, "worktree", "add", issue_dir, "-b", branch,
                               f"origin/{base_branch}"], token=token)
             if r is not None and r.returncode == 0:
-                _merge_collided_assets(backup, issue_dir)
+                if not _pre_absent:
+                    _merge_collided_assets(backup, issue_dir)
                 log.warning(f"repogit: worktree rebuilt after already-exists "
                             f"collision {repo_key}: {issue_dir} "
                             f"(assets merged back)")
@@ -2038,12 +2224,13 @@ def _recover_worktree_already_exists(repo_key: str, issue_dir: str, base: str,
             _re_err = ((r.stderr if r is not None else "git exec failed") or "")[:200]
             log.warning(f"repogit: worktree re-add after collision failed, "
                         f"rollback {repo_key}: {_re_err}")
-            try:
-                if os.path.isdir(issue_dir):
-                    shutil.rmtree(issue_dir, ignore_errors=True)
-                os.rename(backup, issue_dir)
-            except OSError as e:
-                log.warning(f"repogit: rollback collided dir failed {repo_key}: {e}")
+            if not _pre_absent:
+                try:
+                    if os.path.isdir(issue_dir):
+                        shutil.rmtree(issue_dir, ignore_errors=True)
+                    os.rename(backup, issue_dir)
+                except OSError as e:
+                    log.warning(f"repogit: rollback collided dir failed {repo_key}: {e}")
         # 兜底：会话级 gitdir（clone --shared）——占用目录保持原样（含物化产物），
         # `.git` 指针指向会话 gitdir，gitdir 可解析、不再误置只读。
         if _create_worktree_with_session_gitdir(
@@ -2072,11 +2259,39 @@ def inject_git_write_context(task: dict, env: dict, prompt: str) -> tuple:
         ag = (task or {}).get("agent_type") or ""
         if not rk or not is_git_agent(ag):
             return prompt, {}
+        num = issue_num_from((task or {}).get("issue_id") or "")
+        # Issue #4353：拒绝降级（真冲突）与只读标记**互斥**——同一轮里已经判过
+        # 「refuse degrade」的 (repo, issue, agent) 不再标 read-only，改为透出冲突
+        # 错误码，上游据此把任务判 failed（不再以只读会话跑完却 completed）。
+        refused = degrade_refused(rk, issue_num=num, agent_type=ag)
+        if refused:
+            env["GRAPE_GIT_WRITABLE"] = "false"
+            env.pop("GRAPE_GIT_READONLY", None)
+            env.pop("GRAPE_GIT_READONLY_REASON", None)
+            env["GRAPE_GIT_WORKSPACE_MISSING"] = "true"
+            env["GRAPE_GIT_WORKSPACE_CONFLICT"] = "true"
+            env["GRAPE_GIT_WORKSPACE_CONFLICT_REASON"] = refused.get("reason") or ""
+            env["GRAPE_GIT_WORKSPACE_ERROR_CODE"] = (
+                refused.get("code") or WORKSPACE_WORKTREE_CONFLICT)
+            status = {"writable": False, "mode": "conflict",
+                      "gitdir": "", "common_dir": "",
+                      "reason": refused.get("reason") or "",
+                      "hint": ("workspace build refused to degrade: "
+                               f"error_code={WORKSPACE_WORKTREE_CONFLICT}")}
+            block = (
+                "\n\n[grape runtime] ERROR: workspace build REFUSED to degrade "
+                f"(error_code={WORKSPACE_WORKTREE_CONFLICT}: "
+                f"{status['reason'] or 'worktree target conflict'}). "
+                "This is NOT a read-only session and must NOT be reported as one: the "
+                "workspace never got a usable git dir. Report the conflict error and stop "
+                "git work (machine-readable: GRAPE_GIT_WRITABLE=false, "
+                "GRAPE_GIT_WORKSPACE_CONFLICT=true).\n"
+            )
+            return prompt + block, status
         wt = (task or {}).get("worktree_dir") or ""
-        if not wt:
-            num = issue_num_from((task or {}).get("issue_id") or "")
-            if num:
-                wt = issue_dir_for(rk, ag, num)
+        if not wt and num:
+            # Issue #3375：PR 维度隔离时工位在 issues/<n>/pr-<p>/<agent>，回落路径必须同构
+            wt = issue_dir_for(rk, ag, num, pr_number=(task or {}).get("pr_number") or "")
         if not wt or not os.path.isdir(wt):
             return prompt, {}
         status = ensure_worktree_git_writable(rk, wt)
@@ -2119,6 +2334,26 @@ def inject_git_write_context(task: dict, env: dict, prompt: str) -> tuple:
     except Exception as e:
         log.warning(f"repogit: git write context inject failed: {e}")
         return prompt, {}
+
+
+def describe_git_write_mode(status: dict) -> tuple:
+    """Issue #4353：把 git 写权限自检结果翻成**一条口径统一**的日志（direct/worker 共用）。
+
+    返回 ``(level, message)``。硬约束：``refuse degrade``（mode=conflict）与
+    ``read-only mode marked`` 互斥——冲突/工作区缺失只说事实 + error_code，只有真正
+    「gitdir 存在但不可写」才标 read-only，杜绝「拒绝降级后又标只读继续跑」。
+    """
+    status = status or {}
+    mode = status.get("mode") or ""
+    reason = status.get("reason") or ""
+    if mode == "conflict":
+        return "error", (f"workspace refuse degrade ({WORKSPACE_WORKTREE_CONFLICT}), "
+                         f"error_code={WORKSPACE_WORKTREE_CONFLICT} reason={reason or '-'} "
+                         f"read_only_marked=false")
+    if mode == "missing":
+        return "error", (f"workspace git dir missing (not read-only), reason={reason or '-'} "
+                         f"read_only_marked=false")
+    return "warning", f"git worktree is read-only ({reason or '-'}), read-only mode marked"
 
 
 def _align_inspector_delivery(issue_dir: str, base: str, issue_num, delivery_branch: str,
@@ -2339,6 +2574,11 @@ def ensure_bare_head(base: str, preferred_branch: str = "", token: str = "",
     return out
 
 
+# Issue #4353：真冲突的稳定错误码。只在「目标路径被不可安全处置的对象占用」
+# （非目录 / 属于其它仓库的 gitdir / 隔离失败）时使用；任务据此判 failed，
+# 不再以 only-read 会话继续执行（error_code 供调度侧聚合与告警）。
+WORKSPACE_WORKTREE_CONFLICT = "WORKSPACE_WORKTREE_CONFLICT"
+
 # 建树失败阶段（写进错误面的「已执行到哪一步」，只陈述事实）
 WORKTREE_STAGE_ADD = "worktree_add"
 WORKTREE_STAGE_HEAD_REPAIR = "worktree_add_head_repair"
@@ -2447,6 +2687,54 @@ def worktree_last_failure(repo_key: str, issue_num=None, agent_type: str = "") -
     return dict(repo_hit)
 
 
+# ---------------------------------------------------------------------------
+# Issue #4353：「拒绝降级」的单一决策点
+#
+# 生产形态：`worktree add failed` → `non-readonly failure, refuse degrade` →
+# `read-only mode marked` 三条日志成组出现，任务最终仍可能 completed。根因是两个
+# 判定互斥却各自执行：建树侧拒绝降级（返回 None），会话侧又按「worktree 不存在」
+# 把会话标只读继续跑。这里把「拒绝降级」记成 (repo, issue, agent) 三元组的显式状态，
+# 会话侧读它 → 只出冲突错误码，不再标只读（互斥由状态保证，不靠调用顺序自觉）。
+# ---------------------------------------------------------------------------
+# 时效窗口（业务要求）：只覆盖「同一次建树 → 紧接着的会话自检」这段同轮窗口；
+# 跨轮不继承上一轮的拒绝判定（否则上一轮的冲突会把下一轮合法只读会话误判成冲突）。
+_DEGRADE_REFUSED_TTL = 900
+_DEGRADE_REFUSED: dict = {}
+_DEGRADE_REFUSED_MAX = 200
+
+
+def mark_degrade_refused(repo_key: str, issue_num=None, agent_type: str = "",
+                         reason: str = "", code: str = "") -> None:
+    """记录一次「拒绝降级」（非只读失败 → 任务必须 failed，不标只读）。"""
+    if not repo_key:
+        return
+    key = _failure_key(repo_key, issue_num, agent_type)
+    _DEGRADE_REFUSED[key] = {
+        "code": code or WORKSPACE_WORKTREE_CONFLICT,
+        "reason": (reason or "").strip()[:300],
+        "at": time.time(),
+    }
+    if len(_DEGRADE_REFUSED) > _DEGRADE_REFUSED_MAX:
+        for _k, _ in sorted(_DEGRADE_REFUSED.items(),
+                            key=lambda kv: kv[1].get("at", 0))[:len(_DEGRADE_REFUSED)
+                                                          - _DEGRADE_REFUSED_MAX]:
+            _DEGRADE_REFUSED.pop(_k, None)
+
+
+def degrade_refused(repo_key: str, issue_num=None, agent_type: str = "") -> dict:
+    """取本轮的「拒绝降级」状态（过期/不存在 → 空 dict）。"""
+    if not repo_key:
+        return {}
+    key = _failure_key(repo_key, issue_num, agent_type)
+    hit = _DEGRADE_REFUSED.get(key)
+    if not hit:
+        return {}
+    if time.time() - float(hit.get("at") or 0) > _DEGRADE_REFUSED_TTL:
+        _DEGRADE_REFUSED.pop(key, None)
+        return {}
+    return dict(hit)
+
+
 def clear_worktree_failure(repo_key: str = "", issue_num=None,
                            agent_type: str = "") -> None:
     """清除建树失败现场（建树入口/成功后调用）。
@@ -2456,13 +2744,18 @@ def clear_worktree_failure(repo_key: str = "", issue_num=None,
     """
     if not repo_key:
         _LAST_WORKTREE_FAILURE.clear()
+        _DEGRADE_REFUSED.clear()
         return
     if issue_num or agent_type:
         _LAST_WORKTREE_FAILURE.pop(_failure_key(repo_key, issue_num, agent_type), None)
+        _DEGRADE_REFUSED.pop(_failure_key(repo_key, issue_num, agent_type), None)
         return
     for key in [k for k in list(_LAST_WORKTREE_FAILURE)
                 if k == repo_key or k.startswith(f"{repo_key}|")]:
         _LAST_WORKTREE_FAILURE.pop(key, None)
+    for key in [k for k in list(_DEGRADE_REFUSED)
+                if k == repo_key or k.startswith(f"{repo_key}|")]:
+        _DEGRADE_REFUSED.pop(key, None)
 
 
 # 凭据不可用分类 → 任务面措辞（Issue #3713）。分类枚举由 kernel 选择器给出
@@ -2611,6 +2904,10 @@ def worktree_failure_error(repo_key: str, issue_num=None, agent_type: str = "",
             parts.append("凭据归因不可用（未据此判定为凭据问题）")
     except Exception as e:  # noqa: BLE001 - 注释性信息失败不得打断错误上报
         log.warning(f"repogit: worktree failure attribution note failed {repo_key}: {e}")
+    # Issue #4353：本轮判过「拒绝降级」→ 错误面带稳定 error_code，任务据此判 failed
+    _refused = degrade_refused(repo_key, issue_num=issue_num, agent_type=agent_type)
+    if _refused:
+        parts.append(f"error_code={_refused.get('code') or WORKSPACE_WORKTREE_CONFLICT}")
     return "；".join(parts)
 
 
@@ -2676,29 +2973,32 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
         base, token, repo_key, env_work_branch=work_branch)
     with _repo_lock(base):
         try:
-            _has_git = os.path.isdir(issue_dir) and (
-                os.path.isdir(os.path.join(issue_dir, ".git"))
-                or os.path.isfile(os.path.join(issue_dir, ".git")))
-            # Issue #3482（B）：先 stat 目标目录再建树——目录已存在且无 `.git`
-            # （上次残留 / direct 端旧顺序下先物化的产物）时按内容分流处置：
-            # 平台产物 → 清空重建；含未知内容 → 隔离为 <dir>.stale-<ts> 后重建。
-            # 不再对「已存在」无动于衷、等 `git worktree add` 报 already exists。
-            if not _has_git and os.path.isdir(issue_dir):
-                _disp = dispose_occupied_workdir_target(repo_key, issue_dir)
-                if _disp["action"] == "failed":
-                    log.warning(f"repogit workspace.occupied_unrecoverable {repo_key} "
-                                f"issue={issue_num} agent={agent_type} path={issue_dir} "
-                                f"reason={_disp.get('reason', '')}")
-                    return None
-                if _disp["action"] == "cleared":
-                    log.warning(f"repogit workspace.occupied_cleared {repo_key} "
-                                f"issue={issue_num} agent={agent_type} path={issue_dir} "
-                                f"(platform assets removable, rebuilding worktree)")
-                elif _disp["action"] == "quarantined":
-                    log.warning(f"repogit workspace.occupied_quarantined {repo_key} "
-                                f"issue={issue_num} agent={agent_type} path={issue_dir} "
-                                f"stale={_disp.get('stale_path', '')} "
-                                f"unknown={','.join(_disp.get('unknown') or [])[:200]}")
+            # Issue #4353：建树前先**判定目标路径**（不再是「磁盘上有没有 .git」的
+            # 单一 stat 判据）——三条路径各自可区分、可观测：
+            #   ① 已是本仓合法 worktree → 复用，不重复 add（eliminates already exists）；
+            #   ② 残留目录（无 .git / `.git` 指向失效 gitdir）→ prune + 安全移走后建树；
+            #   ③ 真冲突（非目录 / 别仓 gitdir / 无法移走）→ 立即 failed，不再降级只读。
+            _prep = prepare_worktree_target(repo_key, base, issue_dir, token=token,
+                                            issue_num=issue_num, agent_type=agent_type,
+                                            task_id=task_id)
+            if not _prep.get("ok"):
+                _conflict_reason = _prep.get("reason") or "worktree target conflict"
+                mark_degrade_refused(repo_key, issue_num=issue_num,
+                                     agent_type=agent_type,
+                                     reason=_conflict_reason,
+                                     code=WORKSPACE_WORKTREE_CONFLICT)
+                _record_worktree_failure(
+                    repo_key, WORKTREE_STAGE_ADD,
+                    f"worktree target conflict ({_conflict_reason}) at {issue_dir}",
+                    issue_num=issue_num, agent_type=agent_type)
+                log.error(f"repogit workspace.worktree_target_conflict {repo_key} "
+                          f"issue={issue_num} agent={agent_type} task={task_id or '-'} "
+                          f"path={issue_dir} reason={_conflict_reason} "
+                          f"error_code={WORKSPACE_WORKTREE_CONFLICT} "
+                          f"refuse=true read_only_marked=false")
+                return None
+            # 「合法 worktree」= 存在且归属本仓的 `.git`；残留/不存在都走建树分支。
+            _has_git = _prep.get("action") == "legal"
             reuse = False
             # 拒绝复用但移除失败 → 保留的是「外来脏树」，不得重写归属标记（跳过标记落盘）
             foreign_kept = False
@@ -2822,14 +3122,23 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                     log.warning(f"repogit worktree add failed {repo_key}: {stderr[:300]} "
                                 f"(readonly_probe={_ro_reason or 'none'}, "
                                 f"stderr_hint={_stderr_hint})")
-                    if (_is_already_exists_collision(stderr)
-                            and not _has_git and os.path.isdir(issue_dir)):
-                        # Issue #3482：最后一道防线（B 前置处置后仍撞竞态时）——迁移
-                        # 占用物重建 worktree，失败走会话级 gitdir 兜底，不落 refuse degrade。
-                        # direct 与 worker _execute_task 双路径共用本函数，行为一致。
+                    if _is_already_exists_collision(stderr):
+                        # Issue #3482：最后一道防线（前置处置后仍撞竞态时）——迁移
+                        # 占用物重建 worktree，失败走会话级 gitdir 兜底（只读语义），
+                        # 而不是 refuse degrade。Issue #4353：判定不再要求目录此刻仍在
+                        # （前置处置可能已把残留移走），prune/移走由恢复分支自行完成。
                         if not _recover_worktree_already_exists(
                                 repo_key, issue_dir, base, branch, base_branch,
                                 _branch_reused, token=token):
+                            mark_degrade_refused(repo_key, issue_num=issue_num,
+                                                 agent_type=agent_type,
+                                                 reason=stderr[:300],
+                                                 code=WORKSPACE_WORKTREE_CONFLICT)
+                            log.warning(f"repogit worktree add non-readonly failure, "
+                                        f"refuse degrade {repo_key} "
+                                        f"error_code={WORKSPACE_WORKTREE_CONFLICT} "
+                                        f"refuse=true read_only_marked=false "
+                                        f"(already-exists recovery failed)")
                             return None
                         # QA 复审补充：恢复成功路径也要做写权限自检（与新建 worktree 同口径），
                         # 元数据只读时迁移到会话 gitdir 并记录，不静默。
@@ -2840,8 +3149,18 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                     # Issue #2245：仅当 errno 判定目标确实只读/无权限时降级建树；其它失败
                     # （如分支已被其它 worktree 占用）降级会制造同分支双工作树，直接失败。
                     elif not _ro_reason:
+                        # Issue #4353：拒绝降级 = 任务必须 failed + 稳定 error_code，
+                        # 且**不**标只读（read_only_marked=false）——与 read-only 标记互斥。
+                        mark_degrade_refused(repo_key, issue_num=issue_num,
+                                             agent_type=agent_type,
+                                             reason=stderr[:300],
+                                             code=WORKSPACE_WORKTREE_CONFLICT)
                         log.warning(f"repogit worktree add non-readonly failure, refuse degrade "
-                                    f"{repo_key} (errno=non-readonly)")
+                                    f"{repo_key} issue={issue_num} agent={agent_type} "
+                                    f"task={task_id or '-'} "
+                                    f"(errno=non-readonly) "
+                                    f"error_code={WORKSPACE_WORKTREE_CONFLICT} "
+                                    f"refuse=true read_only_marked=false")
                         return None
                     elif not _create_worktree_with_session_gitdir(
                             repo_key, issue_dir, base, branch, base_branch, token=token):

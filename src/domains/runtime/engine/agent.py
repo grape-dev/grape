@@ -3977,6 +3977,7 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     _wt_repo_key = task.get("repo_key") or ""
     _wt_agent = task.get("agent_type") or ""
     _wt_wanted = False
+    _wt = ""
     _num = 0
     try:
         _num = repogit.issue_num_from(task.get("issue_id") or "")
@@ -4004,9 +4005,15 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
                 # Issue #3482（C）：关闭 fail-open——需要工作区却没建起来 = 错误，
                 # 不得让任务以「只读会话」跑完再 completed（缺交付物却无报错）。
                 # （合并注：#3713 凭据侧不可用已在上面临断，此处为非凭据失败的兜底阻断。）
+                # Issue #4353：真冲突（拒绝降级）带稳定 error_code，供上游聚合/告警。
+                _refused = repogit.degrade_refused(
+                    task.get("repo_key") or "", issue_num=_num,
+                    agent_type=task.get("agent_type") or "")
                 _wt_msg = (f"[workspace_unavailable] Issue #{_num} "
                            f"{task.get('agent_type') or ''} 工作区不可用：git worktree 创建失败；"
                            f"任务置 failed，不以只读 completed 收尾")
+                if _refused:
+                    _wt_msg += f"；error_code={_refused.get('code')}"
                 log.error(f"task {tid} {_wt_msg}")
                 _res.dispose()
                 return {"_error": _wt_msg, "_started": False}
@@ -4103,12 +4110,25 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     except Exception as _rge:
         log.warning(f"task {tid}: worktree reset context inject failed: {_rge}")
     # Issue #2245（M2）：git 写权限自检——只读会话注入标记与降级提示，避免编码中途失败
+    # Issue #4353：日志口径走 repogit.describe_git_write_mode（与 direct 端同源）——
+    # refuse degrade（真冲突 / error_code=WORKSPACE_WORKTREE_CONFLICT）与
+    # read-only mode marked 互斥，冲突与工作区缺失都不再出现 read-only 措辞。
     try:
-        from src.domains.runtime.engine.repogit import inject_git_write_context
-        prompt, _git_write = inject_git_write_context(task, env, prompt)
+        from src.domains.runtime.engine.repogit import (
+            describe_git_write_mode, inject_git_write_context,
+        )
+        _wt_view = dict(task or {})
+        _wt_view["worktree_dir"] = _wt_view.get("worktree_dir") or _wt
+        _wt_view["task_id"] = _wt_view.get("task_id") or tid
+        _wt_view["pr_number"] = (_wt_view.get("pr_number")
+                                 or env.get("PR_NUMBER", "") or "")
+        prompt, _git_write = inject_git_write_context(_wt_view, env, prompt)
         if _git_write and not _git_write.get("writable"):
-            log.warning(f"task {tid}: git worktree is read-only "
-                        f"({_git_write.get('reason', '')}), read-only mode marked")
+            _gw_level, _gw_msg = describe_git_write_mode(_git_write)
+            if _gw_level == "error":
+                log.error(f"task {tid}: {_gw_msg}")
+            else:
+                log.warning(f"task {tid}: {_gw_msg}")
     except Exception as _gwe:
         log.warning(f"task {tid}: git write context inject failed: {_gwe}")
     # Issue #607：技能物化块提取为 _materialize_worker_skill（可单测）；物化失败分支
