@@ -54,9 +54,21 @@ _db_path = default_db_path()
 # 进程级 DB 互斥锁：改用 TrackedRLock（接口与 threading.RLock 一致），
 # 记录等锁/持锁时长与当前持有者；慢等待/慢持有会打进日志，
 # 「一条重查询拿住锁、后续请求全部排队」这类现场靠这两类信号定位。
-from src.kernel.db_lock_metrics import TrackedRLock  # noqa: E402
+from src.kernel.db_lock_metrics import (  # noqa: E402
+    TrackedRLock,
+    start_watchdog as _start_db_lock_watchdog,
+)
 
-db_lock = TrackedRLock()
+# bound_in_request=True：前台请求等它超预算即失败（→ 503），后台线程保持无界（#4295）
+db_lock = TrackedRLock(bound_in_request=True)
+
+# Issue #4295：持有看门狗随锁实体一起就位（守护线程，幂等）。慢持有日志只在 release
+# 之后出现，100s 级持有事后无法还原现场；看门狗在持有期间 dump 持锁线程栈。
+# ``DB_LOCK_WATCHDOG_S`` <= 0 时不启动（测试/极端环境可关）。
+try:
+    _start_db_lock_watchdog()
+except Exception:  # pragma: no cover - 看门狗启动失败不阻断 DB 初始化
+    pass
 
 
 def _is_mysql_backend() -> bool:
