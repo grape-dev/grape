@@ -15,7 +15,10 @@ CREATE TABLE IF NOT EXISTS events (
     title TEXT DEFAULT '',
     summary TEXT DEFAULT '',
     actor TEXT DEFAULT '',
-    payload TEXT DEFAULT '{}',
+    -- Issue #4339：payload 与同表 agent_logs/result/structured_output 对齐为 MEDIUMTEXT。
+    -- 原 TEXT(65,535) 在 MySQL 非严格 sql_mode 下会静默截断超长 issue/PR 事件 payload，
+    -- 落库成半截 JSON（生产 seq 107279/107291 均恰好 65,535 字节且 JSON_VALID=0）。
+    payload MEDIUMTEXT DEFAULT '{}',
     agent_type TEXT DEFAULT '',
     backend TEXT DEFAULT '',
     skill TEXT DEFAULT '',

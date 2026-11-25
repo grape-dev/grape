@@ -678,7 +678,9 @@ CREATE TABLE IF NOT EXISTS grape_t_channel_outbound_card (
     sender_staff_id  TEXT NOT NULL DEFAULT '',
     card_template_id VARCHAR(191) NOT NULL DEFAULT '',
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
-    payload          TEXT NOT NULL DEFAULT '{}',
+    -- Issue #4339：卡片体随模板增长，TEXT(65,535) 不足以容纳超长 IM 卡片；
+    -- 与 events.payload 同批升 MEDIUMTEXT（外发重试的事实源，截断不可恢复）。
+    payload          MEDIUMTEXT NOT NULL DEFAULT '{}',
     status           VARCHAR(32) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','sent','failed','expired')),
     attempt_count    INTEGER NOT NULL DEFAULT 0,
     next_retry_at    VARCHAR(32) NOT NULL DEFAULT '',

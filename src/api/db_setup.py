@@ -12154,6 +12154,46 @@ register_migration(
 )
 
 # ============================================================================
+# Issue #4339：events.payload TEXT(65,535) → MEDIUMTEXT(16,777,215)
+#
+# 建表 DDL 已改（src/domains/runtime/schema_ddl.py::_EVENTS_TABLE_DDL），存量的
+# MySQL 库靠本条收敛：类型探测短路（已 mediumtext 零 DDL）+ _destructive_ddl
+# 收口（min_code_version 门槛）+ ALTER 后复检 DATA_TYPE（未生效就不盖章）。
+# 迁移 fn/常量/方言分支都在 runtime 域模块（events 归 runtime）。
+# ============================================================================
+from src.domains.runtime.migrations.events_payload_mediumtext import (  # noqa: E402
+    migrate_events_payload_mediumtext as _fn_events_payload_mediumtext,
+    verify_events_payload_mediumtext as _post_events_payload_mediumtext,
+)
+register_migration(
+    version="202611250001",
+    name="issue4339-events-payload-mediumtext",
+    kind="safe",
+    fn=_fn_events_payload_mediumtext,
+    domains=("runtime",),
+    post_check=_post_events_payload_mediumtext,
+)
+
+# ============================================================================
+# Issue #4339 同批审计：grape_t_channel_outbound_card.payload 同为 TEXT
+#
+# IM 外发卡片体（markdown 卡片）超 64KB 同样会被 MySQL 静默截断，而该表是外发重试
+# 的唯一事实源 → 截断后重试发出的是坏卡片。形态与上一条完全一致，表归 mgmt 域。
+# ============================================================================
+from src.domains.mgmt.migrations.channel_outbound_card_payload_mediumtext import (  # noqa: E402
+    migrate_channel_outbound_card_payload_mediumtext as _fn_card_payload_mediumtext,
+    verify_channel_outbound_card_payload_mediumtext as _post_card_payload_mediumtext,
+)
+register_migration(
+    version="202611250002",
+    name="issue4339-channel-outbound-card-payload-mediumtext",
+    kind="safe",
+    fn=_fn_card_payload_mediumtext,
+    domains=("mgmt",),
+    post_check=_post_card_payload_mediumtext,
+)
+
+# ============================================================================
 # Issue #3740：bot 凭据回填（managed_repos 历史列 → grape_t_repo_credentials）
 #
 # 根因背景：rc（cred_type='bot'）在生产的 gitcode/github 侧**从未被回填**——此前
