@@ -112,10 +112,18 @@ def _schedule_attempt(n: int, p: dict, attempts: int, base_delay=None) -> None:
     t.start()
 
 def _pick_ready_engine(p: dict):
-    """引擎池就绪判定：返回 (engine_id, pool) 或 (None, None)（未就绪）。"""
+    """引擎池就绪判定：返回 (engine_id, pool) 或 (None, None)（未就绪）。
+
+    Issue #3790 审查 R1：池解析同时上抛来源（source_out）并记到
+    `p["_pool_engine_source"]`——重派入库按真实来源落库，不再硬编码 scene
+    （未登记场景会被记成 scene，运营无法按来源筛选）。
+    """
     from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids, pick_engine
+    _src: dict = {}
     pool = get_scene_pool_engine_ids(p["scene_id"], p["agent_type"],
-                                     repo_key=p["repo_key"], user_id=p["scene_uid"])
+                                     repo_key=p["repo_key"], user_id=p["scene_uid"],
+                                     source_out=_src)
+    p["_pool_engine_source"] = _src.get("pool_engine_source", "") or ""
     if pool is None:
         return None, None
     engine_id = pick_engine(p["repo_key"], p["agent_type"],
@@ -210,10 +218,23 @@ def _redispatch(p: dict, engine_id: int, pool: str) -> bool:
         return False
 
 def _dispatch_picked(p: dict, engine_id: int, pool: str) -> None:
-    """与 run_pipeline 派发段（引擎选中后的入队/直连分支）保持同一语义。"""
+    """与 run_pipeline 派发段（引擎选中后的入队/直连分支）保持同一语义。
+
+    Issue #3790 审查 R1：来源走单点推导 `_resolve_pool_engine_source`（与 run_pipeline
+    同口径），不再硬编码 "scene"——scene_missing 的重派行必须保留真实来源。
+    """
     from src.domains.runtime.engine.engine_select import engine_name
-    from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode, _enqueue_pipeline_task
+    from src.domains.runtime.pipeline.event_pipeline import (
+        is_plugin_mode, _enqueue_pipeline_task, _resolve_pool_engine_source)
     seq = p["seq"]
+    # 场景上下文以重试参数为准（本链路只在 scene_id 非空时挂链，见
+    # schedule_pr_merged_sre_retry）；evt 未必自带 scene_id，只拿 evt 推导会把
+    # 场景绑定误记成 auto。显式来源（scene_missing）仍然优先。
+    _src_ctx = dict(p.get("evt") or {})
+    if p.get("scene_id") and not (_src_ctx.get("scene_id") or _src_ctx.get("_scene_id")):
+        _src_ctx["scene_id"] = p["scene_id"]
+    _pool_src = _resolve_pool_engine_source(
+        pool, p.get("_pool_engine_source", "") or "", _src_ctx)
     _be = engine_name(engine_id) or p["backend"] or ""
     if not engine_id and is_plugin_mode():
         # 无主池广播（plugin 模式 engine_id=0）：pool 限定认领范围，来源=scene
@@ -227,7 +248,7 @@ def _dispatch_picked(p: dict, engine_id: int, pool: str) -> None:
                                p["skill_name"], p["evt"], p["skill_id"],
                                p["skill_path"], 0, p["issue_id"],
                                pool_engine_ids=pool, user_id=p["scene_uid"],
-                               pool_engine_source="scene")
+                               pool_engine_source=_pool_src)
         return
     if not _be or not p["skill_name"]:
         raise RuntimeError(f"missing dispatch params backend={_be!r} "
@@ -239,7 +260,7 @@ def _dispatch_picked(p: dict, engine_id: int, pool: str) -> None:
                                p["skill_name"], p["evt"], p["skill_id"],
                                p["skill_path"], engine_id, p["issue_id"],
                                pool_engine_ids=pool, user_id=p["scene_uid"],
-                               pool_engine_source="scene")
+                               pool_engine_source=_pool_src)
         return
     # 本机直连：建任务行（防 sweeper）+ 提交执行
     from src.domains.runtime.pipeline.event_pipeline import _create_direct_task

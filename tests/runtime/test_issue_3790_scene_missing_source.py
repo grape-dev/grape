@@ -538,3 +538,67 @@ class TestPipelineExecutorSourcePropagation:
         assert out == {"task_id": "enqueued"}, out
         assert captured.get("pool_engine_ids") == "[12]"
         assert captured.get("pool_engine_source") == ""
+
+
+class TestPrMergedSreRetrySource:
+    """12. 重派链路来源收敛（审查 R1）：不再硬编码 scene。"""
+
+    def test_pick_ready_engine_records_pool_source(self, monkeypatch):
+        import src.domains.runtime.engine.engine_select as es
+        import src.domains.runtime.pr_merged_sre_retry as R
+
+        def _fake_pool(scene_id, agent_type, repo_key="", user_id=0,
+                       issue_creator="", source_out=None):
+            if source_out is not None:
+                source_out["pool_engine_source"] = "scene_missing"
+            return ""
+
+        monkeypatch.setattr(es, "get_scene_pool_engine_ids", _fake_pool)
+        monkeypatch.setattr(es, "pick_engine", lambda *a, **kw: 0)
+        p = {"scene_id": "custom-ghost3790", "agent_type": "sre",
+             "repo_key": "gitcode:test3790/r3790-retry", "scene_uid": 0,
+             "runtime_id": 0, "seq": 1}
+        R._pick_ready_engine(p)
+        assert p.get("_pool_engine_source") == "scene_missing"
+
+    def test_dispatch_picked_uses_recorded_source(self, monkeypatch):
+        import src.domains.runtime.pipeline.event_pipeline as ep
+        import src.domains.runtime.pr_merged_sre_retry as R
+
+        captured = {}
+
+        def _fake_enqueue(*a, **kw):
+            captured.update(kw)
+            return "t_retry"
+
+        monkeypatch.setattr(ep, "_enqueue_pipeline_task", _fake_enqueue)
+        monkeypatch.setattr(ep, "is_plugin_mode", lambda: True)
+        p = {"seq": 11, "repo_key": "gitcode:test3790/r3790-retry",
+             "agent_type": "sre", "backend": "opencode", "skill_name": "sre",
+             "skill_id": 0, "skill_path": "", "evt": {"scene_id": "custom-ghost3790"},
+             "issue_id": "#3790", "runtime_id": 0, "scene_id": "custom-ghost3790",
+             "scene_uid": 0, "_pool_engine_source": "scene_missing"}
+        R._dispatch_picked(p, 0, "")
+        assert captured.get("pool_engine_source") == "scene_missing", \
+            f"重派链路把来源改写成硬编码值：{captured!r}"
+
+    def test_dispatch_picked_infers_scene_without_recorded_source(self, monkeypatch):
+        import src.domains.runtime.pipeline.event_pipeline as ep
+        import src.domains.runtime.pr_merged_sre_retry as R
+
+        captured = {}
+
+        def _fake_enqueue(*a, **kw):
+            captured.update(kw)
+            return "t_retry2"
+
+        monkeypatch.setattr(ep, "_enqueue_pipeline_task", _fake_enqueue)
+        monkeypatch.setattr(ep, "is_plugin_mode", lambda: True)
+        p = {"seq": 12, "repo_key": "gitcode:test3790/r3790-retry",
+             "agent_type": "sre", "backend": "opencode", "skill_name": "sre",
+             "skill_id": 0, "skill_path": "", "evt": {},
+             "issue_id": "#3790", "runtime_id": 0, "scene_id": "custom-good",
+             "scene_uid": 0}
+        R._dispatch_picked(p, 0, '[1]')
+        assert captured.get("pool_engine_source") == "scene", \
+            f"无显式来源时应按场景上下文推导为 scene：{captured!r}"
