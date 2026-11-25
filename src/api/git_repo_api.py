@@ -820,7 +820,13 @@ def _vcs_req(provider: str, method: str, url: str, token: str, body: dict | None
     except HTTPException:
         raise
     except UpstreamAPIError as e:
-        _log_upstream_failure(method, provider, url, e.status_code, str(e))
+        # Issue #4343：读路径（GET）404 是「资源不存在」的语义结果而非运行故障，
+        # 降 DEBUG（候选探测/存在性核实的 404 由上层负缓存与聚合告警统一收口）；
+        # 其余状态码（401/403/5xx…）保持 WARNING——鉴权/上游故障不得静默。
+        if method == "GET" and e.status_code == 404:
+            log.debug(f"Git repo API {method} {url} upstream not-found (GET 404)")
+        else:
+            _log_upstream_failure(method, provider, url, e.status_code, str(e))
         msg = e.message or f"{provider} API 上游错误 ({e.status_code})"
         # Issue #3397：仓库级 404 且仓登记显示写法不同 → 返回可诊断文案而非裸 404。
         if e.status_code == 404:

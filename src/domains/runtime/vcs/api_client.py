@@ -71,6 +71,99 @@ _open_title_cache: dict[tuple, dict] = {}
 _open_title_lock = threading.Lock()
 
 
+# Issue #4343：ref 级 404 负缓存（repo_key + ident → 明确 Issue Not Found）。
+# 复用 src/api/issue_vcs_index.py 的进程内 TTL 缓存模式（#3759 口径：共用既有
+# 模式，不另建设施）。只缓存上游明确 404——401/403/5xx/网络异常是鉴权/运行
+# 故障，语义不得回退为「不存在」（Spec 关键验收项）。
+# TTL env 可调（GRAPE_VCS_REF_404_TTL_SECONDS），默认 60s，夹取 [60, 300]：
+# 上游同号 issue 恢复最多一个 TTL 后自动重探。
+_REF_404_TTL_ENV = "GRAPE_VCS_REF_404_TTL_SECONDS"
+_REF_404_TTL_DEFAULT = 60
+_REF_404_TTL_MIN = 60
+_REF_404_TTL_MAX = 300
+_REF_404_MAX_ENTRIES = 10000
+_ref_404_cache: dict[str, tuple[float, dict]] = {}
+_ref_404_lock = threading.Lock()
+
+
+def ref_404_neg_cache_ttl() -> int:
+    """负缓存 TTL（秒）：env 可调，夹取 [60, 300]。"""
+    try:
+        raw = int(os.environ.get(_REF_404_TTL_ENV, str(_REF_404_TTL_DEFAULT)))
+    except (TypeError, ValueError):
+        raw = _REF_404_TTL_DEFAULT
+    return max(_REF_404_TTL_MIN, min(_REF_404_TTL_MAX, raw))
+
+
+def _ref_404_key(repo_key: str, ident) -> str:
+    return f"{str(repo_key or '').lower()}#{str(ident or '')}"
+
+
+def get_cached_ref_404(repo_key: str, ident) -> "dict | None":
+    """负缓存命中 → 返回缓存的 404 错误 dict（neg_cached=True）；未命中返回 None。
+
+    命中路径零上游调用、零告警（首次写入已落 1 条可归因 WARNING）。
+    """
+    key = _ref_404_key(repo_key, ident)
+    now = time.monotonic()
+    with _ref_404_lock:
+        entry = _ref_404_cache.get(key)
+        if entry and entry[0] > now:
+            return dict(entry[1])
+        if entry:
+            _ref_404_cache.pop(key, None)
+    return None
+
+
+def remember_ref_404(repo_key: str, ident, detail: str = "", *, warn: bool = True) -> dict:
+    """上游明确 404 → 写入负缓存，返回缓存形态的错误 dict。
+
+    warn=True（默认）落 1 条可归因 WARNING（TTL 窗口内唯一告警点）；
+    扇出/候选探测场景传 warn=False，由调用方聚合后只告警 1 条。
+    """
+    ttl = ref_404_neg_cache_ttl()
+    payload = {"error": "HTTP 404", "status_code": 404, "error_code": "ref_not_found",
+               "detail": str(detail or "")[:_LOG_BODY_MAX], "neg_cached": True}
+    now = time.monotonic()
+    with _ref_404_lock:
+        # 有界防御：超阈值时先惰性清除过期项（物理占用随读取清除，长轮询
+        # 场景仍可能堆积已过期键，此处显式兜底防无界增长）。
+        if len(_ref_404_cache) >= _REF_404_MAX_ENTRIES:
+            for k in [k for k, v in _ref_404_cache.items() if v[0] <= now]:
+                _ref_404_cache.pop(k, None)
+        _ref_404_cache[_ref_404_key(repo_key, ident)] = (now + ttl, payload)
+    if warn:
+        log.warning(f"VcsApiClient: issue ref negative-cached repo_key={repo_key} "
+                    f"ident={ident} ttl={ttl}s (upstream 404, retry suppressed until TTL)")
+    return dict(payload)
+
+
+def clear_ref_404_neg_cache() -> None:
+    """清空 ref 级 404 负缓存（测试/运维复位用）。"""
+    with _ref_404_lock:
+        _ref_404_cache.clear()
+
+
+def _status_to_error_code(code) -> str:
+    """Issue #4343：HTTP 状态码 → error_code 分类（供调用方编程判别失败类别）。
+
+    404=not_found（读路径由 get_issue 细化为 ref_not_found 并入负缓存）；
+    401/403=auth_failed（鉴权故障，不得回退为「不存在」语义）；
+    >=500=upstream_error；其余 http_error。
+    """
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return "http_error"
+    if code == 404:
+        return "not_found"
+    if code in (401, 403):
+        return "auth_failed"
+    if code >= 500:
+        return "upstream_error"
+    return "http_error"
+
+
 def _open_title_key(provider: str, owner: str, repo: str) -> tuple:
     return ((provider or "").lower(), (owner or "").lower(), (repo or "").lower())
 
@@ -538,10 +631,28 @@ class VcsApiClient:
             form=_form, timeout=timeout)
 
     def get_issue(self, issue_number: int, timeout: float = 30.0) -> dict:
-        """获取 Issue 详情。"""
-        return self._request("GET", self._generic_path(
+        """获取 Issue 详情。
+
+        Issue #4343：ref 级 404 负缓存——上游明确 404（Issue Not Found）按
+        (repo_key, ident) 缓存一个 TTL（env 可调，夹取 [60,300]）；命中期内
+        直接返回缓存错误，零上游调用。401/403/5xx/网络异常不缓存、照常告警
+        （鉴权故障不得被误判为「不存在」，语义不回退）。
+        """
+        from src.kernel.repo_key import to_repo_key
+        _rk = to_repo_key(f"{self.owner}/{self.repo}", self.provider)
+        _cached = get_cached_ref_404(_rk, issue_number)
+        if _cached is not None:
+            return _cached
+        d = self._request("GET", self._generic_path(
             f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",
             f"/issues/{issue_number}"), timeout=timeout)
+        if isinstance(d, dict) and "error" not in d:
+            return d
+        if isinstance(d, dict) and str(d.get("status_code", "")) == "404":
+            # 上游明确 404 = ref_not_found：写入负缓存（落 1 条可归因告警）
+            return remember_ref_404(_rk, issue_number,
+                                    str(d.get("detail", "") or ""))
+        return d
 
     # === Issue 关闭 ===
 
@@ -1189,37 +1300,47 @@ class VcsApiClient:
                         _span.set_attribute("vcs.result", "ok" if "error" not in payload else "api_error")
                     return payload
             except urllib.error.HTTPError as e:
-                # Issue #558：错误 dict 补 status_code、detail 保留上游全文（不截断），
-                # 供调用方保留上游状态语义；error 键不变保兼容
+                # Issue #4343：错误 dict 增补 error_code 分类（404→not_found /
+                # 401,403→auth_failed / >=500→upstream_error / 其余 http_error），
+                # 供调用方编程区分「不存在」与「鉴权/网络故障」（负缓存只认 404）。
                 err_body = ""
                 try:
                     err_body = e.read().decode()
                 except Exception:
                     pass
-                # Issue #3759：上游 4xx 在此同样逐次刷 WARNING（孤儿仓库卡 404 轮询的
-                # 另一半噪声源）。按「仓库 + 资源 + 错误码」窗口聚合，窗口内只留首条。
-                try:
-                    _dec = _error_log_deduper().note(
-                        _error_log_key(url, e.code))
-                except Exception:  # noqa: BLE001
-                    _dec = None
-                if _dec is None or _dec.emit_full:
-                    log.warning(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code}: "
-                                f"{redact_text(err_body)[:_LOG_BODY_MAX]}"
-                                + (f" | folded_prev_window={_dec.folded}" if _dec and _dec.folded
-                                   else ""))
+                _err_code = _status_to_error_code(e.code)
+                # Issue #4343：读路径（GET）404 是「资源不存在」的语义结果而非
+                # 运行故障——降 DEBUG（可归因告警由负缓存写入口落 1 条）。
+                # 写路径 404 保持 WARNING：可能是路由拼错（如 gitlab /repos/ 旧坑），
+                # 静默会把配置错误藏成「不存在」。
+                if method == "GET" and e.code == 404:
+                    log.debug(f"VcsApiClient: {method} {redact_url(url)} → HTTP 404")
                 else:
-                    log.debug(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code} "
-                              f"(deduped folded={_dec.folded})")
+                    # Issue #3759：上游 4xx 在此同样逐次刷 WARNING（孤儿仓库卡 404 轮询的
+                    # 另一半噪声源）。按「仓库 + 资源 + 错误码」窗口聚合，窗口内只留首条。
+                    try:
+                        _dec = _error_log_deduper().note(
+                            _error_log_key(url, e.code))
+                    except Exception:  # noqa: BLE001
+                        _dec = None
+                    if _dec is None or _dec.emit_full:
+                        log.warning(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code}: "
+                                    f"{redact_text(err_body)[:_LOG_BODY_MAX]}"
+                                    + (f" | folded_prev_window={_dec.folded}" if _dec and _dec.folded
+                                       else ""))
+                    else:
+                        log.debug(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code} "
+                                  f"(deduped folded={_dec.folded})")
                 if _span is not None:
                     _span.set_attribute("http.status_code", e.code)
                     _span.set_attribute("vcs.result", "http_error")
-                return {"error": f"HTTP {e.code}", "status_code": e.code, "detail": err_body}
+                return {"error": f"HTTP {e.code}", "status_code": e.code,
+                        "detail": err_body, "error_code": _err_code}
             except Exception as e:
                 log.warning(f"VcsApiClient: {method} {redact_url(url)} → {redact_text(e)}")
                 if _span is not None:
                     _span.set_attribute("vcs.result", "exception")
-                return {"error": str(e)}
+                return {"error": str(e), "error_code": "network_error"}
 
 
 def create_pr_for_repo(repo_key: str, token: str, title: str, head: str, base: str,
