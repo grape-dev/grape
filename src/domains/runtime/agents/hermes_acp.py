@@ -44,6 +44,9 @@ import shlex
 import select as _select_mod
 from typing import Generator, Protocol, Callable
 from src.kernel.config import log
+# Issue #4346：session/new 失败文案统一带稳定分类标记（服务端按标记分流
+# ENGINE_UNREACHABLE / SESSION_CREATE_BLOCKED / ENGINE_MISCONFIGURED）。
+from src.domains.runtime.engine.session_guard import format_session_error as _format_session_error
 
 _bwrap_fail_notified = False
 
@@ -586,7 +589,7 @@ class HermesACPBackend:
                         "cwd": cwd_arg, "mcpServers": [],
                     }, timeout=100)
                     if err:
-                        error_events.append(f"session/new failed: {err}")
+                        error_events.append(_format_session_error("session/new", err))
                         yield ("done", _done_result(-1, "", session_id, error_events, _stderr_text()))
                         return
                     new_session_id = _extract_session_id(result) or ""
@@ -597,7 +600,7 @@ class HermesACPBackend:
                     "cwd": cwd_arg, "mcpServers": [],
                 }, timeout=100)
                 if err:
-                    error_events.append(f"session/new failed: {err}")
+                    error_events.append(_format_session_error("session/new", err))
                     yield ("done", _done_result(-1, "", session_id, error_events, _stderr_text()))
                     return
                 new_session_id = _extract_session_id(result) or ""
@@ -2308,7 +2311,7 @@ def _run_acp_session(
                 "cwd": cwd_arg, "mcpServers": [],
             }, timeout=100)
         if err:
-            error_events.append(f"session failed: {err}")
+            error_events.append(_format_session_error("session/new", err))
             yield ("done", _done_result(-1, "", session_id, error_events, ""))
             return
         new_session_id = _extract_session_id(result) or session_id

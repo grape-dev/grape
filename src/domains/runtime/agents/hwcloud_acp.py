@@ -51,6 +51,9 @@ import shutil
 from typing import Generator
 
 from src.kernel.config import log
+# Issue #4346：session/new 失败文案统一带稳定分类标记（服务端据此分流
+# ENGINE_UNREACHABLE / SESSION_CREATE_BLOCKED / ENGINE_MISCONFIGURED）。
+from src.domains.runtime.engine.session_guard import format_session_error as _format_session_error
 
 _bwrap_fail_notified = False
 
@@ -482,7 +485,7 @@ class HwcloudACPBackend:
                 "mcpServers": [],
             }, timeout=100)
             if err:
-                error_events.append(f"session/new failed: {err}")
+                error_events.append(_format_session_error("session/new", err))
                 yield ("done", _done_result(-1, "", session_id, error_events, ""))
                 return
             new_session_id = _extract_session_id(result) or ""

@@ -191,6 +191,18 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     circuit_open_until VARCHAR(64) DEFAULT '',  -- 熔断截止（空=未熔断；到期后半开试探）
     circuit_fail_count INTEGER DEFAULT 0,       -- 连续 spawn 失败次数（冷却指数退避用）
     circuit_half_open INTEGER DEFAULT 0,        -- 半开试探占位（0=无在飞试探）
+    -- Issue #4346：session 通道熔断（session/new 连续超时）+ LLM provider 注册校验。
+    -- 与上面的 backend 熔断列相互独立：backend 列由 backend_health 独占，
+    -- session 列只反映「建会话」通道健康度，不改写 ENGINE_OFFLINE 语义。
+    session_fail_streak INTEGER DEFAULT 0,          -- 连续 session/new 失败次数
+    session_fail_total INTEGER DEFAULT 0,           -- 累计 session 失败次数（排障）
+    session_circuit_until VARCHAR(64) DEFAULT '',   -- session 熔断截止（空=未熔断）
+    session_circuit_half_open INTEGER DEFAULT 0,    -- session 半开探测占位
+    session_last_error_code VARCHAR(48) DEFAULT '', -- 最近一次 session 失败分类
+    session_last_failure_at VARCHAR(64) DEFAULT '', -- 最近一次失败时间（UTC ISO）
+    session_last_success_at VARCHAR(64) DEFAULT '', -- 最近一次建会话成功时间
+    llm_provider_ok INTEGER DEFAULT 1,              -- 注册/启用期 provider 校验（0=不进池）
+    llm_provider_reason VARCHAR(255) DEFAULT '',    -- provider 缺失原因
     -- 2026-11-18：7794d05ee 的沙箱/引擎改造在 7 处代码里引用了这两列，却没加进表里，
     -- 导致 claim 查询 1054（Unknown column）→ 引擎进程从未 spawn → 任务挂到超时判 failed。
     -- 老库由迁移 202611180002 补列；这里让新库建表即带。
@@ -333,6 +345,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     pool_engine_source TEXT DEFAULT '',           -- pool_engine_ids 来源：scene=用户场景绑定 / auto=自动选择 / directed=engine_config.runtime_id 定向锁定 / scene_missing=场景未在仓内 scene pool 登记（Issue #3790，与 agent_tasks 降级判别、事件 payload 共用，local-claimer 设计 + Issue #2791）
     engine_priorities  TEXT DEFAULT '',           -- Issue #3564：实例绑定优先级映射（JSON {"<engine_id>":1..9}，1 最高；空=未配置=旧行为）
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/pending_self_report/completed/failed/timeout_failed/cancelled（Issue #537 新增 pending_self_report 中间态 + timeout_failed 终态）
+    session_retry_count INTEGER DEFAULT 0,   -- Issue #4346：session/new 超时「换引擎重试」专用计数（与 #403 瞬时重试共用的 attempts 解耦，历史 attempts 不再吞掉重试）
     exit_code         INTEGER DEFAULT NULL,
     result_text       MEDIUMTEXT DEFAULT '',
     errors            MEDIUMTEXT DEFAULT '',

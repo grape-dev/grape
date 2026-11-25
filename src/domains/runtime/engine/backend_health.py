@@ -275,7 +275,15 @@ def claim_allowed(runtime_id: int, now: float | None = None, cursor=None) -> boo
     if not row:
         return True
     _name, status, _reason, _checked, until, _fail_count, half, _healthy = row
-    return claim_eligible(status, until, half, _now)
+    if not claim_eligible(status, until, half, _now):
+        return False
+    # Issue #4346：session 通道闸门（session/new 熔断 / provider 缺失）与 backend
+    # 熔断同尺——派发选中与认领必须一致，否则会「选中即被拒」空转到 stale 判死。
+    try:
+        from src.domains.runtime.engine import session_guard as _sg
+        return _sg.session_claim_allowed(runtime_id, now=_now, cursor=cursor)
+    except Exception:  # noqa: BLE001 - session 闸门故障按放行（fail-open 旧行为）
+        return True
 
 
 def note_claim_started(c, runtime_id: int) -> None:
@@ -293,6 +301,12 @@ def note_claim_started(c, runtime_id: int) -> None:
         c.execute("UPDATE agent_runtimes SET circuit_half_open=1 WHERE id=?", (runtime_id,))
         log.info(f"ENGINE_BACKEND_HALF_OPEN: runtime_id={runtime_id} engine={name} "
                  f"reason={str(reason or '')[:200]}")
+    # Issue #4346：session 通道半开占位（与 backend 半开相互独立）
+    try:
+        from src.domains.runtime.engine import session_guard as _sg
+        _sg.note_session_probe_started(c, runtime_id)
+    except Exception as _se:
+        log.debug(f"session half-open mark failed (runtime={runtime_id}): {_se}")
 
 
 def note_claim_outcome(c, runtime_id: int, backend_failed: bool = False,
