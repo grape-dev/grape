@@ -76,10 +76,15 @@
 .project-card-status-hosted::before{content:'';width:4px;height:4px;border-radius:50%;background:#1a9c52}
 .project-card-status-none{background:var(--bg);color:var(--t3)}
 .project-card-status-none::before{content:'';width:4px;height:4px;border-radius:50%;background:var(--t3)}
+/* Issue #4241：webhook 地址漂移（托管已失效，可一键修复） */
+.project-card-status-stale{background:rgba(255,149,0,.12);color:#b26a00}
+.project-card-status-stale::before{content:'';width:4px;height:4px;border-radius:50%;background:#ff9500}
 .project-card-actions{display:flex;align-items:center;gap:4px;flex-shrink:0;margin-left:4px}
 .project-card-btn{padding:2px 10px;border-radius:12px;font-size:11px;font-weight:500;cursor:pointer;white-space:nowrap;transition:all .2s;text-decoration:none;display:inline-flex;align-items:center;gap:3px}
 .project-card-btn-outline{background:transparent;border:1px solid color-mix(in srgb,var(--a) 42%,transparent);color:var(--a);padding:2px 10px}
 .project-card-btn-outline:hover{border-color:var(--a);background:var(--a);color:#fff}
+.project-card-btn-warn{background:rgba(255,149,0,.12);border:1px solid rgba(255,149,0,.5);color:#b26a00;padding:2px 10px}
+.project-card-btn-warn:hover{border-color:#ff9500;background:#ff9500;color:#fff}
 
 .project-pager{display:flex;align-items:center;justify-content:center;gap:12px;margin-top:16px;grid-column:1/-1}
 .project-pager button{width:32px;height:32px;border-radius:50%;border:1px solid var(--hairline);background:var(--c);color:var(--t2);font-size:15px;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center}

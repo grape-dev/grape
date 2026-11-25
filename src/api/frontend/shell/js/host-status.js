@@ -29,6 +29,10 @@
       webhook_missing: compact
         ? t('common.host_status_webhook_missing_compact', 'webhook 未创建')
         : t('common.host_status_webhook_missing', '项目 webhook 缺失，Grape 无法接收仓库事件'),
+      // Issue #4241：地址漂移三态（落盘注册地址与当前权威地址不一致）
+      webhook_stale: compact
+        ? t('common.host_status_webhook_stale_compact', 'webhook 地址漂移')
+        : t('common.host_status_webhook_stale', '项目 webhook 地址已漂移（与实际注册地址不一致），Grape 无法接收仓库事件，需修复托管'),
       partial: compact
         ? t('common.host_status_partial_compact', '托管部分完成')
         : t('common.host_status_partial', '该项目托管流程未完成，Grape 部分功能不可用')

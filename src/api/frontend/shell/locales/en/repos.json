@@ -59,6 +59,11 @@
     "status_hosted": "Hosted",
     "status_joined": "Joined",
     "status_not_joined": "Not Hosted",
+    "status_webhook_stale": "Needs repair",
+    "repair_host": "Repair hosting",
+    "repair_host_running": "Repairing…",
+    "repair_host_ok": "Hosting repaired",
+    "repair_host_failed": "Repair failed, please retry later",
     "no_permission_host": "No permission to host. Please contact the administrator.",
     "no_description": "No description"
   },

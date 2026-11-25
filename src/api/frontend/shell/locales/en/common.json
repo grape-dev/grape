@@ -123,6 +123,8 @@
   "host_status_bot_missing_compact": "grape_bot not joined",
   "host_status_webhook_missing": "Project webhook missing; Grape cannot receive repository events",
   "host_status_webhook_missing_compact": "webhook not created",
+  "host_status_webhook_stale": "Project webhook URL has drifted from the registered address; Grape cannot receive repo events — hosting needs repair",
+  "host_status_webhook_stale_compact": "webhook URL drifted",
   "host_status_partial": "Hosting setup for this project is incomplete; some Grape features are unavailable",
   "host_status_partial_compact": "Hosting partially completed",
   "host_status_fallback": "Hosting setup for this project is incomplete; some Grape features are unavailable"

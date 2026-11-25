@@ -123,6 +123,8 @@
   "host_status_bot_missing_compact": "grape_bot 未加入",
   "host_status_webhook_missing": "项目 webhook 缺失，Grape 无法接收仓库事件",
   "host_status_webhook_missing_compact": "webhook 未创建",
+  "host_status_webhook_stale": "项目 webhook 地址已漂移（与实际注册地址不一致），Grape 无法接收仓库事件，需修复托管",
+  "host_status_webhook_stale_compact": "webhook 地址漂移",
   "host_status_partial": "该项目托管流程未完成，Grape 部分功能不可用",
   "host_status_partial_compact": "托管部分完成",
   "host_status_fallback": "该项目托管流程未完成，Grape 部分功能不可用"

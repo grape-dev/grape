@@ -683,7 +683,7 @@
             </div>
             <div class="ap-hero-sub">
               {{ role === 'Maintainer' ? t('hero_maintainer') : t('hero_member') }} ·
-              {{ t('webhook_ok') }}
+              {{ webhookLabel }}
             </div>
           </div>
           <div class="ap-stats">
@@ -2502,6 +2502,13 @@ function loadPluginNameMap() {
 }
 
 // ═══ host banner（托管自愈） ═══
+// Issue #4241：hero 副标题的 webhook 标签按三态渲染——地址漂移/未建立时不能再显示「正常」
+const webhookLabel = computed(() => {
+  const st = (dashData.value || {}).webhook_state || ''
+  if (st === 'stale') return t('dv2.hero_webhook_stale')
+  if (st === 'absent') return t('dv2.hero_webhook_absent')
+  return t('webhook_ok')
+})
 const hostBanner = computed(() => {
   const d = dashData.value || {}
   const hs = d.host_status || ''
@@ -2515,6 +2522,9 @@ const hostBanner = computed(() => {
     }
   if (hs === 'webhook_missing')
     return { error: true, text: t('dv2.host_webhook_missing') + err, btn: t('dv2.host_recheck') }
+  // Issue #4241：三态之一——webhook 注册地址与当前权威地址漂移，托管实际已失效
+  if (hs === 'webhook_stale')
+    return { error: true, text: t('dv2.host_webhook_stale') + err, btn: t('dv2.host_recheck') }
   return { error: false, text: t('dv2.host_flow_incomplete') + err, btn: t('dv2.host_recheck') }
 })
 function repairHost() {

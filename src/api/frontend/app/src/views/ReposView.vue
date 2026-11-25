@@ -191,14 +191,19 @@
                   </div>
                   <span
                     class="project-card-status"
-                    :class="r.is_hosted ? 'project-card-status-hosted' : 'project-card-status-none'"
-                    >{{
-                      r.is_hosted
-                        ? t('repos.card.status_hosted')
-                        : t('repos.card.status_not_joined')
-                    }}</span
+                    :class="repoStatusClass(r)"
+                    >{{ repoStatusText(r) }}</span
                   >
                   <div class="project-card-actions">
+                    <!-- Issue #4241：webhook 地址漂移 → 一键修复托管（回写实际注册地址后自愈） -->
+                    <button
+                      v-if="r.is_hosted && r.webhook_state === 'webhook_stale'"
+                      class="project-card-btn project-card-btn-warn"
+                      :disabled="repairingRepo === r.full_name"
+                      @click.stop="repairHostFor(r, $event)"
+                    >
+                      {{ repairingRepo === r.full_name ? t('repos.card.repair_host_running') : t('repos.card.repair_host') }}
+                    </button>
                     <button
                       v-if="r.is_hosted"
                       class="project-card-btn project-card-btn-outline"
@@ -444,6 +449,7 @@ const repoPage = ref(0)
 const onlyHosted = ref(true)
 const platformFilter = ref('')
 const refreshing = ref(false)
+const repairingRepo = ref('')
 const wsLoaded = ref(false)
 const templatesRef = ref(null)
 const crNameRef = ref(null)
@@ -899,6 +905,39 @@ function hostAndSelect(r, event) {
 
 function hostNoPermission() {
   G.app.showToast(t('repos.card.no_permission_host'))
+}
+
+// ── Issue #4241：托管三态徽标 + webhook 地址漂移一键修复 ──
+// 后端 /repos/member 每行带 webhook_state（ok/stale/absent/unknown，纯本地比对），
+// stale = 实际注册地址与当前权威 webhook_url 不一致 → 显示「需修复托管」。
+function repoStatusClass(r) {
+  if (!r || !r.is_hosted) return 'project-card-status-none'
+  if (r.webhook_state === 'webhook_stale') return 'project-card-status-stale'
+  return 'project-card-status-hosted'
+}
+function repoStatusText(r) {
+  if (!r || !r.is_hosted) return t('repos.card.status_not_joined')
+  if (r.webhook_state === 'webhook_stale') return t('repos.card.status_webhook_stale')
+  return t('repos.card.status_hosted')
+}
+function repairHostFor(r) {
+  if (!r || !r.owner || !r.name || repairingRepo.value) return
+  repairingRepo.value = r.full_name
+  G.API.post('/repos/' + r.owner + '/' + r.name + '/repair-host', {})
+    .then((d) => {
+      repairingRepo.value = ''
+      if (d && d.status === 'ok') {
+        G.app.showToast(t('repos.card.repair_host_ok'))
+        loadProjects({ silent: true })
+      } else {
+        G.app.showToast((d && d.message) || t('repos.card.repair_host_failed'))
+      }
+    })
+    .catch((e) => {
+      repairingRepo.value = ''
+      const det = (e && (e.detail || {})) || {}
+      G.app.showToast(t('repos.card.repair_host_failed') + ' ' + (det.message || (e && e.message) || ''))
+    })
 }
 
 function unhostRepo(fullName, event) {

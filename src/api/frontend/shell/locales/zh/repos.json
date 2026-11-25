@@ -59,6 +59,11 @@
     "status_hosted": "已托管",
     "status_joined": "已加入",
     "status_not_joined": "未托管",
+    "status_webhook_stale": "需修复托管",
+    "repair_host": "修复托管",
+    "repair_host_running": "修复中…",
+    "repair_host_ok": "托管已修复",
+    "repair_host_failed": "修复失败，请稍后重试",
     "no_permission_host": "无权限托管，请联系管理员",
     "no_description": "暂无描述"
   },
