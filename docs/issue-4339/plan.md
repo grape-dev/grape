@@ -8,7 +8,8 @@
 | `src/domains/runtime/migrations_ddl.py` | 新增 `ALTER_EVENTS__EVENTS_PAYLOAD_MEDIUMTEXT`（含 `MODIFY COLUMN`） |
 | `src/domains/runtime/migrations/events_payload_mediumtext.py` | 新增幂等迁移（探测短路 + `_destructive_ddl` + ALTER 后复检 + post_check） |
 | `src/api/db_setup.py` | 注册 `202611250001`（runtime 域）与 `202611250002`（mgmt 域） |
-| `src/domains/runtime/event_store.py` | `_insert_event_row` 前置字节守卫 |
+| `src/domains/runtime/event_store.py` | `_insert_event_row` 前置字节守卫；判定抽成可复用 `payload_size_exceeded` / `payload_size_guard` |
+| `src/domains/runtime/pipeline/event_pipeline.py` | 去重快路径裸 INSERT 前置同一份守卫（R1）；`seq==0` fail-closed 不派发（R2） |
 | `src/domains/mgmt/schema_ddl.py` | `_CHANNEL_OUTBOUND_CARD_DDL`：`payload TEXT NOT NULL DEFAULT '{}'` → `MEDIUMTEXT` |
 | `src/domains/mgmt/migrations_ddl.py` | 新增卡片表 `MODIFY COLUMN payload MEDIUMTEXT NOT NULL DEFAULT '{}'` |
 | `src/domains/mgmt/migrations/channel_outbound_card_payload_mediumtext.py` | 同形态幂等迁移 |
@@ -43,18 +44,33 @@
 skill_files MEDIUMTEXT"` 缺 `COLUMN`，会走裸 `db.execute` 绕过 `min_code_version` 门槛，失败也被
 外层 `except` 吞掉。本条不复用该先例的写法，只在注释中保留差异说明。
 
-## 3. 写入口字节守卫（event_store）
+## 3. 写入口字节守卫（event_store + event_pipeline）
 
-`_insert_event_row()` 在 `json.dumps` 之后、任何 INSERT 之前：
+判定函数收口在 `event_store`，两个写入口共用同一份：
 
 ```
-bytes = len(_payload_json.encode("utf-8"))
-bytes > 16_777_215  → log.error("event payload too large, INSERT rejected (never truncated): ...") + return 0
-bytes > 1_048_576   → log.warning("event payload large: ...")
+payload_size_exceeded(bytes) -> bool          # 纯判定，无副作用
+payload_size_guard(bytes, event_type, repo_key, issue_id) -> bool
+                                              # 判定 + 留痕；超限 ERROR 返回 False
 ```
 
-- 返回 0 即既有失败语义：`append_event` 回滚并返回 0/幂等负值，调用方按写入失败处理。
-- 阈值 16,777,215 与 `MEDIUMTEXT` 上限一致；SQLite 也按同一阈值拒绝，保持两端行为一致。
+`bytes = len(json.dumps(payload).encode("utf-8"))`；阈值 16,777,215（`MEDIUMTEXT` 上限）、
+WARNING 阈值 1,048,576。SQLite 同样按该阈值拒绝，保持两端行为一致。
+
+两个写入口（QA 审查 R1：只挂一处即仍有静默截断）：
+
+| 写入口 | 命中场景 | 守卫位置 |
+|--------|----------|----------|
+| `event_store._insert_event_row`（`append_event` 路径） | a2a_event / issue_comment / 无 issue_id 或 agent_type | `json.dumps` 后、任一 INSERT 前，返回 0 |
+| `event_pipeline.run_pipeline` 去重快路径的裸 INSERT | `issue_opened`/`issue_updated`/`pull_request_*` 且 issue_id + agent_type 齐备 | INSERT 前调 `payload_size_guard`，超限 fail-closed |
+
+拒绝语义（R2）：`append_event` 超限返回 0，与「瞬时写失败」不可区分。`run_pipeline` 在
+`seq == 0` 处统一 fail-closed —— 释放已抢占的 `event_active_guard` 行、落
+`event_skipped`（`reason=event_payload_rejected`；非超限写失败为 `event_insert_failed`）、
+`result.ok=False` 且**不** pick_engine / 入队，避免「事件行不存在但任务照常入队」的
+event_seq=0 孤儿任务。守卫行必须释放，否则同 (issue, agent) 的后续事件被残留守卫永久
+dedup 掉。
+
 - 告警前缀 `event payload too large` / `event payload large` 可 grep，且与
   `event payload view: parse failed`（现象告警）区分。
 - 不写截断值：守卫在 INSERT 前返回，库中不会出现半截 JSON。
@@ -101,3 +117,11 @@ ORDER BY seq DESC;
   门槛拦截抛错；ALTER 后仍为 `text` 抛错；非 owner（视图/缺表）抛 `_NonOwnerObject`；SQLite 分支零 DDL。
 - 写入口（真 SQLite 测试库）：>64KB payload 落库 `LENGTH>65535` 且可 JSON 解析、视图可投影；
   >1MB 落库且留 WARNING；>16MB 返回 0、留 ERROR、无新行。
+- 管道级（R1/R2，真 `run_pipeline`）：`issue_opened` 超 16MB → 去重快路径拒绝，无事件行、
+  无 `agent_tasks`、守卫行已释放、`event_skipped(reason=event_payload_rejected)`、
+  `result.ok=False`；`issue_comment` 超 16MB（走 `append_event`）→ `seq=0` fail-closed，同样不派发。
+- 收口守卫：机械扫描 `src/` 下所有含 events INSERT 的模块，要求插入点之前存在
+  `if not payload_size_guard(` 调用（新增裸 INSERT 漏接守卫时直接变红）。
+- **覆盖边界**：>64KB roundtrip 跑在 SQLite（自身无 64KB 列上限），回归的是「守卫/迁移不误杀、
+  视图可解析」；MySQL 侧截断回归由 DDL 文本断言 + `information_schema` 探测分支兜底，
+  真 MySQL 门禁需外部实例（不在本仓库单测范围内）。
