@@ -200,19 +200,40 @@ def test_trigger_empty_instruction_returns_explicit_409(env, monkeypatch):
     assert ei.value.status_code == 409
     assert ei.value.detail["message"] == AUTOPILOT_EMPTY_INSTRUCTION_REASON
 
-def test_create_task_insert_supplies_state_columns():
-    """MySQL strict：三列 TEXT NOT NULL 无默认值时，建单必须显式写空串（否则 1364 → 500）。
+def test_create_task_persists_state_columns_as_empty(env):
+    """建单必须真的把三列落库为空串（MySQL strict 下不给值即 1364 → 500）。
 
     2026-11-25 部署验证实测：POST /api/autopilot/tasks 返回
     `OperationalError: (1364, "Field 'dispatch_state' doesn't have a default value")`。
+    这里用真实执行取代文本断言（架构守护 C3：删掉一列时文本断言仍全绿）。
     """
+    conn, user = env
+    body = ap.CreateTaskBody(name="test_create_probe", repo_key="", instruction="probe")
+    res = ap.create_task(body, user)
+
+    row = conn.execute(
+        "SELECT dispatch_state, dispatch_state_reason, dispatch_state_at "
+        "FROM autopilot_tasks WHERE id=?", (res["id"],)).fetchone()
+    assert tuple(row) == ("", "", ""), f"三列未落空串: {tuple(row)}"
+
+
+def test_create_task_insert_column_list_is_exact():
+    """列清单按逗号切分后与期望集合精确相等（子串断言会把 dispatch_state 误判为命中）。"""
     import inspect
+    import re
 
-    from src.domains.mgmt.routes import autopilot as ap_routes
-
-    src = inspect.getsource(ap_routes.create_task)
-    for col in ("dispatch_state", "dispatch_state_reason", "dispatch_state_at"):
-        assert col in src, f"建单 INSERT 未写 {col} —— MySQL strict 下会 1364"
+    src = inspect.getsource(ap.create_task)
+    sql = " ".join(re.findall(r'"([^"]*)"', src))
+    m = re.search(r"INSERT INTO autopilot_tasks\s*\(([^)]*)\)", sql)
+    assert m, "未找到 create_task 的 INSERT 列清单"
+    cols = {c.strip() for c in m.group(1).split(",") if c.strip()}
+    expected = {
+        "name", "repo_key", "agent_type", "instruction", "skill_name", "cron",
+        "max_retry", "enabled", "next_run_at", "created_at", "updated_at", "created_by",
+        "engine_runtime_ids", "custom_fields", "work_branch", "engine_runtime_uids",
+        "dispatch_state", "dispatch_state_reason", "dispatch_state_at",
+    }
+    assert cols == expected, f"列清单不符: 缺={sorted(expected-cols)} 多={sorted(cols-expected)}"
 
 
 def test_state_column_ddl_uses_varchar_with_default():

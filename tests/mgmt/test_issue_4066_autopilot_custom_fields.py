@@ -38,7 +38,10 @@ def env(tmp_path, monkeypatch):
         engine_runtime_ids TEXT DEFAULT '',
         custom_fields TEXT DEFAULT '',
         work_branch TEXT DEFAULT '',
-        engine_runtime_uids TEXT DEFAULT ''
+        engine_runtime_uids TEXT DEFAULT '',
+        dispatch_state TEXT NOT NULL DEFAULT '',
+        dispatch_state_reason TEXT NOT NULL DEFAULT '',
+        dispatch_state_at TEXT NOT NULL DEFAULT ''
     );
     """)
     conn.commit()

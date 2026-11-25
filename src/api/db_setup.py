@@ -9833,18 +9833,31 @@ def _migration_202611240011_autopilot_state_column_defaults() -> None:
     2026-11-25 部署验证实测：`TEXT NOT NULL DEFAULT ''` 在 MySQL 8.0 落地为
     `text NOT NULL DEFAULT NULL`，建单 INSERT 不给值即 1364，POST /api/autopilot/tasks
     直接 500。列已存在时 `_ensure_column` 不改类型/默认，需独立迁移补一刀（幂等 MODIFY）。
+
+    kind=cleanup：MODIFY COLUMN 属危险 DDL，只走 `_destructive_ddl` 唯一入口（过
+    min_code_version 门槛 + MDL 归一）；被门槛拦截时 fn raise → 不盖章，下版本重试。
     """
     from src.domains.mgmt.migrations.autopilot_dispatch_state import ensure_state_column_defaults
 
     ensure_state_column_defaults()
 
 
+def _postcheck_202611240011_autopilot_state_column_defaults() -> None:
+    """盖章前校验三列默认值确已收敛为空串（Issue #3648 第 6 条约定）。"""
+    from src.domains.mgmt.migrations.autopilot_dispatch_state import (
+        state_column_defaults_converged,
+    )
+
+    state_column_defaults_converged()
+
+
 register_migration(
     version="202611240011",
     name="autopilot-state-column-defaults",
-    kind="safe",
+    kind="cleanup",
     domains=("mgmt",),
     fn=_migration_202611240011_autopilot_state_column_defaults,
+    post_check=_postcheck_202611240011_autopilot_state_column_defaults,
 )
 
 
