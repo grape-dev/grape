@@ -848,6 +848,44 @@ def delete_conversation(conv_id: str):
 
 # ====== chat_config CRUD（合并进 chat_agent_session）======
 
+# 沙箱四段式引擎名结构（cloud_worker._expand_templates 生成）：
+#   engine:template_slug:provider_slug:provider_id —— 模板段 t{db_id} 兜底、
+#   provider 段 [a-z0-9-]；第四段两代形态并存：v3 数字 provider_id（基线生成侧）
+#   与 aw11f 树的 provider uid 字符串（'13829b68-…'，8090 现网实测）。
+#   局部判定专用，勿挪作他用（形态收敛另案）。
+_SANDBOX_ENGINE_NAME_RE = None
+
+
+def _known_runtime_row_name(name: str) -> bool:
+    """agent_runtimes.name 的防幽灵判定（读侧局部版）。
+
+    与共享的 is_known_engine_name 分工：
+    - 裸名（无 ':'）：同一口径，直接复用共享白名单；
+    - 含 ':'：仅当【四段结构完整】且【首段（引擎类型）过白名单】才放行——
+      沙箱名由注册链路生成、结构性可辨，任意散串（如 'default:x'）仍拒。
+    本函数只服务配置行回显（_chat_config_row_engine uid/id 双轨道），
+    不改共享函数语义：候选过滤（_apply_filters）与占位行守门（ensure_default_runtime）
+    仍按裸名口径判——沙箱名（credential_id>0）本来就到不了那两处（8090 实测）。
+    """
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    if ":" not in n:
+        return _engines.is_known_engine_name(n)
+    global _SANDBOX_ENGINE_NAME_RE
+    if _SANDBOX_ENGINE_NAME_RE is None:
+        import re as _re
+        # 四段：首段引擎类型名；2/3 段 slug（[a-z0-9-]，≤48 覆盖 37 字符模板 uid）；
+        # 末段两代形态：数字 provider_id（基线生成侧）或 provider uid
+        # （8-4-4-4-12 hex 带 '-'，36 字符，aw11f/8090 现网形态）。
+        _SANDBOX_ENGINE_NAME_RE = _re.compile(
+            r"^[a-z][a-z0-9-]{0,31}:[a-z0-9-]{1,48}:[a-z0-9-]{1,48}"
+            r":(?:[0-9]{1,10}|[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$")
+    if not _SANDBOX_ENGINE_NAME_RE.match(n):
+        return False
+    return _engines.is_known_engine_name(n.split(":")[0])
+
+
 def _chat_config_candidate_rows(user_id: int):
     """按优先级返回该用户的全局 Chat 配置候选行。
 
@@ -955,8 +993,8 @@ def _chat_config_row_engine(runtime_id: int, engine_uid: str = "", c=None, row_i
             _uid_query_ok = False
             log.debug(f"get_chat_config: engine_uid track unavailable ({e})")
         if urow and urow[1]:
-            _un = (urow[1] or "").strip().lower()
-            if _engines.is_known_engine_name(_un):
+            # #3396 收尾 #18 方案 Z：同上，四段名走局部判定（裸名仍走共享白名单）
+            if _known_runtime_row_name(urow[1]):
                 _uid_rid = int(urow[0] or 0)
                 if row_id and _uid_rid and _uid_rid != int(runtime_id or 0):
                     _chat_config_backfill_runtime_id(row_id, _uid_rid, runtime_id)
@@ -984,8 +1022,8 @@ def _chat_config_row_engine(runtime_id: int, engine_uid: str = "", c=None, row_i
         else:
             log.debug(f"get_chat_config: runtime_id={runtime_id} 不存在（引擎行已删除），按未配置处理")
         return "", False, reason_missing, 0
-    _n = (brow[0] or "").strip().lower()
-    if not _engines.is_known_engine_name(_n):
+    # #3396 收尾 #18 方案 Z：沙箱四段名（engine:tpl:prov:prov_id）经局部判定放行，散串仍拒
+    if not _known_runtime_row_name(brow[0]):
         # 幽灵/未知引擎（如历史遗留 'default'）：视为未绑定，走本机直连/空兜底
         log.warning(f"get_chat_config: runtime_id={runtime_id} 指向未知引擎 '{brow[0]}'，按未配置处理")
         return "", False, reason_missing, 0
