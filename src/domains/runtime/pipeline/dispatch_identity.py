@@ -13,7 +13,7 @@ def identity_for_actor(account_name: str, actor_name: str,
                        task_user_id: str = "") -> "tuple[str, str]":
     """返回 `(可写 user_id, source)`。
 
-    ``task_user_id`` 优先（Issue 创建人的 Grape 用户 id），其次按账号名解析；
+    ``task_user_id`` 优先（Issue 归属人的 Grape 用户 id），其次按账号名解析；
     on（默认）/off/shadow 由契约判定：`applies` 为假时 user_id 为空、行值保持 0；
     on：返回解析出的 id，由调用方写进 agent_tasks.user_id。
     异常不外抛：认人失败不得阻断派发。

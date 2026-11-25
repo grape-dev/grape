@@ -186,7 +186,7 @@ def _get_issue_owner_id(repo_key: str, issue_number: str) -> str:
 
 
 def _scene_user_id(repo_key: str, issue_id: str, actor: str = ""):
-    """Issue 场景归属用户：优先 Issue 创建人的 Grape user_id（UUID）。
+    """Issue 场景归属用户：优先 Issue 归属人的 Grape user_id（UUID）。
 
     没有 Grape 归属（外部/机器人建单）时回退原有 VCS 登录名反查，保持兼容。
     返回值可能是 UUID 字符串（D105 起 user_id 全局字符串化），调用方按原样透传。

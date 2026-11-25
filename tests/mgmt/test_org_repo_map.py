@@ -229,29 +229,6 @@ def test_v3_routing_profile_drives_recall_and_matched_capability():
     assert detail["routing"]["include_keywords"] == ["订单", "履约", "支付回调"]
 
 
-def test_analysis_context_prioritizes_code_evidence_over_large_readme(monkeypatch):
-    """大 README 不能把 capabilities/graph 挤掉，否则分析会退回文档复述。"""
-    from src.domains.mgmt import org_repo_map as mod
-
-    org = _seed()
-    monkeypatch.setattr(mod, "_repo_sources", lambda org, row: {
-        "description": "订单服务",
-        "readme": "R" * 60000,
-        "readme_local": "",
-        "repo_map_doc": "M" * 30000,
-        "capabilities": "## Supported Features\n- 订单履约\n" + "C" * 30000,
-        "graph": "## Module Dependency Graph\n" + "G" * 30000,
-        "org_context": "O" * 20000,
-        "source_commit": "abc123",
-    })
-    ctx = mod.analysis_context(org["id"], REPO_KEY)
-    assert "订单履约" in ctx["capabilities"]
-    assert len(ctx["capabilities"]) <= 18000
-    assert len(ctx["graph"]) <= 18000
-    assert len(ctx["readme"]) <= 18000
-    assert len(ctx["repo_map_doc"]) <= 18000
-
-
 def test_legacy_v1_ai_result_derives_core_fields_without_interfaces():
     """历史 v1 结果仍可展示；capabilities 变成核心功能，接口不进入正文。"""
     from src.domains.mgmt import org_repo_map as mod

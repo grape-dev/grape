@@ -365,21 +365,7 @@ def save_ai_result(org_id: str, repo_key: str, result: dict, *,
     return get_map(str(org_id), str(repo_key))
 
 
-# 上下文预算（B2）。来源：当前分析质量与 prompt 容量的历史实现，尚无独立基线。
-# <undecided: 需要分析质量/截断回归后确认>。
-_CTX_MAX_CHARS = 80000
-_CTX_FIELD_BUDGET = {
-    "description": 2000,
-    "repo_map_doc": 18000,
-    "capabilities": 18000,
-    "graph": 18000,
-    "readme": 18000,
-    "org_context": 8000,
-}
-
-
-def analysis_context(org_id: str, repo_key: str, *,
-                     max_chars: int = _CTX_MAX_CHARS) -> dict:
+def analysis_context(org_id: str, repo_key: str, *, max_chars: int = 60000) -> dict:
     """构建给 AI 分析引擎的上下文包（不暴露平台 token）。"""
     org = get_org(str(org_id)) or {}
     row = None
@@ -403,19 +389,15 @@ def analysis_context(org_id: str, repo_key: str, *,
         "org_context": str(sources.get("org_context") or ""),
         "source_commit": str(sources.get("source_commit") or ""),
     }
-    # 按证据优先级分配预算：代码生成物优先，README 兜底，避免单个大 README
-    # 把 capabilities/graph 挤掉（分析变浅的常见原因）。
-    field_caps = dict(_CTX_FIELD_BUDGET)
+    # 总体截断，避免 prompt 爆炸（B2：预算值保持 base 60000，调整需独立测量）
     total = 0
-    for k in ("description", "repo_map_doc", "capabilities", "graph", "readme", "org_context"):
+    for k in ("description", "readme", "repo_map_doc", "capabilities", "graph", "org_context"):
         val = str(bundle.get(k) or "")
         remain = max(0, max_chars - total)
-        limit = min(field_caps.get(k, remain), remain)
-        if limit <= 0:
+        if remain <= 0:
             bundle[k] = ""
-        elif len(val) > limit:
-            suffix = "\n\n> （内容过长，已截断）"
-            bundle[k] = val[:max(0, limit - len(suffix))] + suffix
+        elif len(val) > remain:
+            bundle[k] = val[:remain] + "\n\n> （内容过长，已截断）"
         total += len(bundle[k] or "")
     return bundle
 
