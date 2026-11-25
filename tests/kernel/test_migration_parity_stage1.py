@@ -20,6 +20,7 @@ import），而守卫仍要求它们在 db_setup 里定义；同时 `_registered
 """
 import ast
 import os
+import re
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 _DB_SETUP = os.path.join(ROOT, "src", "api", "db_setup.py")
@@ -79,20 +80,27 @@ def _const_source(const: str):
 
     D9 拆分后 `_CUL_DDL`/`_SC_DDL` 定义在 owner 域 `schema_ddl.py`，db_setup 只
     `from ... import`（源码里是 `_CUL_DDL,` 而非 `_CUL_DDL = `），因此按定义处检索。
+    匹配按**行首赋值**锚定（`^\\s*<const> = `），避免注释/字符串里出现同名子串时误判。
     """
+    pattern = re.compile(rf"^\s*{re.escape(const)}\s*=", re.MULTILINE)
     for path in (_DB_SETUP,) + _OWNER_DDL_MODULES:
-        src = open(path, encoding="utf-8").read()
-        if f"{const} = " in src:
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        if pattern.search(src):
             return src, path
     return None, None
 
 
 def test_stage1_ddl_constants_present():
-    db_setup_src = open(_DB_SETUP, encoding="utf-8").read()
+    with open(_DB_SETUP, encoding="utf-8") as f:
+        db_setup_src = f.read()
     for const in ("_CUL_DDL", "_SC_DDL"):
         src, path = _const_source(const)
         assert src is not None, f"{const} 缺失——建表迁移会 NameError"
-        assert "CREATE TABLE IF NOT EXISTS" in src.split(f"{const} = ", 1)[1][:400], \
+        # 从行首赋值处取常量右值（而非 `f"{const} = "` 的子串首次命中）
+        value = re.search(rf"^\s*{re.escape(const)}\s*=\s*(.*)", src,
+                          re.MULTILINE | re.DOTALL).group(1)
+        assert "CREATE TABLE IF NOT EXISTS" in value[:400], \
             f"{path} 的 {const} 不含 CREATE TABLE IF NOT EXISTS（非幂等）"
         assert const in db_setup_src, f"{const} 未被 db_setup 引用（建表迁移会 NameError）"
 
