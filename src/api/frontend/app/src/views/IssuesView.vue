@@ -2108,13 +2108,8 @@ function dispatchStatusLabel(status) {
   return DISPATCH_STATUS_LABELS[String(status || '')] || String(status || '—')
 }
 function dispatchTaskOrgId(tk) {
-  if (tk && tk.org_id) return String(tk.org_id)
-  // 深链/直达详情可能没有 org_id：回退当前组织上下文（仅影响组织需求卡片）。
-  try {
-    return String(localStorage.getItem('current_org_id') || '')
-  } catch (e) {
-    return ''
-  }
+  // 只认 Issue 自己的组织归属；不回退 localStorage，避免跨组织同号议题误读批次。
+  return tk && tk.org_id ? String(tk.org_id) : ''
 }
 function loadDispatchDetails(tk) {
   const seq = ++dispatchReqSeq

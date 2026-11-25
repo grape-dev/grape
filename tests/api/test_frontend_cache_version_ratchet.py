@@ -21,7 +21,7 @@ FROZEN = {
     'index.html': {
         'account-view.js': '69',
         'agent-view.js': '52',
-        'all-views.css': '85',
+        'all-views.css': '86',
         'api.js': '38',
         'app.css': '11',
         'app.js': '311',
@@ -36,7 +36,7 @@ FROZEN = {
         'feedback-dialog.js': '50',
         'host-status.js': '1',
         'im-channel.js': '57',
-        'issues-view.js': '76',
+        'issues-view.js': '77',
         'knowledge-view.js': '49',
         'login-view.js': '2',
         'my-feedback-detail.js': '50',
@@ -44,7 +44,7 @@ FROZEN = {
         'oauth-buttons.js': '2',
         'observability-view.js': '61',
         'onboarding-view.js': '12',
-        'organizations.js': '87',
+        'organizations.js': '88',
         'pipeline.js': '58',
         'platform-icons.js': '2',
         'plugins.js': '57',
@@ -165,7 +165,7 @@ def test_register_and_forgot_agree():
 # （版本, 指纹）对与上方 FROZEN（同一次提交）。
 
 # all-views.css 与其源的（页面版本, 内容指纹）配对登记
-ALL_VIEWS = ('85', '26036cd401623b60')
+ALL_VIEWS = ('86', '62995cc938465419')
 
 # admin 三件：AdminView.vue（非 scoped，样式走 admin-view.css）+ 只被 admin chunk
 # 引用的 AdminChannels/AdminPlatforms（其 CSS 并入 admin-view.css，不进 all-views）
