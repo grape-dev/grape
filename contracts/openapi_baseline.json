@@ -1,7 +1,7 @@
 {
   "contract_version": "2.3.0a1",
-  "endpoint_count": 401,
-  "min_endpoint_count": 360,
+  "endpoint_count": 402,
+  "min_endpoint_count": 361,
   "groups": [
     "a2a",
     "agents",
@@ -36,6 +36,6 @@
     "task",
     "tasks"
   ],
-  "change_reason": "feat(auth): #4254 add GET /api/auth/beta-eligibility for beta whitelist hint",
-  "source_commit": "8b1599e96"
+  "change_reason": "Issue #3759: add POST /api/repos/{owner}/{repo}/vcs-health/reset (ops entry to clear repo-level VCS missing breaker)",
+  "source_commit": "0fc4c9600"
 }

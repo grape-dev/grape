@@ -71,6 +71,9 @@ _TABLES: dict[str, set[str]] = {
         "host_status", "scene_recommend_config", "org_id", "host_user_id", "webhook_secret",
         "bot_token_status", "host_vcs_username", "host_step", "host_error", "host_updated_at",
         "bot_gitcode_token", "gitcode_webhook_token", "bot_github_token", "github_webhook_token",
+        # Issue #3759：仓库级 VCS 存在性熔断台账
+        "vcs_status", "vcs_missing_since", "vcs_last_error_code", "vcs_last_error_at",
+        "vcs_probe_result", "vcs_probe_at", "vcs_next_probe_at", "vcs_fail_count",
     },
     "organization": {"id", "is_personal", "org_scene_id"},
     "devops_pipeline_scene": {
@@ -200,6 +203,70 @@ def set_repo_fields(repo_key: str, fields: dict[str, Any]) -> int:
         c.execute(f"UPDATE managed_repos SET {sets} WHERE repo_key=%s",
                   tuple(fields[c] for c in cols) + (repo_key,))
         return int(c.rowcount or 0)
+
+
+# ---------- Issue #3759：仓库级 VCS 存在性熔断台账 ----------
+#
+# 「上游 VCS 已不存在」的孤儿仓库卡（如 huaweicloud-mate/repository-requests）
+# 没有任何承载事实的字段：每次巡检都逐 issue 打上游、逐条打 404 WARNING，
+# 永不收敛。事实源放仓库卡（managed_repos 归 mgmt 域），runtime 进程经本 lib
+# 读写；进程内只做短 TTL 缓存，重启不丢、多副本一致。
+VCS_HEALTH_COLUMNS: tuple[str, ...] = (
+    "vcs_status",          # ''=未判定 / ok=仓库在上游存在 / vcs_missing=上游已不存在
+    "vcs_missing_since",   # 首次判定 vcs_missing 的时间（ISO8601 UTC）
+    "vcs_last_error_code", # 最近一次永久失败的上游状态码（'404'/'403'/'401'）
+    "vcs_last_error_at",   # 最近一次永久失败时间
+    "vcs_probe_result",    # 最近一次仓库级存在性探测结论：exists/missing/unknown
+    "vcs_probe_at",        # 最近一次探测时间
+    "vcs_next_probe_at",   # 退避后的下一次探测时间（熔断期间不早于此刻放行）
+    "vcs_fail_count",      # 连续永久失败计数（决定退避档位）
+)
+_VCS_HEALTH_INT_COLUMNS = {"vcs_fail_count"}
+
+
+def get_repo_vcs_health(repo_key: str) -> dict:
+    """读取仓库 VCS 存在性台账；无卡/无值返回空 dict（调用方 fail-open）。"""
+    row = fetch_one("managed_repos", list(VCS_HEALTH_COLUMNS), "repo_key=%s", (repo_key,))
+    if not row:
+        return {}
+    return dict(zip(VCS_HEALTH_COLUMNS, row))
+
+
+def set_repo_vcs_health(repo_key: str, fields: dict[str, Any]) -> int:
+    """更新仓库 VCS 存在性台账，返回变更行数（幂等：同值 0 行）。
+
+    只允许 `VCS_HEALTH_COLUMNS` 内的列；仓库卡不存在时返回 0（不新建卡）。
+    拓扑：本域有自有 DSN（三库）走 lib 连接；单库/测试拓扑回退进程主库
+    （与 `fetch_rows` 同款 G-2 口径，否则 sqlite 单实例下熔断状态无处落）。
+    """
+    unknown = [k for k in fields if k not in VCS_HEALTH_COLUMNS]
+    if unknown:
+        raise ValueError(f"column(s) {unknown} not writable through mgmt lib")
+    cols = [k for k in fields if k in VCS_HEALTH_COLUMNS]
+    if not cols:
+        return 0
+    sets = ", ".join(f"{c}=%s" for c in cols)
+    sql = f"UPDATE managed_repos SET {sets} WHERE repo_key=%s"
+    params = tuple(fields[c] for c in cols) + (repo_key,)
+    if db_registry.uses_own_dsn("mgmt"):
+        with db_registry.cursor("mgmt") as c:
+            c.execute(sql, params)
+            return int(c.rowcount or 0)
+    from src.kernel import session_manager
+    from src.kernel.session_manager import _is_mysql_backend, db_lock
+
+    with db_lock:
+        c = session_manager.db.cursor()
+        try:
+            c.execute(sql if _is_mysql_backend() else sql.replace("%s", "?"), params)
+            changed = int(c.rowcount or 0)
+            session_manager.db.commit()
+            return changed
+        finally:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def ensure_repo_row(repo_key: str, repo_owner: str, repo_name: str, full_name: str = "") -> int:

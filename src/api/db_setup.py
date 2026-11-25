@@ -9861,6 +9861,15 @@ register_migration(
 )
 
 
+# Issue #3759：managed_repos 补仓库级 VCS 存在性熔断台账列（孤儿仓库卡 4xx 熔断）。
+# 实现住 mgmt 域（managed_repos 归 mgmt），本处只做注册接线。
+from src.domains.mgmt.migrations.repo_vcs_health_columns import (  # noqa: E402
+    MIGRATION as _M_REPO_VCS_HEALTH,
+)
+
+register_migration(**_M_REPO_VCS_HEALTH)
+
+
 # ======================================================================
 # ===== 沙箱控制面 schema（feat/devbox-sandbox-integration7 移植，2026-11-10）=====
 # ===== i7 侧原注册于 202611040005-009（毒号段），此处以新号 202611100001 重注册，

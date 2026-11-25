@@ -2384,7 +2384,44 @@ def list_managed_repos(user: dict = Depends(require_org_member)):
         "org_name": r.get("org_name", "") or "",
         # 组织自动仓库标识：前端仓库下拉需要把它单独置顶显示为「组织仓库」
         "is_org_repo": bool(r.get("is_org_repo")),
+        # Issue #3759：孤儿仓库卡（上游 VCS 已不存在）在列表侧可见并标红；
+        # 恢复入口见 POST /api/repos/{owner}/{repo}/vcs-health/reset。
+        "vcs_status": r.get("vcs_status", "") or "",
+        "vcs_missing": bool(r.get("vcs_missing")),
+        "vcs_missing_since": r.get("vcs_missing_since", "") or "",
+        "vcs_last_error_code": r.get("vcs_last_error_code", "") or "",
+        "vcs_next_probe_at": r.get("vcs_next_probe_at", "") or "",
     } for r in repos]}
+
+
+@router.post("/{owner}/{repo}/vcs-health/reset", operation_id="repos_vcs_health_reset",
+             summary="Reset repo VCS breaker", description="Issue #3759: clears the repo-level VCS missing breaker (`vcs_status`/`vcs_fail_count`/probe ledger). Use after rebinding the provider or confirming the upstream repository exists again; the next issue read re-probes upstream. Idempotent.")
+def reset_repo_vcs_health(owner: str, repo: str,
+                          user: dict = Depends(require_no_session_token)):
+    """运维入口：一键清除仓库级 VCS 熔断（禁用/重绑 provider 后调用）。
+
+    孤儿仓库卡（上游 404 `Project not found`）被熔断后，逐 issue 读会短路为
+    `missing`（≤1 次/小时探测），本接口清除台账，使下一次读重新探测上游——
+    上游已恢复则自动回到 `ok`，确实不存在则重新熔断。
+    """
+    from src.api.deps import check_repo_access
+    from src.domains.mgmt.user.db import resolve_managed_repo_key
+    from src.kernel.repo_key import to_repo_key
+    from src.domains.runtime.vcs import issue_poll_breaker as _breaker
+
+    repo_key = resolve_managed_repo_key(owner, repo) or to_repo_key(f"{owner}/{repo}")
+    check_repo_access(user, repo_key)
+    before = _breaker.state(repo_key, fresh=True)
+    after = _breaker.reset(repo_key, reason="ops_reset")
+    return {
+        "repo_key": repo_key,
+        "before": {"vcs_status": before.get("vcs_status") or "",
+                   "vcs_missing_since": before.get("vcs_missing_since") or "",
+                   "vcs_last_error_code": before.get("vcs_last_error_code") or ""},
+        "after": {"vcs_status": after.get("vcs_status") or "",
+                  "vcs_fail_count": int(after.get("vcs_fail_count") or 0)},
+        "message": "VCS 熔断台账已清除；下一次 issue 读取会重新探测上游仓库。",
+    }
 
 
 class RepoConnectionBody(BaseModel):
