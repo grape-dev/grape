@@ -346,3 +346,28 @@ promtool check rules deploy/alerts.yml
 > 注意：生产 502 记录落在 `127.0.0.1:8081/8083`，而仓库模板为 `38081/38083`。
 > 下发前请先 `nginx -T` 确认生产实际加载的配置与端口映射；若生产另有旁路配置，
 > 需同时完成「生产配置与仓库模板对齐」，避免改到未被加载的文件。
+
+## 鉴权失败预算与 XFF 覆盖式部署次序（Issue #4347）
+
+runtime 鉴权失败预算/封禁以**来源 IP** 为键，默认取 TCP 对端
+（`request.client.host`），仅 `TRUSTED_PROXY_IPS` 内的代理才采信
+`X-Forwarded-For`。这要求网关把 XFF 写成**覆盖式**：
+
+```nginx
+proxy_set_header X-Forwarded-For $remote_addr;   # 覆盖，不要用 $proxy_add_x_forwarded_for
+```
+
+四份模板（`nginx-grape.conf` / `nginx-grape-cluster.conf` /
+`nginx-grape-four-process.conf` / `nginx-grape-compose.conf`）已统一为覆盖式。
+
+**部署次序（不可颠倒）**：先刷新上述 nginx 配置并 `nginx -t && nginx -s reload`，
+**再**发布应用。反序发布期间，旧配置的 `$proxy_add_x_forwarded_for` 配合
+uvicorn `--forwarded-allow-ips=*` 会让 `request.client.host` 仍取客户端可伪造的
+XFF 首段，C1 的伪造面在短窗口内回归。
+
+**SRE 发布检查项**：
+- `grep -n 'X-Forwarded-For' /etc/nginx/conf.d/grape*.conf` 结果均为 `$remote_addr`
+  （无 `$proxy_add_x_forwarded_for`）；
+- 同机 nginx + worker 为默认安全形态；分容器/跨机部署须在 `.env` 显式设置
+  `TRUSTED_PROXY_IPS=<代理地址,...>`，否则应用只信 TCP 对端（容器网关地址），
+  预算键退化为网关 IP（限流仍生效但会按出口聚合）。

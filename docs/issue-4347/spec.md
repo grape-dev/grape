@@ -46,7 +46,7 @@
 | 计数存储 | 进程内存 | 改动最小，重启退化为重新计数，代价可接受 |
 | 封禁粒度 | runtime 全鉴权失败路径 | 该凭据同时打 claim/heartbeat 等端点，只封 register 留有绕行面 |
 | 阈值配置 | env 可调（`RUNTIME_AUTH_FAIL_MINUTE_LIMIT`/`_HOUR_LIMIT`/`_BAN_SECONDS`/`_MAX_IPS`） | 4 进程独立计数按进程量级评估，可现场调参 |
-| 内存上界 | `RUNTIME_AUTH_FAIL_MAX_IPS`（默认 10000），超出清过期项后仍满则整体重置（fail-open） | 计数器不阻塞鉴权主链路 |
+| 内存上界 | `RUNTIME_AUTH_FAIL_MAX_IPS`（默认 10000），超出清过期项后仍满则按最久未见逐条淘汰（活跃封禁保留，fail-open） | 计数器不阻塞鉴权主链路，且避免一次性清空计数/封禁形成绕过面 |
 
 ## Acceptance Criteria
 

@@ -80,6 +80,11 @@
 | `RUNTIME_DEVICE_NAME` | Worker 设备名 | 空 | `runtime/agent.py` |
 | `RUNTIME_ROOT_MODE` / `GRAPE_AGENT_SANDBOX` | 特权/沙箱模式开关 | `off` | `runtime/agent.py`、`config.py` |
 | `RUNTIME_EXTRA_SKILL_DIRS` | 额外技能目录（冒号分隔） | 空 | `runtime/agent.py` |
+| `TRUSTED_PROXY_IPS` | 可信反向代理 IP（逗号分隔）：仅这些代理的 `X-Forwarded-For` 才用于 runtime 鉴权失败预算/封禁键；缺省信任回环，其它来源取 TCP 对端 | `127.0.0.1,::1` | `domains/runtime/routes/runtime.py` |
+| `RUNTIME_AUTH_FAIL_MINUTE_LIMIT` | 同 IP 每 60s 鉴权失败上限，超过返回 429 | `10` | `domains/runtime/routes/auth_failure_budget.py` |
+| `RUNTIME_AUTH_FAIL_HOUR_LIMIT` | 同 IP 每 3600s 鉴权失败上限，超过进入短期封禁 | `60` | `domains/runtime/routes/auth_failure_budget.py` |
+| `RUNTIME_AUTH_BAN_SECONDS` | 短期封禁时长（秒），封禁期内入口直接 429 | `600` | `domains/runtime/routes/auth_failure_budget.py` |
+| `RUNTIME_AUTH_FAIL_MAX_IPS` | 进程内计数条目上界：超出先清过期项，仍满按最久未见逐条淘汰（保留活跃封禁） | `10000` | `domains/runtime/routes/auth_failure_budget.py` |
 | `HERMES_HOME` | hermes 主目录 | `~/.hermes` | `config.py` |
 | `HERMES_TOOL_PROGRESS_MODE` | hermes 进度模式 | 代码默认 | `runtime/hermes.py` |
 | `GRAPE_LOCAL_CLAIMER` | 本地 claimer 模式 | 代码默认 | `runtime/local_claimer.py` |
