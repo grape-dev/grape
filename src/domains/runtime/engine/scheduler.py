@@ -1869,12 +1869,16 @@ def _clear_failure_state(task_id: int, next_run: str) -> None:
 
 
 def _alert_task_failure(task: dict, exec_id: int, error_code: str, error: str,
-                        consecutive_failures: int, circuit_paused: bool) -> None:
-    """一次性结构化告警（Issue #3800）：ERROR 结构化行 + 订阅者通知。
+                        consecutive_failures: int, circuit_paused: bool,
+                        offline_seconds: float = 0.0) -> None:
+    """一次性结构化告警（Issue #3800 / #3823）：ERROR 结构化行 + 订阅者通知。
 
     只在「跨越门槛的那一刻」被调用（`BINDING_STALE` 首派 / `ENGINE_OFFLINE` 熔断），
     因此同一 episode 只发一次；卡片侧幂等仍由 `_notify_subscribers` 的
     `notified=0` 抢占保证（同一 exec 不会重复发送）。
+
+    Issue #3823：告警须同时带 `task id` / `引擎 id` / `离线时长`，值守才能判断引擎
+    已经掉了多久、是否需要人工介入；`offline_seconds` 与主 ERROR 行同源。
     """
     task_id = task.get("id") or 0
     # 报文里的 engine_ids 一律是「用户绑定了什么」（uid 优先、回落 legacy ids），
@@ -1891,9 +1895,9 @@ def _alert_task_failure(task: dict, exec_id: int, error_code: str, error: str,
     log.error(
         f"[autopilot-alert] task={task_id} error_code={error_code} engine_ids={engine_ids} "
         f"consecutive_failures={consecutive_failures} circuit_paused={int(bool(circuit_paused))} "
-        f"error={error or '(no detail)'}")
+        f"offline_seconds={int(offline_seconds)} error={error or '(no detail)'}")
     summary = (f"错误码 {error_code}；连续失败 {consecutive_failures} 次；绑定引擎 {engine_ids}；"
-               f"{_state}。原因：{error or '无'}。{guidance}")
+               f"离线时长 {int(offline_seconds)}s；{_state}。原因：{error or '无'}。{guidance}")
     try:
         _notify_subscribers(task_id, exec_id, "failed", summary, {})
     except Exception as e:  # 通知失败不影响状态已落库
@@ -1948,7 +1952,8 @@ def _handle_environmental_failure(task: dict, exec_id: int, error_code: str, err
         f"offline_seconds={int(offline_seconds)} circuit_paused={int(bool(circuit_paused))} "
         f"backoff_until={next_run} error={_error_line or '(no detail)'}")
     if should_alert:
-        _alert_task_failure(task, exec_id, error_code, _error_line, consecutive, circuit_paused)
+        _alert_task_failure(task, exec_id, error_code, _error_line, consecutive, circuit_paused,
+                            offline_seconds)
     return state
 
 

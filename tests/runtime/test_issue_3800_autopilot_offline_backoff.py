@@ -278,6 +278,7 @@ def test_engine_offline_hour_backoff_and_circuit(monkeypatch):
     assert task_id == TID_OFFLINE and status == "failed"
     assert S.ERROR_ENGINE_OFFLINE in summary, summary
     assert "i3800-offline-uid" in summary, f"告警须带绑定引擎信息: {summary}"
+    assert "离线时长" in summary, f"Issue #3823：告警须带离线时长: {summary}"
     # 熔断后不再派发（剩余 tick 全被暂停闸门拦住）
     assert decisions.count("dispatch") == len(calls), (decisions, calls)
     assert "paused" in decisions, decisions[-5:]
