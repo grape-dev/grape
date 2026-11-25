@@ -7760,6 +7760,13 @@ def _vcs_get_issue(repo_key: str, num: str, client=None, timeout: float = 30.0) 
     owner, rname = split_owner_repo(_rk)
     if not owner or not rname or not num:
         return ("unknown", {})
+    # Issue #4343：负缓存预检放在 token 解析之前——命中直接 missing，杜绝
+    # 命中路径的 token 解析告警与上游 1.3s 空转（token-missing 类必然失败
+    # 不再逐候选触发 GlobalBotToken 告警）。ident 走 native 归一，与
+    # VcsApiClient.get_issue 的缓存键保持一致（#4343 QA 一致性要点）。
+    from src.domains.runtime.vcs.api_client import get_cached_ref_404
+    if get_cached_ref_404(_rk, _native_issue_number(num)) is not None:
+        return ("missing", {})
     # Issue #3759：仓库级熔断——上游已确认该仓库不存在时，逐 issue 读直接短路为
     # missing（0 上游请求），避免孤儿仓库卡的 404 轮询无限放大；退避到点由
     # `allow_read` 原子占位，只放行一个调用方去探测（8 并发批量复核不会整批打上游）。

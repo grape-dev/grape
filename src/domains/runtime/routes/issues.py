@@ -290,6 +290,23 @@ def _repo_key_of(owner: str, repo: str) -> str:
     from src.kernel.repo_key import to_repo_key
     return to_repo_key(f"{owner}/{repo}")
 
+def _owner_provider_prefix(owner: str) -> str:
+    """Issue #4343：owner path 段携带的 provider 前缀（gitcode:/github:/…）。
+
+    前缀集数据驱动（provider_prefixes，#1790 白名单口径），未知前缀返回空串。
+    """
+    s = str(owner or "")
+    low = s.lower()
+    try:
+        from src.kernel.repo_key import provider_prefixes
+        for p in provider_prefixes():
+            if low.startswith(f"{p}:"):
+                return p
+    except Exception:
+        pass
+    return ""
+
+
 def _repo_keys_of(owner: str, repo: str) -> list[str]:
     """跨 provider 候选键全集 + 仓登记实际大小写（S104/D78 + Issue #3397）。
 
@@ -298,7 +315,15 @@ def _repo_keys_of(owner: str, repo: str) -> list[str]:
     repo_key 名空间全局唯一，超集查询安全。
     Issue #3397：请求路径可能全小写，而 `issue`/`events` 行按 VCS 实际大小写存储，
     故再按登记反查补入实际大小写候选（歧义不合并），否则列表/详情读路径漏查存量行。
+
+    Issue #4343：owner/repo 带 provider 前缀 = 前缀即权威（Spec 设计决策），
+    直选单键不再跨 4 平台扇出；无前缀保留原候选链（候选失败日志由
+    `_vcs_issue_lookup` 聚合为 1 条）。
     """
+    _p = _owner_provider_prefix(owner)
+    if _p:
+        from src.kernel.repo_key import strip_provider_prefix
+        return [f"{_p}:{strip_provider_prefix(owner)}/{repo}"]
     from src.kernel.repo_key import repo_key_candidates_ci
     return repo_key_candidates_ci(f"{owner}/{repo}")
 
@@ -3153,12 +3178,19 @@ def _detail_404(reason: str, number) -> HTTPException:
 
     Issue #3891：两处增量补 `error_code`（= reason），供客户端编程判别
     「真不存在」与「存在但无 pipeline 数据」；`code`/`message` 保持原样兼容。
+
+    Issue #4343：`issue_not_found`（上游明确 404）附 `Retry-After` 头
+    （= ref 级 404 负缓存 TTL），提示调用方快速失败 + 按头退避重试，
+    不再以 20s 固定间隔空转轮询；`internal_sync_missing` 属同步时序问题，
+    不带退避提示（稍后即自愈）。
     """
     if reason == "issue_not_found":
+        from src.domains.runtime.vcs.api_client import ref_404_neg_cache_ttl
         return HTTPException(status_code=404, detail={
             "code": 404, "reason": "issue_not_found", "error_code": "issue_not_found",
             "message": f"Issue #{number} 不存在（GitCode 侧无此 Issue，可能已删除或编号有误）",
-            "suggestion": "确认 Issue 编号；已删除的 Issue 属预期 404"})
+            "suggestion": "确认 Issue 编号；已删除的 Issue 属预期 404"},
+            headers={"Retry-After": str(ref_404_neg_cache_ttl())})
     return HTTPException(status_code=404, detail={
         "code": 404, "reason": "internal_sync_missing", "error_code": "internal_sync_missing",
         "message": f"需求不存在：VCS 侧 Issue #{number} 存在性无法核实且内部需求库缺行（同步未落或时序未到）",
@@ -3378,16 +3410,28 @@ def _vcs_issue_lookup(owner: str, repo: str, number: "int | str", user: dict) ->
     双路径兜底之一（内部需求库 issue_id 解析失败时使用）：provider 双试 gitcode→github，
     token 优先仓库 bot token（devops 场景），会话用户 token 交叉回退。
     任何失败都视为未命中（兜底不放大错误），返回 None 或 {"provider", "issue"}。
+
+    Issue #4343：
+    - owner 带 provider 前缀 → 前缀即权威，只探测该 provider（不跨 4 平台扇出）；
+    - 404 负缓存命中 → 跳过该 provider 探测（TTL 内上游调用 = 1）；
+    - 逐候选失败日志聚合为 1 条 WARNING（含候选数与失败码），不再逐 provider 告警。
     """
     from src.api.git_repo_api import _PROVIDER_MODULES, _vcs_req, _vcs_url
     from src.kernel.repo_key import to_repo_key
+    from src.domains.runtime.vcs.api_client import get_cached_ref_404, remember_ref_404
     number = str(number)  # int（内部主键）/ str（D105 字符串 ident）归一
-    for _p in list(_PROVIDER_MODULES):
+    _prefix = _owner_provider_prefix(owner)
+    _providers = [_prefix] if _prefix else list(_PROVIDER_MODULES)
+    _missed: list[str] = []   # 明确 404（已写负缓存，TTL 内不再探测）
+    _failed: list[str] = []   # 鉴权/网络等故障（不缓存，保持原告警语义）
+    for _p in _providers:
+        _rk = to_repo_key(f"{owner}/{repo}", provider=_p)
+        if get_cached_ref_404(_rk, number) is not None:
+            continue
         try:
             _mod = _PROVIDER_MODULES.get(_p)
             if _mod is None:
                 continue
-            _rk = to_repo_key(f"{owner}/{repo}", provider=_p)
             _tok = ""
             try:
                 _tok = _mod.bot_token(_rk) or ""
@@ -3405,10 +3449,20 @@ def _vcs_issue_lookup(owner: str, repo: str, number: "int | str", user: dict) ->
                 return {"provider": _p, "issue": resp}
         except HTTPException as e:
             if getattr(e, "status_code", 0) == 404:
+                # 上游明确 404：静默写负缓存（告警由下方聚合统一落 1 条），
+                # 不再把每次探测 404 当上游错误逐条 WARNING。
+                remember_ref_404(_rk, number, warn=False)
+                _missed.append(f"{_p}=404")
                 continue
-            log.warning(f"Issue #672 VCS fallback: {_p} {owner}/{repo}#{number} lookup failed: {getattr(e, 'detail', '')}")
+            _failed.append(f"{_p}={getattr(e, 'status_code', '?')}")
         except Exception as e:
-            log.warning(f"Issue #672 VCS fallback: {_p} {owner}/{repo}#{number} error: {e}")
+            _failed.append(f"{_p}=error")
+    if _missed or _failed:
+        # 聚合为 1 条可归因告警（候选数 + 失败码），命中负缓存的候选不再计入
+        _codes = ", ".join(_failed + _missed)
+        log.warning(f"Issue #672 VCS fallback: {owner}/{repo}#{number} "
+                    f"{len(_failed) + len(_missed)}/{len(_providers)} candidates "
+                    f"exhausted: {_codes}")
     return None
 
 # Issue #859 性能（2026-11-03）：事件 payload 内联额度
