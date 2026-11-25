@@ -37,12 +37,16 @@ def _clean_state():
     dlm._STATE.clear()
     dlm._CHILD_CACHE.clear()
     dlm._BUDGET_OVERRIDE.set(0.0)
+    with dlm._TIMEOUT_REPORTED_LOCK:
+        dlm._TIMEOUT_REPORTED.clear()
     path_var.set("")
     request_id_var.set("-")
     yield
     dlm._STATE.clear()
     dlm._CHILD_CACHE.clear()
     dlm._BUDGET_OVERRIDE.set(0.0)
+    with dlm._TIMEOUT_REPORTED_LOCK:
+        dlm._TIMEOUT_REPORTED.clear()
     path_var.set("")
     request_id_var.set("-")
 
@@ -188,6 +192,59 @@ def test_request_id_is_carried_into_timeout_log(monkeypatch):
     finally:
         holder.join(5)
     assert any("rid-4295" in m for m in fake.messages)
+
+
+def _timeout_once(lock, path: str = "/api/issues/acme/demo") -> None:
+    """在前台请求上下文里等一次锁并断言超预算失败。"""
+    path_var.set(path)
+    with pytest.raises(dlm.LockAcquireTimeout):
+        with lock:
+            pass
+
+
+def test_timeout_error_log_is_deduped_per_owner(monkeypatch):
+    """拥塞窗口里同一 owner 反复超时：指标逐次累加、ERROR 只打一条（防日志风暴）。"""
+    from prometheus_client import CollectorRegistry
+
+    registry = CollectorRegistry()
+    dlm.install(registry)
+    fake = _FakeLog()
+    monkeypatch.setattr(dlm, "_log", lambda: fake)
+    monkeypatch.setenv(dlm.ACQUIRE_TIMEOUT_ENV, "0.05")
+    monkeypatch.setenv(dlm.TIMEOUT_LOG_DEDUP_ENV, "60")
+
+    lock = dlm.TrackedRLock(bound_in_request=True)
+    holder = _hold_lock(lock, 0.5)
+    try:
+        _timeout_once(lock)
+        _timeout_once(lock)
+    finally:
+        holder.join(5)
+
+    timeouts = [m for m in fake.messages if "db_lock acquire timeout" in m]
+    assert len(timeouts) == 1, f"同一 owner 在去重窗口内只应打一条 ERROR：{timeouts}"
+    assert registry.get_sample_value(
+        "grape_db_lock_acquire_timeouts_total", {"owner": "/api/issues/acme/demo"}) == 2.0
+
+
+def test_timeout_error_log_dedup_can_be_disabled(monkeypatch):
+    """``DB_LOCK_TIMEOUT_LOG_DEDUP_S=0`` 关闭日志去重（排障时每次都要看）。"""
+    fake = _FakeLog()
+    monkeypatch.setattr(dlm, "_log", lambda: fake)
+    monkeypatch.setenv(dlm.ACQUIRE_TIMEOUT_ENV, "0.05")
+    monkeypatch.setenv(dlm.TIMEOUT_LOG_DEDUP_ENV, "0")
+
+    lock = dlm.TrackedRLock(bound_in_request=True)
+    holder = _hold_lock(lock, 0.5)
+    try:
+        _timeout_once(lock)
+        _timeout_once(lock)
+    finally:
+        holder.join(5)
+
+    timeouts = [m for m in fake.messages if "db_lock acquire timeout" in m]
+    assert len(timeouts) == 2, f"去重关闭后每次超时都应打 ERROR：{timeouts}"
+
 
 def test_non_blocking_acquire_is_never_bounded(monkeypatch):
     """``acquire(blocking=False)`` 不能被套上 timeout（threading 会抛 ValueError）。"""

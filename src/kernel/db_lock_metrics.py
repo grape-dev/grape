@@ -405,23 +405,42 @@ class TrackedRLock:
                     _dbg.debug("db_lock holder metric failed: %s", _me)
 
     def _on_budget_exhausted(self, budget: float, waited: float, holder_before: str) -> None:
-        """前台请求等锁超预算：记指标 + ERROR，然后抛 LockAcquireTimeout（→ 503）。"""
+        """前台请求等锁超预算：记指标 + ERROR（按 owner 去重），然后抛 LockAcquireTimeout。
+
+        指标逐次累加（拥塞窗口的真实次数必须保留）；ERROR 日志按 owner
+        ``DB_LOCK_TIMEOUT_LOG_DEDUP_S``（默认 60s）去重，与看门狗口径一致——
+        648 次 499 的窗口里同一 owner 反复超时不至于把日志刷爆。
+        """
         owner = _owner_key()
         if _TIMEOUTS is not None:
             try:
                 _TIMEOUTS.labels(owner=owner).inc()
             except Exception as _me:  # pragma: no cover - 指标绝不阻断主流程
                 _dbg.debug("db_lock timeout metric failed: %s", _me)
-        try:
-            _log().error(
-                "db_lock acquire timeout: budget=%.2fs waited=%.2fs waiter=%s holder=%s",
-                budget, waited, f"{owner}#{_request_id()}", holder_before,
-                extra={"db_lock_waited_s": round(waited, 3),
-                       "db_lock_holder": holder_before,
-                       "db_lock_budget_s": round(budget, 3)},
-            )
-        except Exception as _le:  # pragma: no cover
-            _dbg.debug("db_lock timeout log failed: %s", _le)
+        now = time.perf_counter()
+        dedup_s = _env_float(TIMEOUT_LOG_DEDUP_ENV, 60.0)
+        with _TIMEOUT_REPORTED_LOCK:
+            last = _TIMEOUT_REPORTED.get(owner)
+            emit = dedup_s <= 0 or last is None or (now - last) >= dedup_s
+            if emit:
+                _TIMEOUT_REPORTED[owner] = now
+            stale = [k for k, ts in _TIMEOUT_REPORTED.items() if (now - ts) >= max(dedup_s, 60.0)]
+            for key in stale:
+                _TIMEOUT_REPORTED.pop(key, None)
+        if emit:
+            try:
+                _log().error(
+                    "db_lock acquire timeout: budget=%.2fs waited=%.2fs waiter=%s holder=%s",
+                    budget, waited, f"{owner}#{_request_id()}", holder_before,
+                    extra={"db_lock_waited_s": round(waited, 3),
+                           "db_lock_holder": holder_before,
+                           "db_lock_budget_s": round(budget, 3)},
+                )
+            except Exception as _le:  # pragma: no cover
+                _dbg.debug("db_lock timeout log failed: %s", _le)
+        else:
+            _dbg.debug("db_lock acquire timeout suppressed for owner=%s (dedup %.1fs)",
+                       owner, dedup_s)
         raise LockAcquireTimeout(budget, waited, holder_before, owner)
 
     def _on_release_pre(self):
