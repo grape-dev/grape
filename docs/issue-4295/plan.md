@@ -9,13 +9,13 @@
 
 | 文件 | 改动 | 作用 |
 |---|---|---|
-| `src/kernel/db_lock_metrics.py` | `LockAcquireTimeout`、`acquire_budget_s()`、`foreground_lock_budget()`、`TrackedRLock.acquire` 有界分支、持有看门狗（`start_watchdog`/`stop_watchdog`/`watchdog_scan`）、`snapshot()` 补 `tid` | 锁实体层的两个新能力（有界等锁 + 持有中可观测） |
-| `src/kernel/session_manager.py` | 随 `db_lock` 就位自动启动看门狗；re-export `LockAcquireTimeout`/`acquire_budget_s`/`foreground_lock_budget` | 让看门狗在多进程入口（mgmt/event/worker/insight）都生效，无需各入口分别装配 |
+| `src/kernel/db_lock_metrics.py` | `LockAcquireTimeout`、`acquire_budget_s()`（`None`=继承 / `0`=关闭的覆盖语义）、`foreground_lock_budget()`、`TrackedRLock.acquire` 有界分支、超时 ERROR 按 owner 去重、持有看门狗（`start_watchdog`/`stop_watchdog`/`watchdog_scan`/`reset_after_fork`）、`snapshot()` 补 `tid` | 锁实体层的两个新能力（有界等锁 + 持有中可观测） |
+| `src/kernel/session_manager.py` | 随 `db_lock` 就位自动启动看门狗（幂等 daemon） | 让看门狗在多进程入口（mgmt/event/worker/insight）都生效，无需各入口分别装配；fork 子进程由 `db_lock_metrics` 注册的 `os.register_at_fork` 钩子重启 |
 | `src/api/exception_handlers.py` | 新增 `LockAcquireTimeout` 处理器 → 503 + `Retry-After` | 语义分离：锁等待超时=本机繁忙（可重试）≠ 上游 VCS 故障（502） |
 | `src/domains/runtime/issues_center.py` | `close_issue_tasks` / `_close_issue_tasks_bot_takeover`：通知投递移出 `with db_lock` | 把最大的"锁内外部 IO + 多次 DB 往返"清出临界区 |
-| `scripts/check_db_lock_external_io.py`（新） | AST 门禁：`with db_lock:` 块内不得出现外部 IO | 防回归（下一个人再把远程调用塞回锁里，`make lint` 直接失败） |
+| `scripts/check_db_lock_external_io.py`（新） | AST 门禁：`with db_lock:` 与 `acquire()+try/finally` 两种临界区块内不得出现外部 IO | 防回归（下一个人再把远程调用塞回锁里，`make lint` 直接失败） |
 | `Makefile` | `lint` 追加门禁脚本 | 进 CI 必经路径 |
-| `.env.example` | 新增 5 个 env 的说明（默认值 + 关闭开关） | 运维可调、可回滚 |
+| `.env.example` | 新增 6 个 env 的说明（默认值 + 关闭开关） | 运维可调、可回滚 |
 | `docs/issue-4295/*` | spec/plan/task | 与既有 `docs/issue-N/` 一致 |
 
 ## 2. 关键设计决策
@@ -51,7 +51,18 @@ def acquire_budget_s() -> float:
 - 看门狗**不得获取 db_lock**——否则它自己成为等待者，长持有期间看门狗也停摆；
   实现只读 `_STATE`（`_STATE_GUARD` 是独立小锁，与 db_lock 无关）；
 - 去重按 owner 60s（长持有持续几十分钟时不至于刷爆日志），栈截断 15 帧；
-- 线程随 `session_manager` 导入启动（daemon，幂等），`DB_LOCK_WATCHDOG_S=0` 关闭。
+- 线程随 `session_manager` 导入启动（daemon，幂等），`DB_LOCK_WATCHDOG_S=0` 关闭；
+- **线程不跨 fork**：gunicorn `--preload` 等「先 import 后 fork」形态下，父进程启动的
+  看门狗在 worker 里不存在。`db_lock_metrics` 在模块 import 时注册
+  `os.register_at_fork(after_in_child=...)`：子进程先 `reset_after_fork()`
+  （丢弃继承来的 `_STATE`/线程对象/内部小锁）再按幂等路径 `start_watchdog()`。
+
+### 2.3.1 等锁超时日志同样按 owner 去重（去重映射加锁）
+
+拥塞窗口（648 次 499）里同一 owner 会连续超时：`_on_budget_exhausted` 的指标逐次累加，
+但 ERROR 日志按 owner `DB_LOCK_TIMEOUT_LOG_DEDUP_S`（默认 60s）去重，与看门狗同一口径。
+`_WATCHDOG_REPORTED` / `_TIMEOUT_REPORTED` 两个去重映射都由独立小锁保护——看门狗线程与
+显式 `watchdog_scan()` 调用者可能并发。
 
 ### 2.4 通知移出锁：状态写仍原子，投递不占锁
 
@@ -77,14 +88,21 @@ def acquire_budget_s() -> float:
   `X = db_lock` 赋值；`with lock:` 若指向用户级 `threading.Lock`（`src/api/deps.py`）
   不算——`db, lock = _db()` 这类静态无法自证的形态按文件登记（`EXTRA_LOCK_ALIASES`）。
 
-门禁当前在整棵 `src/` 上**0 命中**，用例固化成三件事：零命中、能抓出合成违规、
-不误报 DB/本地调用。
+- **同一份临界区判定覆盖两种形态**：`with db_lock:` 块体，以及
+  `acquired = db_lock.acquire(timeout=...)` + `try/except/finally: db_lock.release()`
+  （`pipeline_config._get_scene_columns` 的真实写法）；同一行同一调用两条判定都命中时去重；
+- **局限（写明在脚本 docstring）**：只做语句级分析，不跨函数调用边界——持锁后调用一个
+  内部会做远程 IO 的普通 helper 不会被判违规，靠代码评审兜底。
+
+门禁当前在整棵 `src/` 上**0 命中**（因此不需要 `configs/db_lock_external_io_baseline.json`：
+基线只在有存量需要登记时由 `--update-baseline` 生成），用例固化成三件事：零命中、
+能抓出合成违规（含 `with` 与 `acquire/release` 两种形态）、不误报 DB/本地调用与用户级锁。
 
 ## 3. 影响面与验证
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| 新增用例 | `pytest tests/kernel/test_issue_4295_*.py tests/api/test_issue_4295_*.py` | 29 passed |
+| 新增用例 | `pytest tests/kernel/test_issue_4295_*.py tests/api/test_issue_4295_*.py` | 46 passed（budget 15 + watchdog 10 + gate 10 + concurrent 5 + api 6） |
 | 锁埋点回归 | `pytest tests/kernel/test_db_lock_metrics.py` | 8 passed |
 | kernel 全量 | `pytest tests/kernel -q` | 1031 passed / 53 failed（基线同为 53 failed / 1002 passed，无新增） |
 | 门禁 | `python3 scripts/check_db_lock_external_io.py` | 0 命中 |

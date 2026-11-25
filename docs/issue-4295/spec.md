@@ -32,16 +32,26 @@
 
 ### In Scope（本 PR）
 
-1. **有界等锁**：前台请求（`path_var` 非空）等锁改用 `DB_LOCK_ACQUIRE_TIMEOUT_S`
-   （默认 5s，0=关闭→旧的无界语义）；预算耗尽抛 `LockAcquireTimeout`。
+1. **有界等锁**：HTTP 请求线程（`path_var` 非空——由 `src/api/server_common.py` 对所有
+   HTTP 请求设置，含内部触发的长任务端点）等锁改用 `DB_LOCK_ACQUIRE_TIMEOUT_S`
+   （默认 5s，0=关闭→旧的无界语义）；预算耗尽抛 `LockAcquireTimeout`。长任务端点若不能
+   接受 503，可在局部用 `foreground_lock_budget(0)` 关闭预算（`None`=继承当前预算、
+   `0`=关闭，语义分开）。
 2. **503 + Retry-After**：`LockAcquireTimeout` → 503（`reason=db_lock_acquire_timeout`、
    `retry_after_s`、`request_id`），与"上游 VCS 故障"的 502 语义分离。
 3. **持有看门狗**：守护线程按 `DB_LOCK_WATCHDOG_S`（默认 1s）扫 `snapshot()`，
    持有超 `DB_LOCK_WATCHDOG_HOLD_S`（默认 5s）当场 ERROR + dump 持锁线程栈，
    同 owner `DB_LOCK_WATCHDOG_DEDUP_S`（默认 60s）去重；看门狗自身**绝不获取 db_lock**。
+   看门狗随 `session_manager` 导入启动，并通过 `os.register_at_fork(after_in_child=...)`
+   在每个 fork 子进程里复位继承状态后重新拉起——gunicorn `--preload` 等「先 import
+   后 fork」形态下 worker 同样有看门狗。
+   等锁超时的 ERROR 日志也按 owner 同样口径去重（`DB_LOCK_TIMEOUT_LOG_DEDUP_S`，默认 60s，
+   0=不去重），指标 `grape_db_lock_acquire_timeouts_total{owner}` 仍逐次累加。
 4. **锁内外部 IO 清出**：`close_issue_tasks` / `_close_issue_tasks_bot_takeover` 的通知投递
    移到 `with db_lock` 之外（状态判定与 UPDATE 仍全在锁内）。
-5. **防回归门禁**：`scripts/check_db_lock_external_io.py`（挂 `make lint`）+ 结构断言用例。
+5. **防回归门禁**：`scripts/check_db_lock_external_io.py`（挂 `make lint`）+ 结构断言用例；
+   门禁覆盖两种临界区形态——`with db_lock:` 与
+   `acquired = db_lock.acquire(timeout=...)` + `try/finally: db_lock.release()`。
 
 ### Out of Scope
 
@@ -59,7 +69,10 @@
 - [x] 断言 `issues_center` 的通知/远程调用不在 `with db_lock:` 内
       （`scripts/check_db_lock_external_io.py` + `tests/kernel/test_issue_4295_external_io_gate.py`）
 - [x] 并发用例 3 写 + 1 读：读等待不随写线性增长（免锁读通道 + 有界等锁）
-      （`tests/kernel/test_issue_4295_concurrent_read_write.py`）
+      （`tests/kernel/test_issue_4295_concurrent_read_write.py`）；线程归因断言可失败
+      （反证用例 `test_reader_isolation_assertion_can_fail`）
+- [x] preload 形态（先 import 后 fork）下 fork 子进程 `watchdog_running()` 为 True、
+      父进程持锁状态不残留（`test_watchdog_restarts_in_fork_child_after_preload`）
 - [ ] 生产 1h 窗口 `db_lock slow hold` 最大值 < 5s、累计等待 ≤ 1,000s
       → 需上线后由 sre 观察窗口验证（本 PR 提供信号：`grape_db_lock_watchdog_events_total{owner}`
       / `grape_db_lock_acquire_timeouts_total{owner}` / `db_lock watchdog` ERROR 日志）
@@ -68,7 +81,7 @@
 
 | 风险 | 缓解 |
 |---|---|
-| 有界等锁把长任务打成 503 | 只约束**前台请求**（`path_var` 非空）；后台 sweeper/refresh/批处理无请求上下文 → 保持无界；`DB_LOCK_ACQUIRE_TIMEOUT_S=0` 可整体关闭 |
+| 有界等锁把长任务打成 503 | 只约束**HTTP 请求线程**（`path_var` 非空，含内部触发的长任务端点）；后台 sweeper/refresh/批处理无请求上下文 → 保持无界；长任务端点可局部 `foreground_lock_budget(0)` 关闭预算；`DB_LOCK_ACQUIRE_TIMEOUT_S=0` 可整体关闭 |
 | 超时抛点若在临界区内会造成"未加锁的 DB 写" | 抛出点固定在 `__enter__`/`acquire()` 返回前——**进入临界区之前**，块体不执行；用例断言 `entered == []` |
 | 看门狗日志风暴 / 抓栈开销 | 同 owner 60s 去重、ERROR 级别、栈深截断 15 帧、只读快照不动锁 |
 | RLock 可重入导致加锁函数内层再次 `with db_lock` 误超时 | 同线程重入立即成功（预算不参与），用例 `test_reentrant_acquisition_never_times_out` |
@@ -77,5 +90,5 @@
 ## 6. 回滚
 
 四项均可独立关闭且不改锁语义：`DB_LOCK_ACQUIRE_TIMEOUT_S=0`（无界等锁）、
-`DB_LOCK_WATCHDOG_S=0`（关看门狗）、门禁脚本可从 `make lint` 摘除；通知投递位置回退
-是纯代码回滚（无数据迁移）。
+`DB_LOCK_WATCHDOG_S=0`（关看门狗）、`DB_LOCK_TIMEOUT_LOG_DEDUP_S=0`（超时日志不去重）、
+门禁脚本可从 `make lint` 摘除；通知投递位置回退是纯代码回滚（无数据迁移）。
