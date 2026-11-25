@@ -13,7 +13,9 @@
 - 封禁期内的请求不再计数（避免封禁被持续重试无限续期）；
 - 拒绝日志按 IP 聚合：每 IP 每个 60s 窗口最多 1 条摘要（窗口累计次数 + 首末时间 +
   prefix/endpoint 集合 + 自上一条摘要以来被抑制的条数），摘要保留
-  "runtime credential rejected" 前缀以兼容既有 Loki/Grafana 检索。
+  "runtime credential rejected" 前缀以兼容既有 Loki/Grafana 检索；
+- 取不到来源 IP 时以固定键 `ip=unknown` 走同一节流器留痕，但不计数/不封禁
+  （极端代理场景不能因无 IP 让鉴权拒绝零留痕）。
 
 阈值按进程分摊说明：多 worker/多进程部署时各进程独立计数（Spec 已声明，
 重启退化为重新计数，代价可接受）。内存上界 `RUNTIME_AUTH_FAIL_MAX_IPS`
@@ -122,6 +124,8 @@ class AuthFailureBudget:
     def __init__(self):
         self._lock = threading.Lock()
         self._states: dict = {}
+        # 无来源 IP 的聚合账本（固定键 ip=unknown；只留痕，不计数不封禁）
+        self._unknown_state = None
 
     # ---- 读侧：封禁检查（请求入口快速路径） ----
     def check_banned(self, ip: str, now: float = None) -> int:
@@ -145,10 +149,11 @@ class AuthFailureBudget:
         - 其余 → "reject"（调用方按原语义返回 401）。
         封禁期内的失败不计数（防封禁被无限续期），直接返回 "ban"。
         """
-        if not ip:
-            # 拿不到来源 IP（极端代理场景）不计数：宁可放行 401 也不误伤共享出口
-            return FailureOutcome("reject")
         now = time.time() if now is None else now
+        if not ip:
+            # 拿不到来源 IP（极端代理场景）不计数：宁可放行 401 也不误伤共享出口，
+            # 但仍以固定键 ip=unknown 留痕（否则该形态下鉴权拒绝完全无记录）。
+            return self._record_unknown_failure(prefix, endpoint, now)
         with self._lock:
             st = self._states.get(ip)
             if st and st.banned_until and now < st.banned_until:
@@ -169,38 +174,60 @@ class AuthFailureBudget:
                 st.banned_until = now + ban_s
                 action, retry_after = "ban", ban_s
             elif minute_n > _minute_limit():
-                action, retry_after = "throttle", int(MINUTE_WINDOW_S - now % MINUTE_WINDOW_S) + 1
+                # Retry-After 必须指向“最早一条失败滑出 60s 窗口”的真实时刻，
+                # 不能用墙钟分钟边界（与滑动窗口不对应，客户端按它重试仍会被 429）。
+                # k = 需要滑出的条数；第 k-1 条（0-based）滑出后即释放一个配额。
+                k = minute_n - _minute_limit()
+                drop_at = st.minute[k - 1] + MINUTE_WINDOW_S
+                action, retry_after = "throttle", max(1, int(drop_at - now) + 1)
             else:
                 action, retry_after = "reject", 0
 
-            # 日志聚合：窗口 id 滚动（新窗口解除“本窗口已发摘要”标记）
-            win = int(now // MINUTE_WINDOW_S)
-            if st.win != win:
-                st.win = win
-                st.logged_in_win = False
-            # 聚合账本累加当前失败（覆盖自上一条摘要以来的全部被抑制条目）
-            st.agg_count += 1
-            st.agg_first = st.agg_first or now
-            st.agg_last = now
-            st.agg_prefixes.add(str(prefix)[:16])
-            st.agg_endpoints.add(str(endpoint)[:80])
-
-            log_line = ""
-            # 每窗口最多 1 条摘要；ban 是一次性状态迁移，强制可见（不被窗口节流吞掉）
-            if action == "ban" or not st.logged_in_win:
-                st.logged_in_win = True
-                log_line = (
-                    f"runtime credential rejected: ip={ip} window_count={st.agg_count}"
-                    f" first={_iso(st.agg_first)} last={_iso(st.agg_last)}"
-                    f" prefixes={','.join(sorted(st.agg_prefixes))}"
-                    f" endpoints={','.join(sorted(st.agg_endpoints))}"
-                    f" minute={minute_n} hour={hour_n} action={action}")
-                # 摘要已发出，聚合账本清零（下一条摘要从新账本累计）
-                st.agg_count = 0
-                st.agg_first = 0.0
-                st.agg_prefixes = set()
-                st.agg_endpoints = set()
+            log_line = self._aggregate_summary(
+                st, ip, prefix, endpoint, now, action, minute_n, hour_n)
             return FailureOutcome(action, retry_after, log_line)
+
+    def _record_unknown_failure(self, prefix: str, endpoint: str, now: float) -> "FailureOutcome":
+        """无来源 IP：固定键 ip=unknown 聚合留痕，不计数/不封禁。"""
+        with self._lock:
+            if self._unknown_state is None:
+                self._unknown_state = _IpFailState(now)
+            log_line = self._aggregate_summary(
+                self._unknown_state, "unknown", prefix, endpoint, now, "reject", 0, 0)
+            return FailureOutcome("reject", 0, log_line)
+
+    def _aggregate_summary(self, st: "_IpFailState", ip: str, prefix: str,
+                           endpoint: str, now: float, action: str,
+                           minute_n: int, hour_n: int) -> str:
+        """聚合日志：窗口 id 滚动 + 账本累加，每窗口最多 1 条摘要（ban 强制可见）。"""
+        win = int(now // MINUTE_WINDOW_S)
+        if st.win != win:
+            st.win = win
+            st.logged_in_win = False
+        # 聚合账本累加当前失败（覆盖自上一条摘要以来的全部被抑制条目）
+        st.agg_count += 1
+        st.agg_first = st.agg_first or now
+        st.agg_last = now
+        st.agg_prefixes.add(str(prefix)[:16])
+        st.agg_endpoints.add(str(endpoint)[:80])
+
+        # 每窗口最多 1 条摘要；ban 是一次性状态迁移，强制可见（不被窗口节流吞掉）
+        if not (action == "ban" or not st.logged_in_win):
+            return ""
+        st.logged_in_win = True
+        log_line = (
+            f"runtime credential rejected: ip={ip} window_count={st.agg_count}"
+            f" first={_iso(st.agg_first)} last={_iso(st.agg_last)}"
+            f" prefixes={','.join(sorted(st.agg_prefixes))}"
+            f" endpoints={','.join(sorted(st.agg_endpoints))}"
+            f" minute={minute_n} hour={hour_n} action={action}")
+        # 摘要已发出，聚合账本清零（下一条摘要从新账本累计）
+        st.agg_count = 0
+        st.agg_first = 0.0
+        st.agg_last = 0.0
+        st.agg_prefixes = set()
+        st.agg_endpoints = set()
+        return log_line
 
     def _evict_if_full(self, now: float) -> None:
         """条目数达上界：先清过期项，仍满则整体重置（fail-open，保鉴权主链路）。"""
@@ -216,6 +243,7 @@ class AuthFailureBudget:
         """清空全部状态（测试用）。"""
         with self._lock:
             self._states.clear()
+            self._unknown_state = None
 
 
 # 进程级单例：4 进程各自独立计数（阈值按进程量级评估，见模块头说明）

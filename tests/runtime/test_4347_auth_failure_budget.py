@@ -11,9 +11,11 @@ import secrets
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from src.domains.runtime.routes.auth_failure_budget import (AuthFailureBudget,
                                                             auth_failure_gate)
+from src.domains.runtime.routes.runtime import _auth_failure_key
 from src.kernel.session_manager import db, db_lock
 
 T0 = 1_700_000_000.0  # 固定时间基点（滑动窗口单测可复现）
@@ -211,3 +213,109 @@ class TestGateReset:
         assert auth_failure_gate.check_banned("1.2.3.4", now=T0 + 1) == 0
         out = auth_failure_gate.record_failure("1.2.3.4", "rta_Z", "/e", now=T0 + 2)
         assert out.action == "reject"
+
+def _fake_request(client_host: str, xff: str | None = None) -> Request:
+    headers = []
+    if xff is not None:
+        headers.append((b"x-forwarded-for", xff.encode()))
+    return Request({
+        "type": "http", "method": "GET", "path": "/api/runtime/register",
+        "query_string": b"", "headers": headers, "client": (client_host, 12345),
+        "server": ("testserver", 80), "scheme": "http",
+    })
+
+
+class TestSecureBudgetKey:
+    """C1：预算/封禁键不能被客户端伪造/轮换的 X-Forwarded-For 操控。"""
+
+    def test_untrusted_peer_ignores_forged_xff(self):
+        assert _auth_failure_key(_fake_request("203.0.113.7", "9.9.9.9")) == "203.0.113.7"
+        assert _auth_failure_key(_fake_request("203.0.113.7", "1.1.1.1")) == "203.0.113.7"
+
+    def test_trusted_proxy_accepts_xff(self, monkeypatch):
+        monkeypatch.setenv("TRUSTED_PROXY_IPS", "10.0.0.1")
+        assert _auth_failure_key(_fake_request("10.0.0.1", "198.51.100.4")) == "198.51.100.4"
+        # 非白名单对端即使带 XFF 也不采信
+        assert _auth_failure_key(_fake_request("10.0.0.2", "198.51.100.4")) == "10.0.0.2"
+
+    def test_loopback_default_trusted(self):
+        # 缺省信任本机回环（nginx 与 worker 同机部署的安全默认）
+        assert _auth_failure_key(_fake_request("127.0.0.1", "198.51.100.8")) == "198.51.100.8"
+
+
+class TestRetryAfterAlignment:
+    def test_retry_after_matches_sliding_window_expiry(self):
+        """R1：按返回的 Retry-After 等待后，下一次失败不再被 429。"""
+        gate = AuthFailureBudget()
+        for i in range(10):
+            assert gate.record_failure("4.4.4.4", "rta_R", "/e", now=T0 + i).action == "reject"
+        out = gate.record_failure("4.4.4.4", "rta_R", "/e", now=T0 + 10)
+        assert out.action == "throttle"
+        # 第 1 条失败在 T0+60 滑出，now=T0+10 → 50s 后 +1s 保护
+        assert out.retry_after == 51
+        after = gate.record_failure("4.4.4.4", "rta_R", "/e", now=T0 + 10 + out.retry_after)
+        assert after.action == "reject"
+
+
+class TestUnknownIpLogging:
+    def test_empty_ip_logs_fixed_key_without_counting(self):
+        """R2：空 IP 仍留痕（ip=unknown），但不计数、不封禁。"""
+        gate = AuthFailureBudget()
+        lines = []
+        for i in range(5):
+            out = gate.record_failure("", "rta_U", "/e", now=T0 + i)
+            assert out.action == "reject" and out.retry_after == 0
+            if out.log_line:
+                lines.append(out.log_line)
+        assert len(lines) == 1
+        assert "runtime credential rejected" in lines[0]
+        assert "ip=unknown" in lines[0]
+        # 下一窗口继续留痕（聚合节流不吞掉整类事件）
+        out = gate.record_failure("", "rta_U", "/e", now=T0 + 61)
+        assert out.log_line != "" and "ip=unknown" in out.log_line
+
+
+class TestForgedXffHttpPath:
+    def test_rotating_xff_cannot_bypass_minute_budget(self, client, monkeypatch):
+        monkeypatch.setenv("RUNTIME_AUTH_FAIL_MINUTE_LIMIT", "3")
+        bad_token = "rta_" + "x" * 40
+        for i in range(3):
+            r = client.post("/api/runtime/register",
+                            headers={"Authorization": f"Bearer {bad_token}",
+                                     "X-Forwarded-For": f"198.51.100.{i + 10}"},
+                            json={"runtimes": []})
+            assert r.status_code == 401
+        r = client.post("/api/runtime/register",
+                        headers={"Authorization": f"Bearer {bad_token}",
+                                 "X-Forwarded-For": "198.51.100.99"},
+                        json={"runtimes": []})
+        assert r.status_code == 429
+
+    def test_forged_victim_ip_not_banned(self, client, monkeypatch):
+        monkeypatch.setenv("RUNTIME_AUTH_FAIL_MINUTE_LIMIT", "100")
+        monkeypatch.setenv("RUNTIME_AUTH_FAIL_HOUR_LIMIT", "3")
+        monkeypatch.setenv("RUNTIME_AUTH_BAN_SECONDS", "600")
+        bad = {"Authorization": "Bearer rta_" + "x" * 40,
+               "X-Forwarded-For": "203.0.113.9"}
+        for _ in range(3):
+            assert client.post("/api/runtime/register", headers=bad,
+                               json={"runtimes": []}).status_code == 401
+        # 伪造受害方 IP 不进入封禁；同一 key(TestClient 对端) 的有效凭据仍可访问
+        token = _make_token()
+        r = client.post("/api/runtime/register",
+                        headers={"Authorization": f"Bearer {token}",
+                                 "X-Forwarded-For": "203.0.113.9"},
+                        json={"device_name": "ci-4347-xff", "runtimes": [{"name": "opencode"}]})
+        assert r.status_code == 200
+
+
+class TestWhoamiCtx429Path:
+    def test_whoami_invalid_token_uses_budget(self, client, monkeypatch):
+        """_require_credential_ctx（whoami）失败分支同样接入预算与 429。"""
+        monkeypatch.setenv("RUNTIME_AUTH_FAIL_MINUTE_LIMIT", "2")
+        bad = {"Authorization": "Bearer rta_" + "y" * 40}
+        for _ in range(2):
+            assert client.get("/api/runtime/whoami", headers=bad).status_code == 401
+        r = client.get("/api/runtime/whoami", headers=bad)
+        assert r.status_code == 429
+        assert r.headers.get("Retry-After", "").isdigit()

@@ -42,3 +42,16 @@
 - 多 worker/出口 NAT 共享 IP 误封：只计鉴权失败 + 429 明确语义 + 封禁期短；
 - 4 进程独立计数：阈值按进程量级评估，env 可调；
 - 聚合丢单条细节：摘要保留累计次数/首末时间/prefix/endpoints 集合。
+
+## 复审修复（PR #2233 R1/R2）
+
+- **预算/封禁键防伪造**：`runtime.py` 新增 `_auth_failure_key()`——默认取 TCP 对端
+  （`request.client.host`），仅 `TRUSTED_PROXY_IPS` 内代理才采信 `X-Forwarded-For`
+  （缺省信任本机回环，兼容 nginx 同机部署）；`_client_ip()` 仍只作展示并注明不可
+  作安全键。部署侧 4 个 nginx conf 的 XFF 改为覆盖式 `$remote_addr`。
+- **Retry-After 对齐滑动窗口**：由 deque 算出最早滑出条目的时刻
+  `drop_at = minute[minute_n - limit - 1] + 60`，返回
+  `max(1, int(drop_at - now) + 1)`，替代墙钟分钟边界。
+- **空来源 IP 留痕**：固定键 `ip=unknown` 走同一聚合节流器，只留痕不计数/不封禁。
+- 新增用例：伪造/轮换 XFF、可信代理采信、Retry-After 等待后恢复、空 IP 聚合告警、
+  `/whoami`（`_require_credential_ctx`）429 路径；4 个新 env 补入 `.env.example`。
