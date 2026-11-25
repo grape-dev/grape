@@ -237,6 +237,72 @@
         <div class="tsk-detail isk-detail">
           <template v-if="sel">
             <div v-html="detailCardHtml"></div>
+            <!-- 与全屏详情共用 dispatchDetails；列表右侧详情同样展示下派仓库/子 Issue -->
+            <div v-if="dispatchLoading" class="isk-card isk-dispatch-card">
+              <div class="isk-card-tt">{{ t('dispatch.title') }}</div>
+              <div class="isk-muted">{{ t('loading') }}</div>
+            </div>
+            <div v-else-if="dispatchDetails.length" class="isk-card isk-dispatch-card">
+              <div class="isk-card-tt">{{ t('dispatch.title') }}</div>
+              <div v-for="d in dispatchDetails" :key="'side-dispatch-' + d.id" class="isk-dispatch">
+                <div class="isk-dispatch-head">
+                  <b>{{ t('dispatch.batch') }} #{{ d.id }}</b>
+                  <span class="isk-dispatch-badge">{{ dispatchStatusLabel(d.status) }}</span>
+                  <span class="isk-muted">{{ fmtLocal(d.created_at).substring(0, 16) }}</span>
+                  <span v-if="(d.targets || []).length" class="isk-muted">
+                    {{ (d.targets || []).length }} {{ t('dispatch.targets') }}
+                  </span>
+                </div>
+                <div v-if="!(d.targets || []).length" class="isk-muted">
+                  {{ t('dispatch.empty') }}
+                </div>
+                <div
+                  v-for="tgt in d.targets || []"
+                  :key="d.id + '-side-' + tgt.repo_key"
+                  class="isk-dispatch-target"
+                >
+                  <div class="isk-dispatch-row">
+                    <span>{{ t('dispatch.repo') }}</span>
+                    <a class="isk-link" @click.prevent="openDispatchRepo(tgt)">
+                      {{ bareRepo(tgt.repo_key) }} ↗
+                    </a>
+                  </div>
+                  <div class="isk-dispatch-row">
+                    <span>{{ t('dispatch.scene') }}</span>
+                    <b>{{ tgt.scene_name || tgt.scene_id || '—' }}</b>
+                    <span v-if="tgt.scene_name && tgt.scene_id" class="isk-muted"
+                      >({{ tgt.scene_id }})</span
+                    >
+                  </div>
+                  <div class="isk-dispatch-row">
+                    <span>{{ t('dispatch.issue') }}</span>
+                    <a
+                      v-if="tgt.child_issue_number"
+                      class="isk-link"
+                      :href="vcsUrl(tgt.repo_key, '/issues/' + tgt.child_issue_number)"
+                      target="_blank"
+                      rel="noopener"
+                      >#{{ tgt.child_issue_number }} ↗</a
+                    >
+                    <span v-else class="isk-muted">—</span>
+                  </div>
+                  <div v-if="tgt.pr_number" class="isk-dispatch-row">
+                    <span>PR</span>
+                    <a
+                      class="isk-link"
+                      :href="vcsUrl(tgt.repo_key, '/pull/' + tgt.pr_number)"
+                      target="_blank"
+                      rel="noopener"
+                      >#{{ tgt.pr_number }} ↗</a
+                    >
+                  </div>
+                  <div v-if="tgt.error" class="isk-dispatch-row">
+                    <span></span>
+                    <span class="isk-dispatch-error">{{ tgt.error }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
             <div v-html="reviewBannerHtml"></div>
             <!-- 附件区 -->
             <div class="isk-attach-card">
@@ -2035,14 +2101,32 @@ function dispatchStatusLabel(status) {
   return DISPATCH_STATUS_LABELS[String(status || '')] || String(status || '—')
 }
 function dispatchTaskOrgId(tk) {
-  return String((tk && tk.org_id) || '')
+  if (tk && tk.org_id) return String(tk.org_id)
+  // 深链/直达详情可能没有 org_id：回退当前组织上下文（仅影响组织需求卡片）。
+  try {
+    return String(localStorage.getItem('current_org_id') || '')
+  } catch (e) {
+    return ''
+  }
 }
 function loadDispatchDetails(tk) {
   const seq = ++dispatchReqSeq
   dispatchDetails.value = []
   const orgId = dispatchTaskOrgId(tk)
   // 子 Issue 看父组织需求；组织需求看自己。
-  const issueNumber = Number((tk && (tk.parent_issue_number || tk.issue_number)) || 0)
+  // 组织需求本身是「单需求」，parent_issue_number 会是 0/"0"/"#0"；
+  // 不能让这个哨兵遮蔽自己的 issue_number，否则下派查询编号=0 直接跳过。
+  let _parentRaw = ''
+  for (const _cand of [tk && tk.parent_issue_number, tk && tk.parent_issue_id]) {
+    const _v = String(_cand || '').replace(/^#/, '')
+    if (_v && _v !== '0') {
+      _parentRaw = _v
+      break
+    }
+  }
+  const _ownRaw = String((tk && tk.issue_number) || '').replace(/^#/, '')
+  const _targetRaw = _parentRaw || _ownRaw
+  const issueNumber = Number(_targetRaw) || 0
   if (!tk || tk.is_pr_event || !orgId || !issueNumber) {
     dispatchLoading.value = false
     return
@@ -3280,6 +3364,7 @@ function openDeeplinkDetailViaApi(repo, issueNum) {
         id: d.issue_id,
         issue_number: d.number,
         number: d.number,
+        org_id: d.org_id || '',
         title: d.title || '',
         status: d.task_status || 'active',
         task_status: d.task_status || '',
@@ -3290,7 +3375,7 @@ function openDeeplinkDetailViaApi(repo, issueNum) {
         creator: d.creator || '',
         is_subtask_mode: d.is_subtask_mode || 0,
         parent_issue_id: d.parent_issue_id || '',
-        repo_key: repo.repoKey || repo.fullName || '',
+        repo_key: d.repo_key || repo.repoKey || repo.fullName || '',
         created_at: '',
         events_count: d.events_count || 0,
         is_running: false,
