@@ -483,6 +483,80 @@ def operations_of(paths: dict) -> dict[str, tuple[str, str]]:
     return ops
 
 
+# ===== 能力位（Issue #4081：调用侧「先查后调」，确定性降级）=====
+
+# 插件代理两端点的登记 operationId（单一事实源 = contracts/required_operations.json，
+# 这里只列需要对外announce 的子集；清单里没有对应条目时按「未实现」处理）。
+PLUGIN_AGENT_OPERATIONS = ("plugins_agent_installed", "plugins_agent_report_missing")
+
+_CAPABILITY_CACHE_TTL = 30.0
+_capability_cache: dict = {}
+
+
+def _registered_pairs(app) -> set:
+    """app.routes → {(path, "METHOD")}：方法级注册面（含 include_in_schema=False 的路由）。
+
+    fastapi>=0.140 的 `include_router` 是惰性 `_IncludedRouter` 包装，必须经
+    `_iter_routes` 展开才能看到 APIRoute（与契约渲染同一套取路由逻辑）。
+    """
+    pairs = set()
+    for route in getattr(app, "routes", None) or []:
+        for r in _iter_routes(route):
+            path = getattr(r, "path", "") or ""
+            for method in (getattr(r, "methods", None) or set()):
+                pairs.add((path, str(method).upper()))
+    return pairs
+
+
+def plugin_agent_capabilities(app) -> dict:
+    """插件代理能力位：两端点在本实例是否已注册（operationId + method 匹配）。
+
+    数据源 = `load_required_operations()`（#2081 单一事实源）+ app.routes 实际注册面，
+    与 `contract_integrity()` 的 missing_operations 判定同口径（`operationId` 存在且
+    method/path 未漂移）。供 `/api/ping`（全进程可达、免鉴权）对外announce：
+    调用侧先查后调，缺端点时确定性降级，而不是靠试错拿 404/405。
+
+    30s TTL 缓存：路由表在进程生命周期内不变，避免每次探针都遍历 routes。
+    """
+    import time as _t
+
+    now = _t.time()
+    cached = _capability_cache.get(id(app))
+    if cached and now < cached[0]:
+        return dict(cached[1])
+    result = _build_plugin_agent_capabilities(app)
+    _capability_cache[id(app)] = (now + _CAPABILITY_CACHE_TTL, result)
+    return dict(result)
+
+
+def _build_plugin_agent_capabilities(app) -> dict:
+    try:
+        required = load_required_operations()
+    except Exception as exc:  # 清单缺失/损坏：fail-closed 报告为不可用，不抛给探针
+        return {"available": False, "installed": False, "report_missing": False,
+                "missing_operations": [],
+                "error": f"required_operations_unavailable: {exc}"}
+    registered = _registered_pairs(app)
+    missing, flags = [], {}
+    for oid in PLUGIN_AGENT_OPERATIONS:
+        pair = required.get(oid)
+        if pair is None:
+            missing.append({"operationId": oid, "method": "", "path": ""})
+            flags[oid] = False
+            continue
+        path, method = pair
+        ok = (path, str(method).upper()) in registered
+        if not ok:
+            missing.append({"operationId": oid, "method": method, "path": path})
+        flags[oid] = ok
+    return {
+        "available": not missing,
+        "installed": flags.get("plugins_agent_installed", False),
+        "report_missing": flags.get("plugins_agent_report_missing", False),
+        "missing_operations": missing,
+    }
+
+
 def fmt_operation(oid: str, path: str, method: str) -> str:
     """操作三元组可定位格式（门禁失败信息 / 降级错误信息共用）："oid (METHOD path)"。
 

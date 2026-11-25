@@ -399,6 +399,33 @@ WEBHOOK_TOKEN_MISMATCH_TOTAL = Counter(
     registry=registry,
 )
 
+# Issue #4081：插件代理缺插件上报结果（agent negotiation 闭环）。
+# 语义：result=submitted（入统一确认单/队列成功，闭环可用）| degraded（市场契约/
+# 确认队列不可用 → comment 通道降级，需要人看一眼）。此前该结果只有 logger.debug，
+# 值守只能翻 nginx/应用日志。标签只有 result 一维（repo_key 高基数，不引入）。
+PLUGIN_MISSING_REPORT_METRIC = "grape_plugin_missing_report_total"
+
+PLUGIN_MISSING_REPORT = Counter(
+    PLUGIN_MISSING_REPORT_METRIC,
+    "Agent report-missing submissions by result (submitted|degraded).",
+    ["result"],
+    registry=registry,
+)
+
+# Issue #4081：插件代理命名空间下「本构建未实现」的请求计数。
+# 语义：/api/plugins/agent/* 未登记的路径/方法命中路由级兜底 → 501 NOT_IMPLEMENTED
+# 并在此自增（method 一维即可；具体路径只落日志，避免探测流量打高基数）。
+# 用途：deploy/alerts.yml 的 GrapePluginAgentEndpointMissing 据此告警，
+# 取代「每台 runtime 静默 404/405、只能翻 nginx 日志」的现状。
+PLUGIN_AGENT_UNIMPLEMENTED_METRIC = "grape_plugin_agent_unimplemented_total"
+
+PLUGIN_AGENT_UNIMPLEMENTED = Counter(
+    PLUGIN_AGENT_UNIMPLEMENTED_METRIC,
+    "Requests to plugin-agent paths this build does not implement (answered 501).",
+    ["method"],
+    registry=registry,
+)
+
 TASK_RUN_SECONDS = Histogram(
     "grape_agent_task_run_seconds",
     "Time agent tasks spent running before a terminal state.",
