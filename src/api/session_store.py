@@ -282,12 +282,24 @@ def get_issue_bound_scene(repo_key: str, issue_id: str) -> tuple:
     return "", 0
 
 
-def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: int = 0):
-    """写入 Issue 级开发场景（VOD 判定后调用，幂等）。Phase C3：仅写 issue 单表。"""
-    _sync_issue_fields(repo_key, issue_id, {"scene_id": scene_id or "", "scene_user_id": scene_user_id},
-                       ensure_row=True)
+def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: int | None = None):
+    """写入 Issue 级开发场景（VOD 判定后调用，幂等）。Phase C3：仅写 issue 单表。
+
+    scene_user_id=None（默认）= **不覆盖**已有归属人，只更新 scene_id。
+    原因：交办刷新场景的调用方拿不到新场景归属人时，原实现默认写 0，会把已绑定的
+    归属人静默冲成 0；随后按 Issue 场景取归属人建任务 → agent_tasks.user_id=0 →
+    scope=user 的个人引擎在 claim_by_tag 的 scope 过滤（`t.user_id=<owner id>`）
+    里永远领不到该任务（无日志、任务永久 queued）。
+    与 `set_issue_stage` 的 assignee「只在显式传入时写」（Issue #3646）同款口径：
+    显式传 0 仍是「确实没有归属人」，照写；不传则保留旧值。
+    """
+    _fields: dict = {"scene_id": scene_id or ""}
+    if scene_user_id is not None:
+        _fields["scene_user_id"] = scene_user_id
+    _sync_issue_fields(repo_key, issue_id, _fields, ensure_row=True)
     from src.kernel.config import log
-    log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id} uid={scene_user_id}")
+    _uid_desc = "preserve" if scene_user_id is None else scene_user_id
+    log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id} uid={_uid_desc}")
 
 
 def get_carried_context(repo_key: str, issue_number: int) -> dict:

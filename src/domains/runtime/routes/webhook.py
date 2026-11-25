@@ -1446,6 +1446,33 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     }
 
 
+def _handoff_target_scene_owner_uid(repo_key: str, scene_id: str) -> int | None:
+    """目标场景归属人（账号 id）；解析不出返回 None（调用方保持 Issue 原归属人）。
+
+    为什么需要：交办把 Issue 绑定场景切到目标场景时，原实现调 `set_issue_scene`
+    不传归属人 → 写 0，把原场景时期已绑定的归属人冲成 0；此后 a2a listener 按
+    Issue 场景取 task.user_id=0，scope=user 的个人引擎在 claim_by_tag 的 scope
+    过滤里永远领不到（任务永久 queued，且无任何日志）。这里用场景 created_by
+    （平台账号名）→ 账号 id 回填，取不到就传 None 让 set_issue_scene 保留旧值，
+    绝不写 0。
+    """
+    from src.kernel.config import log
+    try:
+        from src.domains.mgmt import public as _mg_pub
+        _creator = _mg_pub.scene_created_by_any(scene_id, repo_key)
+        if not _creator:
+            log.info(f"A2A #568: target scene {scene_id} has no created_by, keep issue scene_user_id unchanged")
+            return None
+        _uid = _mg_pub.account_id_by_username_ci_any(_creator)
+        if _uid:
+            return int(str(_uid).strip())
+        log.info(f"A2A #568: target scene {scene_id} created_by={_creator} 未注册平台账号, "
+                 f"keep issue scene_user_id unchanged")
+    except Exception as _e:
+        log.warning(f"A2A #568: resolve target scene owner failed (scene={scene_id}): {_e}")
+    return None
+
+
 def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_scene_id: str) -> str:
     """Issue #568: 跨流水线移交后刷新 issue 绑定场景为目标场景有效 ID。
 
@@ -1453,6 +1480,10 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
     绑定场景刷新为 DB 行 scene_id（有效 ID 归一）；后续 agent 任务经
     `_resolve_scene_id` → `get_issue_scene` 注入的 GRAPE_SCENE_ID 即为该有效 ID，
     且可通过 `scenes detail` 查询且节点有效。
+
+    归属人一并刷新：按目标场景 created_by 解析账号 id
+    写入 Issue 的 scene_user_id；解析不出时传 None → set_issue_scene 保留旧值，
+    不再把已绑定的归属人冲成 0。
 
     返回刷新后的有效 scene_id；目标场景 DB 行不存在时返回空串（软失败——
     移交主流程已通过 get_pipeline_config 兜底口径校验节点，这里仅收紧
@@ -1471,8 +1502,10 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
         return ""
     try:
         from src.api.session_store import set_issue_scene
-        set_issue_scene(repo_key, f"#{issue_number}", effective_scene_id)
-        log.info(f"A2A #568: issue scene refreshed to effective scene={effective_scene_id} (issue=#{issue_number})")
+        _owner_uid = _handoff_target_scene_owner_uid(repo_key, effective_scene_id)
+        set_issue_scene(repo_key, f"#{issue_number}", effective_scene_id, scene_user_id=_owner_uid)
+        log.info(f"A2A #568: issue scene refreshed to effective scene={effective_scene_id} "
+                 f"(issue=#{issue_number}, uid={_owner_uid if _owner_uid is not None else 'preserve'})")
     except Exception as _e:
         log.warning(f"A2A #568: issue scene refresh failed: {_e}")
     return effective_scene_id
