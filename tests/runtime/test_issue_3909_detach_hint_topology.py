@@ -288,3 +288,77 @@ def test_recovery_helpers_stay_on_runtime_owned_tables(step):
 
     src = inspect.getsource(getattr(recovery, step))
     assert "session_manager" not in src
+
+# ── H. 路由判据只取配置口径：连接退避期不得误交 runtime 游标 ────────────────────
+
+
+MGMT_DSN = "mysql://u:***@127.0.0.1:3306/grape_mgmt_db"
+
+
+def test_readd_scene_bindings_ignores_mgmt_connection_availability(monkeypatch):
+    """mgmt DSN 已配置但连接处于退避期（domain_db 返回 None）时，mgmt 基表仍必须交
+
+    mgmt 自取连接，绝不复用 runtime 域游标 —— 否则 mgmt 进程内 ``_same_domain_*``
+    按进程域判同域复用，会用 runtime 库连接读写 ``devops_pipeline_scene``（跨库误写）。
+
+    回归 Required：判据从 ``uses_own_dsn``（内含 domain_db 探活）改为 ``route_of``。
+    """
+    from src.domains.runtime.engine import recovery
+    from src.domains.mgmt import public as mgmt_public
+
+    monkeypatch.setenv("GRAPE_DSN_RUNTIME", RUNTIME_DSN)
+    monkeypatch.setenv("GRAPE_DSN_MGMT", MGMT_DSN)
+    monkeypatch.setenv("GRAPE_DOMAIN_LIB", "1")
+    monkeypatch.setenv("GRAPE_PROCESS_ROLE", "mgmt")
+    monkeypatch.delenv("DEVOPS_DB_NAME", raising=False)
+
+    # 配置口径：runtime 走自有域连接、mgmt 走进程主库；但 mgmt 连接当前不可用
+    monkeypatch.setattr(db_registry, "domain_db", lambda d: None)
+    assert db_registry.route_of("runtime") == "domain"
+    assert db_registry.route_of("mgmt") == "local"
+    assert db_registry.uses_own_dsn("mgmt") is False, "退避期探活口令必须为 False（旧判据缺陷来源）"
+
+    runtime_cur = _FakeCursor(rows=[(1, 11, "coding")])
+    seen_cursors = []
+
+    def _scene_row(_sid, cursor=None):
+        seen_cursors.append(cursor)
+        return None  # 行不存在 → 只标 rebound，不进写路径
+
+    monkeypatch.setattr(mgmt_public, "scene_nodes_row_by_id_any", _scene_row)
+
+    recovery._readd_scene_bindings(runtime_cur, runtime_id=7,
+                                   now_iso="2026-11-23T00:00:00+00:00")
+
+    assert seen_cursors, "必须调用 mgmt public 读取场景节点"
+    assert seen_cursors[0] is None, \
+        "mgmt 表读必须交 mgmt 自取连接，不得复用 runtime 域游标（跨库误写）"
+    assert runtime_cur not in seen_cursors
+
+
+def test_readd_scene_bindings_single_db_reuses_caller_cursor(monkeypatch):
+    """单库/测试拓扑（runtime/mgmt 都 local）仍复用调用方游标，保住事务快照与提交责任。"""
+    from src.domains.runtime.engine import recovery
+    from src.domains.mgmt import public as mgmt_public
+
+    monkeypatch.setenv("GRAPE_DOMAIN_LIB", "0")
+    monkeypatch.delenv("GRAPE_DSN_RUNTIME", raising=False)
+    monkeypatch.delenv("GRAPE_DSN_MGMT", raising=False)
+    monkeypatch.setenv("GRAPE_PROCESS_ROLE", "mgmt")
+    assert db_registry.route_of("runtime") == "local"
+    assert db_registry.route_of("mgmt") == "local"
+
+    runtime_cur = _FakeCursor(rows=[(1, 11, "coding")])
+    seen_cursors = []
+
+    def _scene_row(_sid, cursor=None):
+        seen_cursors.append(cursor)
+        return None
+
+    monkeypatch.setattr(mgmt_public, "scene_nodes_row_by_id_any", _scene_row)
+
+    recovery._readd_scene_bindings(runtime_cur, runtime_id=7,
+                                   now_iso="2026-11-23T00:00:00+00:00")
+
+    assert seen_cursors and seen_cursors[0] is runtime_cur, \
+        "单库拓扑必须复用调用方游标（否则事务快照/提交责任被悄悄改掉）"
