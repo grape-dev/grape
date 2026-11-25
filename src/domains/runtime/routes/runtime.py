@@ -15,6 +15,7 @@ from src.api.deps import (require_no_session_token, require_org_member,
 from src.domains.runtime.engine.health import apply_runtime_state
 from src.kernel.config import log
 from src.kernel.domain_db import cursor as _domain_cursor
+from src.domains.runtime.engine import stale_uid as _stale_uid
 
 # Issue #4082：`/runtimes/{runtime_id}/*` 非法 id 统一 400 的路由类
 from src.domains.runtime.routes.runtime_id_validation import RuntimeIdGuardRoute
@@ -1765,6 +1766,22 @@ class ProgressBodyV2(ProgressBody):
     engine_uid: str = ""
 
 
+def _lookup_fallback_runtime_id(fallback_runtime_id: int, credential_id: int) -> int:
+    """并存期兜底查询：body.runtime_id 属本凭据则返回该行 id，否则 0（不抛）。
+
+    Issue #4349 从 `_resolve_runtime_by_uid` 的内联查询抽出（uid 命中路径保持
+    单次查询不变，stale/空 uid 路径才查兜底），供 stale 报告的回退行关联复用。
+    """
+    if not fallback_runtime_id:
+        return 0
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT id FROM agent_runtimes WHERE id=? AND credential_id=? LIMIT 1",
+            (fallback_runtime_id, credential_id)).fetchone()
+    return row[0] if row else 0
+
+
 def _resolve_runtime_by_uid(engine_uid: str, fallback_runtime_id: int,
                             credential_id: int) -> int:
     """v2 寻址解析：uid → runtime_id（限本 rta_ 凭据），双失效 404 UNKNOWN_ENGINE_UID。
@@ -1773,6 +1790,12 @@ def _resolve_runtime_by_uid(engine_uid: str, fallback_runtime_id: int,
     - uid 未命中（失效：引擎删除/合流重派生窗口/未迁移 NULL uid）且
       fallback_runtime_id 非 0 且命中本凭据 → 回退该行 id（并存期兜底）；
     - 双失效 → 404（fail-fast，不静默造行；message 含 NULL uid 引擎的重注册提示）。
+
+    Issue #4349（stale 刷屏治理）：uid 失效由「每请求一条 WARNING」改为
+    **一次性 ERROR + 按 (uid, credential_id) 窗口限频**（vod-dev-002 三引擎
+    1 小时曾刷 2,733 条 WARNING，占该小时 worker WARNING 36%）；每次失效
+    照常计入 grape_runtime_v2_stale_uid_total{source="resolve"} 指标，回退
+    命中时把 stale 报告关联到回退行（/runtimes 详情的 stale 标记来源）。
     """
     uid = (engine_uid or "").strip().lower()
     if uid:
@@ -1783,16 +1806,21 @@ def _resolve_runtime_by_uid(engine_uid: str, fallback_runtime_id: int,
                 (uid, credential_id)).fetchone()
         if row:
             return row[0]
-        log.warning(f"v2 resolve: engine_uid not found (stale?): uid={uid} "
-                    f"credential={credential_id} fallback_runtime_id={fallback_runtime_id}")
-    if fallback_runtime_id:
-        with db_lock:
-            c = db.cursor()
-            row = c.execute(
-                "SELECT id FROM agent_runtimes WHERE id=? AND credential_id=? LIMIT 1",
-                (fallback_runtime_id, credential_id)).fetchone()
-        if row:
-            return row[0]
+        fallback_hit = _lookup_fallback_runtime_id(fallback_runtime_id, credential_id)
+        _stale_uid.record_and_log(
+            uid, credential_id, "resolve",
+            f"v2 resolve: engine_uid not found (stale?): uid={uid} "
+            f"credential={credential_id} fallback_runtime_id={fallback_runtime_id}"
+            f"{' (fallback hit)' if fallback_hit else ' (no fallback)'}"
+            f" — rate-limited: one ERROR per {_stale_uid.log_window_s():.0f}s"
+            " per uid+credential; re-register to obtain a fresh uid",
+            runtime_ids=(fallback_hit,) if fallback_hit else ())
+        if fallback_hit:
+            return fallback_hit
+    else:
+        fallback_hit = _lookup_fallback_runtime_id(fallback_runtime_id, credential_id)
+        if fallback_hit:
+            return fallback_hit
     raise HTTPException(status_code=404, detail={
         "code": "UNKNOWN_ENGINE_UID",
         "message": f"engine_uid '{uid or '(empty)'}' not found"
@@ -1931,13 +1959,32 @@ async def runtime_heartbeat_v2(body: HeartbeatBodyV2, request: Request,
         return resolved_ids, stale_uids
 
     resolved_ids, stale_uids = await asyncio.to_thread(_resolve_uids)
+    # Issue #4349（stale 刷屏治理）：stale 段由每 uid 一条 WARNING 改为
+    # 一次性 ERROR + 按 (uid, credential_id) 窗口限频；每次失效照常计入
+    # grape_runtime_v2_stale_uid_total{source="heartbeat"}，同请求携带的
+    # body.runtime_ids 尽力关联到报告（/runtimes 详情的 stale 标记来源）。
     for uid in stale_uids:
-        log.warning(f"heartbeat-v2: engine_uid not found (stale, no row created): "
-                    f"uid={uid} credential={credential_id}")
+        _stale_uid.record_and_log(
+            uid, credential_id, "heartbeat",
+            f"heartbeat-v2: engine_uid not found (stale, no row created): "
+            f"uid={uid} credential={credential_id} — rate-limited: one ERROR per "
+            f"{_stale_uid.log_window_s():.0f}s per uid+credential; re-register to "
+            "obtain a fresh uid",
+            runtime_ids=body.runtime_ids or [])
     merged = list(resolved_ids)
     for rid in (body.runtime_ids or []):
         if rid not in merged:
             merged.append(rid)
+    # Issue #4349（心跳丢失可观测）：stale_uids 非空且无 runtime_ids 回退 →
+    # 本次心跳的引擎状态整体丢弃（响应虽回 engine_uids_stale 计数，但此前
+    # 无指标/日志，SRE 只能靠日志行数发现）。显式计数
+    # grape_runtime_v2_heartbeat_uid_lost_total + 按凭据限频 ERROR。
+    if stale_uids and not (body.runtime_ids or []):
+        _stale_uid.record_heartbeat_lost(
+            credential_id,
+            f"heartbeat-v2: {len(stale_uids)} stale engine_uid(s) with no "
+            f"runtime_ids fallback — heartbeat lost (uids={stale_uids} "
+            f"credential={credential_id}); re-register to obtain fresh uids")
     # 透传 v1 全部字段（含 #3773 的 acp_state_db_bytes / cleanup_counts /
     # bytes_freed_total / resume_skipped_total）；逐字段重建会静默丢弃这些指标，
     # 而 worker 默认 v2-first 且 200 即 return，v1 落库分支永远走不到 → /metrics 恒 0。
