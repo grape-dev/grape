@@ -521,6 +521,49 @@ def _autopilot_event_seq(exec_id: int) -> int:
     return _AUTOPILOT_EVENT_SEQ_BASE + int(exec_id or 0)
 
 
+def _resolve_autopilot_account(task: dict, repo_key: str, exec_id: int,
+                               repository: str = "") -> str:
+    """Issue #3905：autopilot 任务 $ACCOUNT 解析（任务创建者 → 仓库属主兜底）。
+
+    autopilot 无事件触发人，三级事件回退链（actor → payload.account → issue_creator）
+    对它恒空。此前只取「任务创建者」（autopilot_tasks.created_by）且硬编码
+    ``owner_fallback=False``，created_by=0 的历史任务必然落空 → 生产日 2,762 条
+    ACCOUNT_MISSING。本函数在创建者缺失时**显式为 autopilot 放行**仓库属主回退
+    （人工/事件驱动路径仍禁止，Issue #1819 语义不变），并留结构化审计：
+    ``ACCOUNT_OWNER_FALLBACK``（命中）/ ``ACCOUNT_MISSING``（仍不可得，owner_fallback=true）。
+    """
+    from src.domains.runtime.pipeline.account_env import (
+        log_account_alert, owner_account_for_repo, task_creator_account)
+
+    account = task_creator_account(task.get("created_by") or 0)
+    if account:
+        return account
+    owner = owner_account_for_repo(repo_key)
+    if owner:
+        # 语义是属主兜底而非本次触发人，必须可审计（#1819 安全语义）
+        log_account_alert(
+            "ACCOUNT_OWNER_FALLBACK", level="info",
+            event_type="autopilot",
+            repository=repository or repo_key,
+            repo_key=repo_key,
+            exec_id=exec_id,
+            account_source="repo_owner",
+        )
+        return owner
+    # created_by=0 的历史任务属常态，按 info 记录以免稀释真实 warning 信号。
+    log_account_alert(
+        "ACCOUNT_MISSING", level="info",
+        event_type="autopilot",
+        repository=repository or repo_key,
+        repo_key=repo_key,
+        exec_id=exec_id,
+        fallback="autopilot_created_by->repo_owner->none",
+        owner_fallback=True,
+        account_source="task_creator",
+    )
+    return ""
+
+
 def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     """执行单个 autopilot agent（在线程池中运行）。
 
@@ -620,7 +663,7 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     #    /root/grape-workspaces/... 绝对路径烧进 prompt，远端非 root worker（如 0005 liufei 用户）
     #    读 /root 被拒 → "SKILL.md 无法访问（权限被拒）"。10-12 exec 350 成功纯属 agent 自行
     #    glob 搜到 /home/{user} 副本自救，不可依赖。
-    evt = {"repo_key": repo_key, "issue_id": "", "payload": {}}
+    evt = {"type": "autopilot_event", "repo_key": repo_key, "issue_id": "", "payload": {}}
     if _is_direct:
         prompt = _materialize_direct_workdir(ws, repo_key, agent_type, skill_name, evt, "",
                                              prompt, engine_name=inst_name or backend or "")
@@ -632,22 +675,10 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     from src.kernel.repo_key import derive_repo_identity
     _full_name, _repo_owner, _repo_name = derive_repo_identity(repository, repo_key)
     # Issue #1819：autopilot 无事件 actor，不得把仓库全名（owner/repo）注入 $ACCOUNT。
-    # 取「任务创建者」账号作来源（autopilot_tasks.created_by → user_accounts.username）；
-    # 查不到才留空并告警。语义是创建者而非本次触发人，detail 里标明 account_source。
-    from src.domains.runtime.pipeline.account_env import log_account_alert, task_creator_account
-    _autopilot_account = task_creator_account(task.get("created_by") or 0)
-    if not _autopilot_account:
-        # created_by=0 的历史任务属常态，按 info 记录以免稀释真实 warning 信号。
-        log_account_alert(
-            "ACCOUNT_MISSING", level="info",
-            event_type="autopilot",
-            repository=repository,
-            repo_key=repo_key,
-            exec_id=exec_id,
-            fallback="autopilot_created_by->none",
-            owner_fallback=False,
-            account_source="task_creator",
-        )
+    # Issue #3905：解析顺序 = 任务创建者（task_creator_account，autopilot_tasks.created_by
+    # → user_accounts.username）→ 仓库属主兜底（仅 autopilot 放行）→ 仍不可得 ACCOUNT_MISSING
+    # （level=info，owner_fallback=true 留审计）。解析/审计细节见 _resolve_autopilot_account。
+    _autopilot_account = _resolve_autopilot_account(task, repo_key, exec_id, repository)
     env_extra = {
         "REPO_FULL_NAME": _full_name or repository,
         "REPO_OWNER": _repo_owner,
