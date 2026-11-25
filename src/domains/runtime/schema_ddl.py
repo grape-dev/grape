@@ -716,3 +716,23 @@ _WEBHOOK_INBOX_INDEXES = (
     ("grape_t_webhook_inbox_archive", "idx_webhook_inbox_archived",
      "(archived_at)", "(archived_at)"),
 )
+
+# Issue #3818：autopilot 同一载荷重复投递熔断 + 死信台账（归属 runtime）。
+# 调度器在「建 execution 之前」按归一化 payload hash 计数，超阈值停派并告警；
+# fake completion 降级 failed 也写同一行（failure_count），避免拒绝被无限重试放大。
+_AUTOPILOT_PAYLOAD_GUARD_DDL = """
+CREATE TABLE IF NOT EXISTS autopilot_payload_guard (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    payload_hash VARCHAR(64) NOT NULL,
+    task_id INTEGER NOT NULL DEFAULT 0,
+    repo_key VARCHAR(255) NOT NULL DEFAULT '',
+    dispatch_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    status VARCHAR(32) NOT NULL DEFAULT 'active',
+    reason VARCHAR(128) NOT NULL DEFAULT '',
+    first_seen_at VARCHAR(32) NOT NULL DEFAULT '',
+    last_seen_at VARCHAR(32) NOT NULL DEFAULT '',
+    updated_at VARCHAR(32) NOT NULL DEFAULT '',
+    UNIQUE(payload_hash)
+)
+"""

@@ -23,6 +23,7 @@
     "api_tokens": "mgmt",
     "audit_logs": "mgmt",
     "autopilot_executions": "runtime",
+    "autopilot_payload_guard": "runtime",
     "autopilot_subscriptions": "mgmt",
     "autopilot_tasks": "mgmt",
     "binding_tickets": "mgmt",

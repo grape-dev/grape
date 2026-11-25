@@ -1114,6 +1114,7 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "set_autopilot_run_info_any", "set_autopilot_dispatch_state_any",
            # Issue #3733：不可派发状态口径（常量 / 原因文案，runtime 调度器与 mgmt 路由共用）
            "AUTOPILOT_STATE_OK", "AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION",
+           "AUTOPILOT_STATE_BLOCKED_PAYLOAD", "AUTOPILOT_STATE_BLOCKED_PAYLOAD_REPEAT",
            "AUTOPILOT_EMPTY_INSTRUCTION_REASON", "reason_for_state", "dispatch_reason",
            # 反馈状态联动（api/feedback_status.py；任意拓扑）
            "feedback_external_sync_page", "feedback_mark_status_if_live",

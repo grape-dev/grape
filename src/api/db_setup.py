@@ -100,6 +100,7 @@ from src.domains.runtime.schema_ddl import (
     _DISTRIBUTED_LOCKS_DDL,
     _BRANCH_GUARD_STATE_DDL,
     _AUTOPILOT_EXECUTIONS_DDL,
+    _AUTOPILOT_PAYLOAD_GUARD_DDL,
     _CUL_DDL,
     _SC_DDL,
     _TAKEOVER_SESSIONS_DDL,
@@ -549,6 +550,7 @@ CREATE TABLE IF NOT EXISTS user_feedback (
     # ===== Issue #150: Autopilot 定时自动化任务表 =====
     ("autopilot_tasks", _AUTOPILOT_TASKS_DDL),
     ("autopilot_executions", _AUTOPILOT_EXECUTIONS_DDL),
+    ("autopilot_payload_guard", _AUTOPILOT_PAYLOAD_GUARD_DDL),
     ("autopilot_subscriptions", _AUTOPILOT_SUBSCRIPTIONS_DDL),
 ]
 
@@ -12616,4 +12618,29 @@ register_migration(
     kind="safe",
     domains=("runtime",),
     fn=_fn_add_agent_tasks_event_seq_status_index,
+)
+
+def _fn_create_autopilot_payload_guard_table() -> None:
+    """Issue #3818：存量库补建 runtime 域表 autopilot_payload_guard。
+
+    autopilot 定时任务反复投递同一份凭据外传载荷（1h 66 次、88+ 轮），调度侧无
+    dead-letter / 熔断。台账表归 runtime，由 owner 连接建；CREATE IF NOT EXISTS 幂等，
+    存量库重跑零写入（调度器首次使用还有一层惰性建表兜底）。
+    """
+    if _owned_skip("autopilot_payload_guard", "create table"):
+        return
+    conn = _migration_conn("runtime")
+    with (db_lock if conn is db else nullcontext()):
+        c = conn.cursor()
+        if not _table_present(c, "autopilot_payload_guard"):
+            c.execute(_AUTOPILOT_PAYLOAD_GUARD_DDL)
+        conn.commit()
+
+
+register_migration(
+    version="202611250001",
+    name="create-autopilot-payload-guard-table",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_create_autopilot_payload_guard_table,
 )
