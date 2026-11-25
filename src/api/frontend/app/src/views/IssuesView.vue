@@ -436,7 +436,11 @@
           <div class="isk-board-head">
             <span
               class="isk-board-dot"
-              :style="{ background: col.color, boxShadow: '0 0 6px ' + col.color + '40' }"
+              :style="{
+                background: col.color,
+                // R-Δ1：光晕同走 color-mix（token 拼不上 alpha 后缀）
+                boxShadow: '0 0 6px ' + 'color-mix(in srgb, ' + col.color + ' 25%, transparent)',
+              }"
             ></span>
             <span class="isk-board-name">{{ col.lbl }}</span>
             <span class="isk-board-cnt">{{ boardColCount(col.k) }}</span>
@@ -1781,9 +1785,13 @@ function stageStyle(tk) {
   return { color: c, background: 'color-mix(in srgb, ' + c + ' 9%, transparent)' }
 }
 function radarBg(tk) {
+  // R-Δ1：token 迁移后不得按位拼 alpha（var(--xx) 拼不上）；改 color-mix 生成半透明档，
+  // 明暗主题与 token 同源，雷达扫描在两主题下均可见（同 stageStyle 的既有先例）。
   const c = stageColor(tk)
   return {
-    background: 'conic-gradient(from 0deg, transparent 0deg, ' + c + '14 40deg, transparent 90deg)',
+    background:
+      'conic-gradient(from 0deg, transparent 0deg, ' +
+      'color-mix(in srgb, ' + c + ' 10%, transparent) 40deg, transparent 90deg)',
   }
 }
 
