@@ -180,6 +180,41 @@ class TestLifecycle(_LedgerCase):
         assert m[REPO]["webhook_token_mismatch"] == 6.0
         assert m[OTHER]["webhook_token_mismatch"] == 6.0
 
+    def test_pending_pruned_when_dimension_disappears(self):
+        """拒绝中断超过存在期（15 分钟）后仓库从维度集合消失，`_pending` 必须一起裁掉。
+
+        否则恢复后的首轮沿用陈旧「首个命中时刻」，直接满足 `for_sec`，绕过 300s 持续判定。
+        """
+        _set_rule(RULE, for_sec=300)
+        _insert_rejects(REPO, 11)
+        al.evaluate_rules()
+        assert _pending_key() in al._pending
+
+        from src.kernel.session_manager import db, db_lock
+        old = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+        with db_lock:
+            db.cursor().execute("UPDATE obs_webhook_rejects SET created_at=?", (old,))
+            db.commit()
+        assert al._repo_metrics().get(REPO, {}).get("webhook_token_mismatch") is None, \
+            "滑出存在期后该维度本轮不应再出现"
+        al.evaluate_rules()
+        assert _pending_key() not in al._pending, "维度消失后残留的 pending 会绕过 for_sec"
+
+        _insert_rejects(REPO, 11)
+        al.evaluate_rules()
+        assert _events(status="firing") == [], "恢复首轮必须重新等满 for_sec"
+
+    def test_pending_dropped_when_metric_missing(self, monkeypatch):
+        """维度仍被遍历但本轮没有该指标（val=None）同样算未命中，pending 要清。"""
+        _set_rule(RULE, for_sec=300)
+        _insert_rejects(REPO, 11)
+        al.evaluate_rules()
+        assert _pending_key() in al._pending
+        monkeypatch.setattr(al, "_repo_metrics",
+                            lambda: {REPO: {"task_stuck": 0.0, "task_queued": 0.0}})
+        al.evaluate_rules()
+        assert _pending_key() not in al._pending
+
     def test_user_face_event_visible_for_repo(self):
         _set_rule(RULE, for_sec=0)
         _insert_rejects(REPO, 11)

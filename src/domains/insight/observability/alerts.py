@@ -788,12 +788,18 @@ def evaluate_rules() -> Dict[str, Any]:
                 dims = [(f"repo:{rk}", rk) for rk in repo_m.keys()]
                 getter = lambda rk, m=metric: repo_m.get(rk, {}).get(m)  # noqa: E731
 
+            _evaluated_dims: set = set()
             for dim_key, repo_key in dims:
                 val = getter(repo_key)
                 evaluated += 1
                 key = f"{name}|{dim_key}"
+                _evaluated_dims.add(key)
 
                 if val is None:
+                    # Issue #3750：维度本轮没有该指标（如拒绝已滑出存在期、仓库仍因其它
+                    # 指标在集合里）→ 条件「未命中」，pending 必须一起清掉；留着会让
+                    # 恢复后的首轮直接满足 for_sec，绕过持续判定。
+                    _pending.pop(key, None)
                     skipped += 1
                     continue
 
@@ -848,6 +854,14 @@ def evaluate_rules() -> Dict[str, Any]:
                                   " last_seen_at=?, updated_at=? WHERE id=?",
                                   (now_iso, now_iso, now_iso, open_ev["id"]))
                         resolved += 1
+
+            # Issue #3750：清掉本轮维度集合之外的 `_pending`。拒绝中断超过存在期（15 分钟）
+            # 后该仓库会从 `repo_m` 里整体消失，维度不再被遍历；若 pending 仍留着陈旧的首
+            # 个命中时刻，恢复后首轮即满足 `for_sec`，绕过 300s 持续判定直接 firing。
+            _prefix = f"{name}|"
+            for _stale in [k for k in _pending
+                           if k.startswith(_prefix) and k not in _evaluated_dims]:
+                _pending.pop(_stale, None)
 
             # ---- 策略层（P1-1）：开放事件的「升级」与「通知时段恢复后补推」----
             try:
