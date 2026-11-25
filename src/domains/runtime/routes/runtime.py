@@ -729,6 +729,15 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                         str(_cap.get("checked_at") or ""))
             except Exception as _cap_e:
                 log.warning(f"register: backend capability apply failed for {name}: {_cap_e}")
+            # Issue #4346：LLM provider 注册/启用期校验——worker 上报的 provider 状态
+            # 落库；明确缺失 → llm_provider_ok=0 + healthy=0（存量行不进调度池，
+            # 派发链路不再产生 `No LLM provider configured` 500）。
+            try:
+                from src.domains.runtime.engine import provider_check as _pc_reg
+                _pc_reg.apply_registration_state(
+                    c, rid, name, rt.get("llm_provider") if isinstance(rt.get("llm_provider"), dict) else None)
+            except Exception as _pc_e:
+                log.warning(f"register: llm provider check failed for {name}: {_pc_e}")
             # Issue #1011：锚快照持久化（engine_type/provider_id/template_id/
             # provider_uid/template_uid 五列，001 迁移加列）——派生源修正后
             # 存量行可离线重算（002 重派派生迁移消费）；未迁移旧库缺列时降级跳过。

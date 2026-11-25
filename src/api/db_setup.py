@@ -12674,6 +12674,26 @@ register_migration(
     post_check=_post_backend_health_columns,
 )
 
+# ===== Issue #4346：session 通道熔断 + LLM provider 校验列 =====
+# agent_runtimes 增 9 列：session_fail_streak/session_fail_total/
+# session_circuit_until/session_circuit_half_open/session_last_error_code/
+# session_last_failure_at/session_last_success_at + llm_provider_ok/llm_provider_reason。
+# 新装库由 runtime schema_ddl 直接带列，本迁移只服务存量库；列在位才盖章。
+# 版本号：基线 202611250001..202611250006 已被并行线占用（#4262 renumber 后含同一号码
+# 重复注册的存量撞号），本迁移取下一个空闲号 202611250007（同号会被判「已执行」永久跳过）。
+from src.domains.runtime.migrations.session_circuit_columns import (
+    add_session_circuit_columns as _fn_session_circuit_columns,
+    verify_session_circuit_columns as _post_session_circuit_columns,
+)
+register_migration(
+    version="202611250007",
+    name="session-circuit-breaker-provider-columns",
+    kind="safe",
+    fn=_fn_session_circuit_columns,
+    domains=("runtime",),
+    post_check=_post_session_circuit_columns,
+)
+
 # ===== Issue #3794: agent_tasks(event_seq, status) 组合索引 =====
 # QA #1981 C1：该索引原先写进老轨 `_create_indexes()`，而老轨只在「版本表为空首跑」或
 # 「执行器异常兜底」时执行；存量库已盖 legacy-stamp 202610300001，启动时完全不跑，

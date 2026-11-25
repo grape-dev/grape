@@ -191,6 +191,18 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     circuit_open_until VARCHAR(64) DEFAULT '',  -- 熔断截止（空=未熔断；到期后半开试探）
     circuit_fail_count INTEGER DEFAULT 0,       -- 连续 spawn 失败次数（冷却指数退避用）
     circuit_half_open INTEGER DEFAULT 0,        -- 半开试探占位（0=无在飞试探）
+    -- Issue #4346：session 通道熔断（session/new 连续超时）+ LLM provider 注册校验。
+    -- 与上面的 backend 熔断列相互独立：backend 列由 backend_health 独占，
+    -- session 列只反映「建会话」通道健康度，不改写 ENGINE_OFFLINE 语义。
+    session_fail_streak INTEGER DEFAULT 0,          -- 连续 session/new 失败次数
+    session_fail_total INTEGER DEFAULT 0,           -- 累计 session 失败次数（排障）
+    session_circuit_until VARCHAR(64) DEFAULT '',   -- session 熔断截止（空=未熔断）
+    session_circuit_half_open INTEGER DEFAULT 0,    -- session 半开探测占位
+    session_last_error_code VARCHAR(48) DEFAULT '', -- 最近一次 session 失败分类
+    session_last_failure_at VARCHAR(64) DEFAULT '', -- 最近一次失败时间（UTC ISO）
+    session_last_success_at VARCHAR(64) DEFAULT '', -- 最近一次建会话成功时间
+    llm_provider_ok INTEGER DEFAULT 1,              -- 注册/启用期 provider 校验（0=不进池）
+    llm_provider_reason VARCHAR(255) DEFAULT '',    -- provider 缺失原因
     -- 2026-11-18：7794d05ee 的沙箱/引擎改造在 7 处代码里引用了这两列，却没加进表里，
     -- 导致 claim 查询 1054（Unknown column）→ 引擎进程从未 spawn → 任务挂到超时判 failed。
     -- 老库由迁移 202611180002 补列；这里让新库建表即带。

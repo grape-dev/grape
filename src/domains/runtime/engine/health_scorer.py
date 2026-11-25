@@ -474,6 +474,20 @@ def _local_probe_streak(runtime_id: int) -> int:
         return 0
 
 
+def _session_fields(runtime_id: int) -> dict:
+    """Issue #4346：session 层指标（失败计数/熔断态/provider 校验）透出。
+
+    独立于既有任务层 `ENGINE_OFFLINE` 计分：session 熔断只影响调度候选与观测，
+    不改写 `health_score` / `is_healthy` 语义。异常 → 空 dict（fail-open）。
+    """
+    try:
+        from src.domains.runtime.engine import session_guard
+        return session_guard.session_state(runtime_id)
+    except Exception as e:  # noqa: BLE001 - 观测字段缺失不得阻断健康分主链路
+        log.debug(f"health_scorer: session state unavailable for runtime={runtime_id}: {e}")
+        return {}
+
+
 def _compute_and_persist(runtime_id: int) -> dict:
     """计算健康分并持久化到 DB + 更新内存缓存。返回健康度数据 dict。
 
@@ -528,6 +542,7 @@ def _compute_and_persist(runtime_id: int) -> dict:
         "updated_at": _utcnow().isoformat(),
     }
     data.update(_derive_health_flag(data))
+    data.update(_session_fields(runtime_id))
     # 内存缓存
     with _cache_lock:
         _cache[runtime_id] = {
@@ -627,6 +642,7 @@ def get_health_score(runtime_id: int, force_refresh: bool = False,
                     "last_failure_at": row[10] or "",
                 }
                 data.update(_derive_health_flag(data))
+                data.update(_session_fields(runtime_id))
                 return data
         except Exception as e:
             log.warning(f"health_scorer: read_score failed for runtime={runtime_id}: {e}")
@@ -772,6 +788,7 @@ def _empty_score(runtime_id: int) -> dict:
         "updated_at": _utcnow().isoformat(),
     }
     data.update(_derive_health_flag(data))
+    data.update(_session_fields(runtime_id))
     return data
 
 
@@ -781,8 +798,18 @@ def record_task_completion(runtime_id: int, status: str):
     Issue #85: 改为即时模式——任务完成时立刻重新计算健康分并写入
     runtime_health_scores 表，增强健康度分析的及时性。
     不改变广播/分发语义——仅在任务终态后异步刷新。
+
+    Issue #4346：任务 `completed` 是「建会话成功」的强证据 → 复位 session 熔断
+    （连续超时 streak 清零、半开探测关闭）。failed 不复位——失败原因可能是
+    session 本身，复位会掩盖连续超时（session 失败由 `service.fail_task` 收口）。
     """
     if runtime_id:
+        try:
+            if (status or "").lower() == "completed":
+                from src.domains.runtime.engine import session_guard
+                session_guard.note_session_success(runtime_id)
+        except Exception as e:
+            log.debug(f"health_scorer: session success reset failed for runtime={runtime_id}: {e}")
         try:
             _compute_and_persist(runtime_id)
         except Exception as e:

@@ -5933,6 +5933,21 @@ def fail_task(task_id, error, exit_code=-1):
             return
     except Exception as _fe:
         log.warning(f"fail_task: backend failover check failed for {task_id}: {_fe}")
+    # Issue #4346：session 通道失败（session/new 100s 超时 / 无 LLM provider）→
+    # 分类留痕 + 换引擎重试（requeue 归池，故障引擎进 session 冷却/熔断）；
+    # 重试耗尽或无其它可用引擎 → 继续走判死（回落下一跳，不原地挂起）。
+    # 必须先于 #403 瞬时重试：session 超时不经瞬时分类，否则只能直接 failed。
+    try:
+        from src.domains.runtime.engine import session_guard as _sg
+        _so = _sg.handle_task_failure(task_id, task, error, exit_code)
+        if _so in ("requeued", "already_requeued"):
+            log.info(f"Task {task_id}: session channel failure → retry {_so} on another "
+                     f"engine, skip fail_task (exit={exit_code})")
+            return
+        if _so in ("observed", "exhausted"):
+            log.info(f"Task {task_id}: session channel classified ({_so}), continuing fail path")
+    except Exception as _se:
+        log.warning(f"fail_task: session guard check failed for {task_id}: {_se}")
     # Issue #403：瞬时上游抖动自动重试（判定层收口，worker 失败上报路径）。
     # 终态幂等（completed/failed 跳过）与过期上报丢弃均已通过，此处任务仍
     # running；可重试（瞬时分类 ∧ 无写操作证据 ∧ attempts 未耗尽）则退避
