@@ -2236,8 +2236,10 @@ def resolve_a2a_base_with_source(runtime_id: int = 0) -> tuple[str, str]:
       可信任，无需可达性探测；
     - ``runtime_server_url_fallback``：回退 ``RUNTIME_SERVER_URL``，四进程下可能落在
       本进程（如 mgmt 38081）而非 A2A 所在进程，派发方必须再做 health + POST /api/a2a
-      双重校验（见 ``takeover._a2a_dispatch_base``）。
-    本函数只做解析，不触发任何网络探测。
+      双重校验。Issue #4345 起 takeover finish 与人工「重派」共用
+      ``a2a_dispatch.resolve_a2a_dispatch_target``（候选探测 + 结果分类的单一来源），
+      不再各自内联解析后直接 POST。
+    回退顺序与 ``source`` 标签保持不变；本函数只做解析，不触发任何网络探测。
     """
     try:
         explicit = _tokens.get_task_service_api_url_explicit("a2a")
