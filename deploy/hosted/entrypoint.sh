@@ -42,34 +42,9 @@ DATA="${DEVOPS_DATA_DIR:-/app/data}"
 mkdir -p "$DATA" /app/configs "$HOME/.config/opencode"
 
 # ---------- 0) 引擎/设备身份：跨重部署必须稳定 ----------
-# 容器/Pod 每次重建 hostname 都会变，而 host_name 是本机引擎自然键的一部分
-# （UNIQUE (credential_id, name, scope, owner_id, host_name)，见 src/kernel/host_identity.py）。
-# 不固定它：每次重部署就多一条永远离线的引擎行 + 一条离线设备记录，场景节点的引擎绑定
-# 也会停在旧行上。身份落在持久卷 → 同一部署的历次重建共用同一个值；未挂卷时行为不变。
-if [ -z "${GRAPE_HOSTNAME:-}" ]; then
-  _idf="$DATA/instance-id"
-  if [ ! -s "$_idf" ]; then
-    _gen=""
-    if [ -r /dev/urandom ]; then
-      _gen="$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n' || true)"
-    fi
-    [ -n "$_gen" ] || _gen="$(date +%s)"
-    printf 'inst-%s\n' "$_gen" >"$_idf" 2>/dev/null || rm -f "$_idf" 2>/dev/null || true
-  fi
-  if [ -s "$_idf" ]; then
-    GRAPE_HOSTNAME="$(cat "$_idf")"
-    export GRAPE_HOSTNAME
-    echo "[entrypoint] engine identity -> GRAPE_HOSTNAME=$GRAPE_HOSTNAME (persisted in $_idf)"
-  elif [ -n "${RAILWAY_SERVICE_NAME:-}" ]; then
-    GRAPE_HOSTNAME="${RAILWAY_SERVICE_NAME}"
-    export GRAPE_HOSTNAME
-    echo "[entrypoint] engine identity -> GRAPE_HOSTNAME=$GRAPE_HOSTNAME (RAILWAY_SERVICE_NAME; volume identity unavailable)"
-  else
-    echo "[entrypoint] WARN: cannot persist instance id under $DATA and no platform service name; engine identity will follow the container hostname and redeploys will add offline rows" >&2
-  fi
-else
-  echo "[entrypoint] engine identity -> GRAPE_HOSTNAME=$GRAPE_HOSTNAME (from env)"
-fi
+# 派生逻辑收敛到 deploy/hosted/engine-identity.sh（可独立 source 供行为测试）。
+. "$(dirname "$0")/engine-identity.sh"
+derive_engine_identity
 
 # ---------- 1) JWT_SECRET ----------
 if [ -z "${JWT_SECRET:-}" ]; then
