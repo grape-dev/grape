@@ -740,6 +740,35 @@ def record_env_extra_plaintext_row(outcome: str = "heal_failed"):
     ENV_EXTRA_PLAINTEXT_ROWS.labels(outcome=o).inc()
 
 
+# ===== 运行时 env 契约缺失（Issue #3905）=====
+# 生产 Loki 里契约缺失只是 WARNING（24h 949 条淹没在噪声中），无法按 backend/agent
+# 维度聚合，也做不出「连续全缺」告警。改按 (backend, agent_type, var) 计数：
+#   - backend：引擎后端名（hermes/hwcloud/aishell-dsh/空=通用 CLI 路径）；
+#   - agent_type：从执行标签解析（issue/coding/qa/sre/vod…），未知归 unknown；
+#   - var：缺失变量名（ACCOUNT/GRAPE_ISSUE_ID/GRAPE_WORK_BRANCH/DEVOPS_EVENT_TYPE）。
+# 三者都是低基数字典值，repo/issue 号**不进标签**（防高基数）。
+
+RUNTIME_ENV_CONTRACT_MISSING_METRIC = "grape_runtime_env_contract_missing_total"
+
+RUNTIME_ENV_CONTRACT_MISSING = Counter(
+    RUNTIME_ENV_CONTRACT_MISSING_METRIC,
+    "Runtime env contract variables still missing after the fallback chain, by "
+    "backend / agent_type / variable name. Increase => issue tasks are running with a "
+    "degraded env (missing GRAPE_ISSUE_ID / GRAPE_WORK_BRANCH / ACCOUNT).",
+    ["backend", "agent_type", "var"],
+    registry=registry,
+)
+
+
+def record_runtime_env_contract_missing(backend: str = "", agent_type: str = "",
+                                        var: str = ""):
+    """记一次契约变量缺失（维度缺省归 unknown；名字不在契约内也照记，不丢数）。"""
+    b = (backend or "").strip().lower()[:40] or "unknown"
+    a = (agent_type or "").strip().lower()[:40] or "unknown"
+    v = (var or "").strip().upper()[:48] or "UNKNOWN"
+    RUNTIME_ENV_CONTRACT_MISSING.labels(backend=b, agent_type=a, var=v).inc()
+
+
 # ===== MySQL 连接池指标（参考 multica metrics/db.go，适配 grape MySQL）=====
 
 DB_THREADS_CONNECTED = Gauge(

@@ -1,6 +1,6 @@
 """Agent 执行器：流式子进程调度 (NDJSON)，不绑定具体后端。"""
 from src.kernel.user_ids import has_user_id
-import os, subprocess, json, time, signal, contextlib, shutil
+import os, subprocess, json, time, signal, contextlib, shutil, threading
 from typing import Generator, AsyncGenerator
 from src.kernel.config import log
 from .base import AgentBackend
@@ -1009,6 +1009,81 @@ _RUNTIME_CONTRACT_ENV = (
     "GRAPE_WORK_BRANCH",
 )
 
+# Issue #3905：issue 任务的三变量（DEVOPS_EVENT_TYPE 恒有值，不参与「全缺」判定）
+_RUNTIME_CONTRACT_ISSUE_VARS = ("ACCOUNT", "GRAPE_ISSUE_ID", "GRAPE_WORK_BRANCH")
+
+# 连续「三变量全缺」的告警阈值：单条任务缺变量只是 WARNING（24h 949 条淹没在噪声里），
+# 连续 N 次全缺说明派发侧整条链路丢 env（正是 #3905 的生产形态），必须升级为 ERROR。
+RUNTIME_CONTRACT_STREAK_ALERT = int(os.environ.get("GRAPE_ENV_CONTRACT_STREAK_ALERT", "10") or 10)
+
+_contract_streak = {"count": 0}
+_contract_streak_lock = threading.Lock()
+
+
+def reset_runtime_env_contract_streak() -> None:
+    """清空连续全缺计数（测试 seam / 进程内告警重置）。"""
+    with _contract_streak_lock:
+        _contract_streak["count"] = 0
+
+
+def _runtime_agent_type(label: str) -> str:
+    """从执行标签解析 agent_type（低基数维度）。
+
+    标签形如 ``"[Agent:coding|repo:o/r|engine:hermes-1] "`` / ``"[Autopilot:issue|repo:…]"``；
+    解析失败归 ``unknown``，repo/issue 号不进指标标签（防高基数）。
+    """
+    try:
+        s = (label or "").strip()
+        if s.startswith("["):
+            s = s[1:]
+        head = s.split("|", 1)[0]
+        if ":" in head:
+            return (head.split(":", 1)[1] or "").strip()[:40] or "unknown"
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _record_contract_missing(missing: list, backend_name: str, label: str) -> None:
+    """Issue #3905：契约缺失结构化计数 + 连续全缺升级告警（观测不得拖垮任务）。"""
+    agent_type = _runtime_agent_type(label)
+    try:
+        from src.domains.insight.observability import record_runtime_env_contract_missing
+        for _name in missing:
+            record_runtime_env_contract_missing(backend_name, agent_type, _name)
+    except Exception as _obs_e:  # noqa: BLE001 - 指标失败只降级 debug
+        log.debug(f"runtime env contract metric forward failed: {_obs_e}")
+    full_missing = all(name in missing for name in _RUNTIME_CONTRACT_ISSUE_VARS)
+    with _contract_streak_lock:
+        if full_missing:
+            _contract_streak["count"] += 1
+        else:
+            _contract_streak["count"] = 0
+        streak = _contract_streak["count"]
+    limit = max(1, RUNTIME_CONTRACT_STREAK_ALERT)
+    if full_missing and streak >= limit and streak % limit == 0:
+        log.error(f"{label}runtime env contract missing on {streak} consecutive tasks: "
+                  f"{','.join(missing)} (backend={backend_name or '-'}, agent={agent_type}); "
+                  f"dispatch path is dropping env — check agent_tasks.env_extra snapshot "
+                  f"(Issue #3905)")
+
+
+def _runtime_contract_scope(env: dict, event_type: str) -> tuple:
+    """Issue #3905：本次任务实际适用的契约变量集合。
+
+    非 Issue 域任务（autopilot 定时任务 / chat）本就没有 Issue 编号：
+    ``GRAPE_ISSUE_ID``（卡片 id）与 ``GRAPE_WORK_BRANCH``（场景基线）不适用，
+    继续按「缺失」告警会让 Loki 的 24h 计数永远无法归零（每任务一条噪声）。
+    判据 = 是否带 Issue 上下文（ISSUE_NUMBER / GRAPE_ISSUE_ID 任一非空）
+    或事件类型不属于 autopilot/chat；其余情形只校验 DEVOPS_EVENT_TYPE + ACCOUNT。
+    """
+    _et = (event_type or "").strip().lower()
+    _issue_scoped = bool(str(env.get("ISSUE_NUMBER") or "").strip()) or \
+        bool(str(env.get("GRAPE_ISSUE_ID") or "").strip())
+    if not _issue_scoped and (_et.startswith("autopilot") or _et == "chat"):
+        return ("DEVOPS_EVENT_TYPE", "ACCOUNT")
+    return _RUNTIME_CONTRACT_ENV
+
 
 def _apply_runtime_env_contract(env: dict, *, event_type: str = "", account: str = "",
                                 repo_key: str = "", label: str = "",
@@ -1022,7 +1097,9 @@ def _apply_runtime_env_contract(env: dict, *, event_type: str = "", account: str
     - GRAPE_WORK_BRANCH 缺失时回退场景配置（与 event_pipeline 同源）：回退查询按
       **仓库 Issue 编号**（ISSUE_NUMBER）索引 issue 表，不得用内部卡片 id（GRAPE_ISSUE_ID）——
       后者是 issue 表主键，命中恒错键会让场景回退恒空。
-    任一必需变量仍缺失 → WARNING（只列变量名 + 引擎/agent 标签，不打印值），不阻断。
+    任一必需变量仍缺失 → WARNING（只列变量名 + 引擎/agent 标签，不打印值），不阻断；
+    Issue #3905：非 Issue 域任务（autopilot / chat）只校验 DEVOPS_EVENT_TYPE + ACCOUNT
+    （见 ``_runtime_contract_scope``），缺失同时进结构化指标，连续三变量全缺升级 ERROR。
     """
     if event_type:
         env["DEVOPS_EVENT_TYPE"] = event_type
@@ -1053,10 +1130,14 @@ def _apply_runtime_env_contract(env: dict, *, event_type: str = "", account: str
         except Exception as exc:
             log.warning(f"{label}runtime env contract: GRAPE_WORK_BRANCH resolve failed "
                         f"(backend={backend_name or '-'}): {exc}")
-    missing = [name for name in _RUNTIME_CONTRACT_ENV if not (env.get(name) or "").strip()]
+    missing = [name for name in _runtime_contract_scope(env, event_type)
+               if not (env.get(name) or "").strip()]
     if missing:
         log.warning(f"{label}runtime env contract missing: {','.join(missing)} "
                     f"(backend={backend_name or '-'}); task continues with degraded env")
+        # Issue #3905：单行 WARNING 无法聚合/告警 → 结构化计数（backend/agent_type/var）
+        # + 连续三变量全缺升级 ERROR（派发侧整链丢 env 的确定性信号）。
+        _record_contract_missing(missing, backend_name, label)
     return env
 
 
@@ -2072,6 +2153,10 @@ _ACP_CONTEXT_ENV_KEYS = (
     "REPO_FULL_NAME", "REPO_NAME", "ACCOUNT", "ISSUE_NUMBER",
     "PR_NUMBER", "DEVOPS_EVENT_TYPE", "AGENT_NAME", "GRAPE_SCENE_ID",
     "GIT_ASKPASS", "GRAPE_WORK_BRANCH",
+    # Issue #3905：hermes ACP 子进程白名单此前独缺 GRAPE_ISSUE_ID——即使契约函数
+    # 解析成功，backend=hermes 的 issue 任务在子进程里也读不到内部卡片 id
+    # （pending-review / issues detail 依赖它）。与其余三变量同口径透传。
+    "GRAPE_ISSUE_ID",
 )
 
 _ACP_PLAIN_ENV_KEYS = ("NO_COLOR", "TERM", "HERMES_YOLO_MODE", "PYTHONUNBUFFERED")

@@ -297,6 +297,20 @@ groups:
         annotations:
           summary: "No-progress task scan is failing repeatedly"
           description: "The no_progress sweep has failed at least 5 times in 5 minutes, so stuck running tasks may never be auto-requeued. Check master scheduler logs for 'no_progress: scan running tasks failed', then verify the DB backend cursor iteration/context protocol and SQL dialect."
+      # Issue #3905：运行时 env 契约三变量（ACCOUNT/GRAPE_ISSUE_ID/GRAPE_WORK_BRANCH）
+      # 持续缺失。语义：issue 任务全程 degraded env（拿不到内部卡片 id 与场景基线，
+      # A2A 交办无 account 主体）。修复后本指标增量应归零。
+      # 排查：指标按 backend/agent_type/var 拆分定位丢 env 的派发路径；
+      # 服务端日志 "runtime env contract missing" / "on N consecutive tasks"；
+      # 核对 agent_tasks.env_extra 快照是否为空（direct/failed 快照组装，Issue #3905）。
+      - alert: GrapeRuntimeEnvContractMissing
+        expr: sum by (var) (increase(grape_runtime_env_contract_missing_total[30m])) >= 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Runtime env contract variable {{ $labels.var }} keeps missing"
+          description: "{{ $labels.var }} was missing on at least 10 task starts in 30m after the fallback chain, so issue/autopilot tasks run with a degraded env. Query grape_runtime_env_contract_missing_total by backend/agent_type to find the dispatch path, then check agent_tasks.env_extra snapshot assembly (Issue #3905)."
       # Issue #4203：内核 OOM killer 选中本机任一进程即 P1（critical，值班立即响应）。
       # 语义：<host> 曾 24h 内多次 OOM kill，前 3 次选中引擎子进程（无外显），
       # 第 4 次选中 worker 主进程才 数百次 502 + 终态/消息回执丢失。任何增量都说明
