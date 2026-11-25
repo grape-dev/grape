@@ -783,6 +783,42 @@ def record_env_extra_plaintext_row(outcome: str = "heal_failed"):
     ENV_EXTRA_PLAINTEXT_ROWS.labels(outcome=o).inc()
 
 
+# ===== env_extra 解密失败（Issue #4367 C）=====
+# decrypt_env_extra 的 except 分支此前只有一条 WARNING：任务带着空 env 静默降级
+# （缺 AK/SK、缺 token、缺仓库凭据），生产上 kid=dev 信封每小时 52 个任务无凭据
+# 可跑却无指标可告警。改按 (code, kid) 计数，与 grape_env_extra_plaintext_rows_total
+# 同级口径（"清零后不再增长"可直接当收敛判据）：
+# - code=env_extra_unknown_kid：信封 kid 不在本进程密钥环（生产事故主体是 kid=dev——
+#   写入侧用内置公开常量签发、配了真实 credential_keys 的执行侧永远解不开）；
+# - code=env_extra_decrypt_failed：其余解密失败（密文损坏/cryptography 缺失/密钥拒发）。
+# kid 是低基数字典值（dev/cred1/derived-<8hex>），超长截断、缺省归 unknown；
+# 诊断详情（行 id/键名语义）另落 agent_tasks.errors 结构化诊断槽，不进指标标签。
+
+ENV_EXTRA_DECRYPT_FAILURES_METRIC = "grape_env_extra_decrypt_failures_total"
+
+ENV_EXTRA_DECRYPT_FAILURE_CODES = ("env_extra_unknown_kid", "env_extra_decrypt_failed")
+
+ENV_EXTRA_DECRYPT_FAILURES = Counter(
+    ENV_EXTRA_DECRYPT_FAILURES_METRIC,
+    "agent_tasks.env_extra decrypt failures handled as empty env, by code and kid: "
+    "env_extra_unknown_kid = envelope kid missing from the local key ring (kid=dev rows "
+    "are sealed with the public built-in constant and never decryptable), "
+    "env_extra_decrypt_failed = other decrypt errors. Tasks silently continue with an "
+    "empty env; credentials must be re-issued (Issue #4367).",
+    ["code", "kid"],
+    registry=registry,
+)
+
+
+def record_env_extra_decrypt_failure(code: str = "env_extra_decrypt_failed", kid: str = ""):
+    """env_extra 解密失败计数（契约外 code 归 unknown：不丢数、不加高基数标签）。"""
+    c = (code or "").strip().lower()
+    if c not in ENV_EXTRA_DECRYPT_FAILURE_CODES:
+        c = "unknown"
+    k = (kid or "").strip()[:40] or "unknown"
+    ENV_EXTRA_DECRYPT_FAILURES.labels(code=c, kid=k).inc()
+
+
 # ===== 运行时 env 契约缺失（Issue #3905）=====
 # 生产 Loki 里契约缺失只是 WARNING（24h 949 条淹没在噪声中），无法按 backend/agent
 # 维度聚合，也做不出「连续全缺」告警。改按 (backend, agent_type, var) 计数：

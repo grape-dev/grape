@@ -22,6 +22,15 @@ M1-c（Issue #3770，存量明文行收口）：
   计 `report_only`（按设计不自愈）；`heal_failed` 只留给自愈真失败；
 - 文案指向真实 backfill `202611220003`（旧文案的 `202611130001` 是无关迁移），日志只输出
   键名/行 id，绝不输出值。
+
+M2（Issue #4367 C，信封解密失败可观测）：
+- 写入侧曾误发 kid=dev 公开常量信封（3,430 行），执行侧解不开只落一条 WARNING 就
+  按空 env 继续（每小时 52 个任务拿不到下发凭据却不可告警）；
+- except 分支保留 WARNING，同时递增 `grape_env_extra_decrypt_failures_total{code,kid}`
+  （insight /metrics 出口，告警规则 GrapeEnvExtraDecryptFailing），并写
+  `agent_tasks.errors` 结构化诊断槽（code=env_extra_unknown_kid 携 kid，同 code 幂等
+  覆盖、保留 5 条、diagnostic=True）；嵌套在 claim 的 db_lock 段内时跳过诊断槽写
+  （计数/告警不受影响），观测一律 best-effort，不拖垮读链路。
 """
 from __future__ import annotations
 
@@ -30,6 +39,7 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 from src.kernel.config import log
 from src.kernel.scene_custom_env import is_secret_name
@@ -163,6 +173,91 @@ def record_env_extra_write_refused() -> None:
 def record_env_extra_plaintext(outcome: str) -> None:
     """明文行事件计数（公开入口：迁移等非读路径复用同一计数器，口径可对账）。"""
     _record_plaintext(outcome)
+
+
+# ---------- M2（#4367 C）：信封解密失败可观测（诊断槽 + 计数） ----------
+
+# 解密失败 code 口径：
+# - env_extra_unknown_kid：信封 kid 不在本进程密钥环（生产事故主体是写入侧误发的
+#   kid=dev 公开常量信封——配了真实 credential_keys 的执行侧永远解不开）；
+# - env_extra_decrypt_failed：其余解密失败（密文损坏/cryptography 缺失/密钥拒发）。
+ENV_EXTRA_UNKNOWN_KID = "env_extra_unknown_kid"
+ENV_EXTRA_DECRYPT_FAILED = "env_extra_decrypt_failed"
+
+_DECRYPT_DIAG_MESSAGES = {
+    ENV_EXTRA_UNKNOWN_KID: (
+        "env_extra envelope sealed with a kid missing from this process's key ring "
+        "(often the public built-in dev key); task continues with an empty env — "
+        "re-issue credentials and fix the writer's configs/security.json (Issue #4367)"),
+    ENV_EXTRA_DECRYPT_FAILED: (
+        "env_extra envelope failed to decrypt; task continues with an empty env — "
+        "re-issue credentials (Issue #4367)"),
+}
+
+
+def _record_decrypt_failure(code: str, kid: str = "") -> None:
+    """解密失败计数转发（insight 域 /metrics 出口）；任何失败静默——观测不得拖垮读链路。
+
+    worker 包没有 prometheus_client 时 insight.observability 自带 no-op 桩。
+    """
+    try:
+        from src.domains.insight.observability import record_env_extra_decrypt_failure
+        record_env_extra_decrypt_failure(code, kid)
+    except Exception as _obs_e:  # noqa: BLE001 - 观测失败只降级为 debug 日志，不拖垮读链路
+        log.debug(f"env_extra 解密失败计数转发失败（code={code}）: {_obs_e}")
+
+
+def _persist_env_extra_decrypt_diag(task_id: str, code: str, kid: str,
+                                    reason: str = "") -> None:
+    """解密失败写 agent_tasks.errors 结构化诊断槽（Issue #4367 C；best-effort）。
+
+    与 service._persist_task_diagnostic 同口径：同 error_code 幂等覆盖、保留最近
+    5 条、diagnostic=True（friendly_failure_hint 不把它当真实失败原因）。本模块随
+    worker 包分发，不反向依赖 service，故本地实现；写通道复用
+    runtime_agent_tasks_write（单库只持 session_manager.db_lock、三库只持
+    owner_lock("runtime")，不嵌套——QA #3770 Critical 锁序口径）。调用方须先过
+    _nested_under_process_db_lock（嵌套持锁时跳过写，避免提前提交外层事务）。
+    """
+    if not task_id:
+        return
+    entry = {
+        "error_code": code,
+        "kid": (kid or "").strip()[:40] or "",
+        "reason": (reason or "")[:500],
+        "message": _DECRYPT_DIAG_MESSAGES.get(code, reason or code),
+        "diagnostic": True,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        with runtime_agent_tasks_write() as _db:
+            cur = _db.cursor()
+            cur.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+            row = cur.fetchone()
+            if not row:
+                return
+            existing: list = []
+            if row[0]:
+                try:
+                    parsed = json.loads(row[0])
+                    existing = parsed if isinstance(parsed, list) else [row[0]]
+                except Exception:
+                    existing = [row[0]]
+            existing = [e for e in existing
+                        if not (isinstance(e, dict) and e.get("error_code") == code)]
+            existing = (existing + [entry])[-5:]
+            cur.execute("UPDATE agent_tasks SET errors=? WHERE id=?",
+                        (json.dumps(existing, ensure_ascii=False), task_id))
+            _db.commit()
+    except Exception as _diag_e:  # noqa: BLE001 - 诊断失败只降级 debug，不拖垮读链路
+        log.debug(f"env_extra 解密失败诊断槽写入失败（task={task_id} code={code}）: {_diag_e}")
+
+
+def _report_decrypt_failure(code: str, kid: str, *, task_id: str, error: Exception) -> None:
+    """解密失败统一观测（#4367 C）：WARNING（既有检索词不变）+ 计数 + 诊断槽。"""
+    _record_decrypt_failure(code, kid)
+    log.warning(f"env_extra 解密失败（按空 env 处理，任务凭据需重新下发）: {error}")
+    if task_id and not _nested_under_process_db_lock():
+        _persist_env_extra_decrypt_diag(task_id, code, kid, reason=str(error))
 
 
 @contextmanager
@@ -344,9 +439,19 @@ def decrypt_env_extra(raw, *, task_id: str = "", row_kind: str = "agent_tasks",
     if text.lstrip().startswith("{"):
         # 开发模式（无 cryptography 库）信封内为明文 JSON（credential_crypto 降级）
         return _parse_env_json(text)
-    from src.domains.mgmt.auth.credential_crypto import decrypt
+    from src.domains.mgmt.auth.credential_crypto import UnknownKeyError, decrypt
     try:
         return _parse_env_json(decrypt(text))
     except Exception as e:
-        log.warning(f"env_extra 解密失败（按空 env 处理，任务凭据需重新下发）: {e}")
+        # Issue #4367 C：不再只是一条 WARNING + 空 env 静默降级——计数器让
+        # 「env 被清空」可告警（deploy/alerts.yml GrapeEnvExtraDecryptFailing），
+        # agent_tasks.errors 诊断槽记录 kid（结构化 code=env_extra_unknown_kid），
+        # 供任务详情/追溯按行定位「哪条信封解不开、为什么」。
+        _kid = getattr(e, "kid", "") or ""
+        if not _kid:
+            # 非 UnknownKeyError（密文损坏/库缺失等）异常不带 kid——从信封体补齐，
+            # 保证计数器与诊断槽的 kid 维度一致可聚合。
+            _kid = text.split(":", 1)[0]
+        _code = ENV_EXTRA_UNKNOWN_KID if isinstance(e, UnknownKeyError) else ENV_EXTRA_DECRYPT_FAILED
+        _report_decrypt_failure(_code, _kid, task_id=task_id, error=e)
         return {}

@@ -349,6 +349,24 @@ groups:
         annotations:
           summary: "Runtime env contract variable {{ $labels.var }} keeps missing"
           description: "{{ $labels.var }} was missing on at least 10 task starts in 30m after the fallback chain, so issue/autopilot tasks run with a degraded env. Query grape_runtime_env_contract_missing_total by backend/agent_type to find the dispatch path, then check agent_tasks.env_extra snapshot assembly (Issue #3905)."
+      # Issue #4367：env_extra 信封解密失败（空 env 静默降级）从一条 WARNING 升级为指标。
+      # 语义：执行侧解不开任务凭据信封——多数为写入侧误发的 kid=dev 公开常量信封
+      # （本进程密钥环没有该 kid），任务按空 env 运行（缺 AK/SK、缺仓库凭据），
+      # 每次失败同时写 agent_tasks.errors 诊断槽（code=env_extra_unknown_kid）。
+      # 阈值：1 小时窗口任意增量即告警，直接对应验收口径「1 小时
+      # credential key unknown for kid=dev WARN = 0」；写入侧 fail-closed 上线后
+      # 增量应归零，非零即仍有写入单元在发解不开的信封。
+      # 排查：按 kid 聚合定位写入方；核对写入进程 configs/security.json
+      # （env=production + credential_keys 非空）；存量行用
+      # scripts/migrations/008_rewrap_dev_env_extra.py 重封（dry-run → --apply → 二次 dry-run=0）。
+      - alert: GrapeEnvExtraDecryptFailing
+        expr: sum by (kid) (increase(grape_env_extra_decrypt_failures_total[1h])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Task env_extra envelopes failing to decrypt (kid={{ $labels.kid }})"
+          description: "agent_tasks.env_extra envelopes with kid={{ $labels.kid }} failed to decrypt at least once in the last hour, so those tasks ran with an empty env (no AK/SK, no repo credentials). kid=dev rows are sealed with the public built-in constant and never decryptable. Query grape_env_extra_decrypt_failures_total by code/kid, check agent_tasks.errors diagnostics (code=env_extra_unknown_kid), verify the writer's configs/security.json (env=production + credential_keys), and rewrap existing rows with scripts/migrations/008_rewrap_dev_env_extra.py. See Issue #4367."
       # Issue #4203：内核 OOM killer 选中本机任一进程即 P1（critical，值班立即响应）。
       # 语义：<host> 曾 24h 内多次 OOM kill，前 3 次选中引擎子进程（无外显），
       # 第 4 次选中 worker 主进程才 数百次 502 + 终态/消息回执丢失。任何增量都说明
