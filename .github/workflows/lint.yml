@@ -80,3 +80,12 @@ jobs:
         run: |
           python -m pytest -q tests/runtime/im/test_issue_3735_feishu_session_lifecycle.py \
                             tests/runtime/im/test_issue_3897_feishu_endpoint_session.py
+      - name: Bounded db_lock wait / hold watchdog / external-io gate regression (issue #4295)
+        # PR #2205 第 2 轮复审 Required：本单 46 例新增回归此前只在本地跑过——`make lint`
+        # 只执行 AST 门禁、不跑用例，CI 里没有任何 pytest step 登记，于是「等锁封顶 →
+        # 503」「持有看门狗 + fork 复位」「派生通知任务不继承前台预算」「锁内无外部 IO」
+        # 四条不变量被改坏都不会变红（与 #4203/#4248/#3923/#2158 同一复审判据）。
+        # 与 PR 描述「测试」段同一组命令，PR 上可直接复算用例数。
+        run: |
+          python -m pytest -q tests/kernel/test_issue_4295_*.py \
+                            tests/api/test_issue_4295_*.py
