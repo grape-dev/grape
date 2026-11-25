@@ -52,6 +52,15 @@
 5. **防回归门禁**：`scripts/check_db_lock_external_io.py`（挂 `make lint`）+ 结构断言用例；
    门禁覆盖两种临界区形态——`with db_lock:` 与
    `acquired = db_lock.acquire(timeout=...)` + `try/finally: db_lock.release()`。
+6. **派生任务不继承前台预算**：`asyncio.Task` 创建时复制 ContextVars，HTTP 请求里派生的
+   后台任务会继承 `path_var` → 被套上同一份 5s 预算。通知类派生任务（IM 投递要做多次
+   DB 往返）在拥塞窗口里必然超预算，而响应早已发出（进不了 503 处理器）→ 通知**静默丢失**。
+   `issues_center._fire_notify_coro` 的三条派发路径（`create_task` /
+   `run_coroutine_threadsafe` / `asyncio.run`）统一在任务内包 `foreground_lock_budget(0)`。
+   通则：**派生协程/后台任务必须显式声明自己的预算**，不得沿用派发线程的请求上下文。
+7. **CI 接入**：本单新增回归登记进 `.github/workflows/lint.yml`
+   （`pytest tests/kernel/test_issue_4295_*.py tests/api/test_issue_4295_*.py`），
+   让 PR 描述的用例计数在 CI 上可复算、语义被改坏时变红。
 
 ### Out of Scope
 
@@ -72,7 +81,14 @@
       （`tests/kernel/test_issue_4295_concurrent_read_write.py`）；线程归因断言可失败
       （反证用例 `test_reader_isolation_assertion_can_fail`）
 - [x] preload 形态（先 import 后 fork）下 fork 子进程 `watchdog_running()` 为 True、
-      父进程持锁状态不残留（`test_watchdog_restarts_in_fork_child_after_preload`）
+      父进程持锁状态不残留（`test_watchdog_restarts_in_fork_child_after_preload`）；
+      fork 发生在他人持锁期间时子进程先打 ERROR 再清状态
+      （`test_fork_under_lock_is_reported_before_state_is_reset`）
+- [x] 请求上下文（`path_var` 置位）+ 他人持锁超预算 → 派生通知任务仍完成投递
+      （`tests/kernel/test_issue_4295_notify_budget_isolation.py`，含「去掉隔离即失败」的反证）
+- [x] 超预算的等待进 `grape_db_lock_wait_seconds`
+      （`test_timed_out_wait_enters_the_wait_histogram`）
+- [x] 本单回归接入 CI（`.github/workflows/lint.yml` 的 4295 step）
 - [ ] 生产 1h 窗口 `db_lock slow hold` 最大值 < 5s、累计等待 ≤ 1,000s
       → 需上线后由 sre 观察窗口验证（本 PR 提供信号：`grape_db_lock_watchdog_events_total{owner}`
       / `grape_db_lock_acquire_timeouts_total{owner}` / `db_lock watchdog` ERROR 日志）
@@ -86,6 +102,8 @@
 | 看门狗日志风暴 / 抓栈开销 | 同 owner 60s 去重、ERROR 级别、栈深截断 15 帧、只读快照不动锁 |
 | RLock 可重入导致加锁函数内层再次 `with db_lock` 误超时 | 同线程重入立即成功（预算不参与），用例 `test_reentrant_acquisition_never_times_out` |
 | 门禁误报导致被放宽到失效 | 门禁只认"确定出进程"的调用；误报样本固化为反向用例（`test_gate_ignores_local_only_and_plain_db_calls`） |
+| 派生任务继承请求上下文 → 通知静默丢失（本 PR 把通知移出锁后新增的失败模式） | 载荷统一包进 `_notify_without_foreground_budget`（任务内 `foreground_lock_budget(0)`），三条派发路径全覆盖；任务留强引用 + done 回调记日志（不再只剩 never-retrieved）；用例 `test_derived_notify_task_outlives_the_foreground_budget` + 反证 `test_without_isolation_the_same_derived_task_dies_on_the_budget` |
+| fork 发生在他人持锁期间 → 子进程首次 db_lock 访问永久阻塞且现场不可见 | `reset_after_fork` 清状态前先按 owner#rid 打 ERROR（`_report_fork_under_lock`）；docstring 明示不复位底层 `TrackedRLock._lock` 的边界；用例 `test_fork_under_lock_is_reported_before_state_is_reset` |
 
 ## 6. 回滚
 

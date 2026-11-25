@@ -75,6 +75,23 @@ def acquire_budget_s() -> float:
   与 IM 投递调度不再占住全局锁；
 - 通知本身仍是 fire-and-forget（`_fire_notify_coro`），不改变响应时延。
 
+### 2.4.1 派生通知任务必须显式关闭前台预算（第 2 轮复审新增）
+
+通知被移出 `with db_lock` 之后，它从"同线程重入"变成"一个新的等锁者"，于是继承来的
+5s 预算成了一条新的失败路径：
+
+- `asyncio.Task` 创建时复制 ContextVars，HTTP 请求线程派生的任务因此带着 `path_var`；
+- 通知投递要做多次 DB 往返（目标解析 / conv 兜底建 / bot 凭证 / outbox），拥塞窗口里
+  超预算是常态；
+- 响应早已发出，`LockAcquireTimeout` 进不了 503 处理器；`create_task` 又没存引用，
+  只剩一行 `Task exception was never retrieved` → 审核点通知**静默丢失**。
+
+修法：`_notify_without_foreground_budget` 在任务自己的 context 内
+`foreground_lock_budget(0)`（ContextVar 只写任务复制出来的那份，await 不跨 context），
+三条派发路径（`create_task` / `run_coroutine_threadsafe` / `asyncio.run`）都先过这一层；
+任务留强引用 + done 回调记失败日志。通则写进 `db_lock_metrics` 模块 docstring：
+**派生协程/后台任务必须显式声明预算，不得沿用派发线程的请求上下文。**
+
 ### 2.5 门禁用 AST 且**高精度**
 
 只报"确定出进程"的形态，避免误报导致门禁被放宽：
@@ -102,11 +119,13 @@ def acquire_budget_s() -> float:
 
 | 验证 | 命令 | 结果 |
 |---|---|---|
-| 新增用例 | `pytest tests/kernel/test_issue_4295_*.py tests/api/test_issue_4295_*.py` | 46 passed（budget 15 + watchdog 10 + gate 10 + concurrent 5 + api 6） |
+| 新增用例 | `pytest tests/kernel/test_issue_4295_*.py tests/api/test_issue_4295_*.py` | 54 passed（budget 16 + watchdog 12 + gate 10 + concurrent 5 + notify 5 + api 6） |
 | 锁埋点回归 | `pytest tests/kernel/test_db_lock_metrics.py` | 8 passed |
-| kernel 全量 | `pytest tests/kernel -q` | 1031 passed / 53 failed（基线同为 53 failed / 1002 passed，无新增） |
+| kernel 全量 | `pytest tests/kernel -q`（head `badf20ca7`，基线 `c275ccd3d` 同命令同工位） | **1052 passed / 51 failed / 8 skipped**；基线 **1004 passed / 51 failed / 8 skipped** → 失败集合双向 `comm` 为空，**无新增失败**（+48 passed = 54 例减去 api 目录 6 例） |
 | 门禁 | `python3 scripts/check_db_lock_external_io.py` | 0 命中 |
 | 静态门禁 | `make lint`（含新增门禁） | 见交付评论 |
+| 架构检查 | `python3 scripts/check-arch.py` | RESULT: PASS |
+| CI | `.github/workflows/lint.yml` 的 4295 step | 本单 54 例逐条登记，PR 上可复算 |
 
 ## 4. 未纳入（另立 Issue 的依据）
 
