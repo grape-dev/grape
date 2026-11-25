@@ -8,6 +8,7 @@ M3：/api/runtime/* 协议端点（register/heartbeat/claim/report），仅 rta_
 import asyncio, contextlib, hashlib, json, os, threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import NoReturn
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from pydantic import BaseModel, model_validator
 from src.api.deps import (require_no_session_token, require_org_member,
@@ -345,7 +346,7 @@ def _auth_throttled_exc(retry_after: int) -> HTTPException:
         headers={"Retry-After": str(retry_after)})
 
 
-def _reject_auth_failure(request: Request, ip: str, token: str, detail_401: dict) -> None:
+def _reject_auth_failure(request: Request, ip: str, token: str, detail_401: dict) -> NoReturn:
     """鉴权失败统一出口（只计鉴权失败，成功路径不受影响）：
 
     - 计入 IP 失败预算：同 IP >10 次/分钟 → 429（Retry-After 指向窗口滑出）；
