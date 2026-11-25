@@ -1868,6 +1868,19 @@ def _clear_failure_state(task_id: int, next_run: str) -> None:
     _mgmt_public_cs.clear_autopilot_failure_state_any(task_id, next_run, now_str)
 
 
+def _offline_duration_pair(error_code: str, offline_seconds: float) -> tuple[str, str]:
+    """离线时长出口口径（Issue #3823）：悬空绑定没有可度量的在线时长。
+
+    `BINDING_STALE` 首派时 `offline_since` 被重置为 now，差值为 0；直接把 `0` 输出
+    会被值守读成「刚掉线」，而绑定可能已悬空数小时。该路径显式输出 unknown/未知，
+    其余错误码仍输出秒数，既有 `offline_seconds=` 数字口径不变。
+    """
+    secs = int(offline_seconds)
+    if error_code == ERROR_BINDING_STALE and secs <= 0:
+        return "unknown", "未知（绑定失效，无在线时长）"
+    return str(secs), f"{secs}s"
+
+
 def _alert_task_failure(task: dict, exec_id: int, error_code: str, error: str,
                         consecutive_failures: int, circuit_paused: bool,
                         offline_seconds: float = 0.0) -> None:
@@ -1879,6 +1892,8 @@ def _alert_task_failure(task: dict, exec_id: int, error_code: str, error: str,
 
     Issue #3823：告警须同时带 `task id` / `引擎 id` / `离线时长`，值守才能判断引擎
     已经掉了多久、是否需要人工介入；`offline_seconds` 与主 ERROR 行同源。
+    `BINDING_STALE` 首派没有可度量的在线时长，按 `_offline_duration_pair` 输出
+    「未知（绑定失效，无在线时长）」，不伪报 0s。
     """
     task_id = task.get("id") or 0
     # 报文里的 engine_ids 一律是「用户绑定了什么」（uid 优先、回落 legacy ids），
@@ -1892,12 +1907,13 @@ def _alert_task_failure(task: dict, exec_id: int, error_code: str, error: str,
     else:
         guidance = ("请恢复绑定引擎（启动 worker / 修复引擎健康）后任务会自动解除暂停并续跑")
     _state = "已自动暂停（熔断）" if circuit_paused else "已进入退避"
+    _off_log, _off_text = _offline_duration_pair(error_code, offline_seconds)
     log.error(
         f"[autopilot-alert] task={task_id} error_code={error_code} engine_ids={engine_ids} "
         f"consecutive_failures={consecutive_failures} circuit_paused={int(bool(circuit_paused))} "
-        f"offline_seconds={int(offline_seconds)} error={error or '(no detail)'}")
+        f"offline_seconds={_off_log} error={error or '(no detail)'}")
     summary = (f"错误码 {error_code}；连续失败 {consecutive_failures} 次；绑定引擎 {engine_ids}；"
-               f"离线时长 {int(offline_seconds)}s；{_state}。原因：{error or '无'}。{guidance}")
+               f"离线时长 {_off_text}；{_state}。原因：{error or '无'}。{guidance}")
     try:
         _notify_subscribers(task_id, exec_id, "failed", summary, {})
     except Exception as e:  # 通知失败不影响状态已落库
@@ -1945,11 +1961,12 @@ def _handle_environmental_failure(task: dict, exec_id: int, error_code: str, err
     _error_line = error or ""
     if error_code == ERROR_ENGINE_OFFLINE and _OFFLINE_LOG_FINGERPRINT not in _error_line:
         _error_line = f"{_error_line} {_OFFLINE_LOG_FINGERPRINT}".strip()
+    _off_log, _ = _offline_duration_pair(error_code, offline_seconds)
     log.error(
         f"Autopilot task={task_id} exec={exec_id} status=failed error_code={error_code} "
         f"engine_ids={_task_binding_label(task)} n={consecutive} "
         f"consecutive_failures={consecutive} "
-        f"offline_seconds={int(offline_seconds)} circuit_paused={int(bool(circuit_paused))} "
+        f"offline_seconds={_off_log} circuit_paused={int(bool(circuit_paused))} "
         f"backoff_until={next_run} error={_error_line or '(no detail)'}")
     if should_alert:
         _alert_task_failure(task, exec_id, error_code, _error_line, consecutive, circuit_paused,
