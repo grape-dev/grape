@@ -63,7 +63,9 @@ def _result(node: dict, expected_scope: str, *, ok: bool, skill: str = "",
         "skill": skill or "",
         "skill_id": int(skill_id or 0),
         "actual_scope": actual_scope or "",
-        "expected_scope": expected_scope or SCENE_SCOPE_REPO,
+        # Issue #3788：只对 None 回退 repo —— 无场景分支的 expected_scope="" 必须
+        # 原样透传（否则「无场景」又会被显示成 repo 场景，决策来源不可区分）。
+        "expected_scope": SCENE_SCOPE_REPO if expected_scope is None else expected_scope,
         "reason": reason or "",
         "source": source or "",
         "owner_id": owner_id or "",
@@ -159,7 +161,40 @@ def _scope_mismatch_reason(skill: str, actual_scope: str,
             f"保存/派发均会阻断（scene={scene_id or '-'}，node={node_tag or '-'}）")
 
 
-def evaluate(node, repo_key: str, scene_scope: str = SCENE_SCOPE_REPO,
+def _no_scene_result(node: dict, repo_key: str, cache: dict | None) -> dict:
+    """「无场景绑定」判定结果（Issue #3788）：策略不适用，按 session 档位放行。
+
+    仅在调用方**显式**传 ``scene_scope=None`` 时进入（派发侧确认 Issue 未绑定任何
+    场景）。best-effort 记录技能实际档位供事件中心/日志观测；解析失败不影响放行
+    结论——无场景时「repo 级场景不可引用 user 技能」这条策略本就不适用。
+    """
+    skill = _node_skill_name(node)
+    skill_id = _node_skill_id(node)
+    actual_scope = ""
+    owner_id = ""
+    try:
+        if skill_id:
+            bound = _get_skill_cached(skill_id, cache)
+            if bound:
+                skill = bound.get("skill_name") or skill
+                actual_scope = bound.get("scope") or ""
+                owner_id = bound.get("owner_id") or ""
+        if not actual_scope and skill:
+            info = _get_scope_info_cached(skill, repo_key, cache)
+            if info.get("found"):
+                actual_scope = info.get("scope") or ""
+                owner_id = info.get("owner_id") or ""
+                skill_id = info.get("skill_id") or skill_id
+    except Exception as e:
+        log.info(f"scene_skill_scope: no_scene 档位观测失败（放行结论不变）: {e}")
+    return _result(
+        node, "", ok=True, skill=skill, skill_id=skill_id,
+        actual_scope=actual_scope, owner_id=owner_id, source="no_scene",
+        reason=("Issue 无场景绑定（scene_id 为空），不适用 repo 级场景技能 scope 策略，"
+                "按 session 档位放行"))
+
+
+def evaluate(node, repo_key: str, scene_scope: str | None = SCENE_SCOPE_REPO,
              *, scene_id: str = "", on_error: str = "",
              cache: dict | None = None) -> dict:
     """Judge whether a scene node may reference its skill under scene scope.
@@ -169,10 +204,18 @@ def evaluate(node, repo_key: str, scene_scope: str = SCENE_SCOPE_REPO,
 
     ``source`` records the decision provenance: ``empty`` / ``disabled`` /
     ``skill_id`` / ``name`` / ``unresolved`` / ``db_error`` /
-    ``invalid_skill_id``.  The caller is deliberately not part of the rule:
-    no owner/caller exception exists for user-scope skills.
+    ``invalid_skill_id`` / ``no_scene``.  The caller is deliberately not part of
+    the rule: no owner/caller exception exists for user-scope skills.
+
+    Issue #3788「无场景」语义载体：**仅** ``scene_scope is None``（派发侧显式入参）
+    表示「Issue 未绑定任何场景」→ 不做 repo→user 拦截，返回 ``ok=True``、
+    ``expected_scope=""``、``source="no_scene"``。``""`` 与缺省仍回落
+    ``SCENE_SCOPE_REPO``：保存/体检/详情/预检四个入口不传该入参，其 fail-closed
+    口径（#1722/#1758）因此零改动，也不会被静默关闭。
     """
     node = node if isinstance(node, dict) else {}
+    if scene_scope is None:
+        return _no_scene_result(node, repo_key, cache)
     expected_scope = scene_scope or SCENE_SCOPE_REPO
     if on_error not in ERROR_POLICIES:
         on_error = _env_error_policy()

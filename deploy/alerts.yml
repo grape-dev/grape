@@ -149,6 +149,44 @@ groups:
           summary: "Repo dispatch lease busy repeated (repo={{ $labels.repo }})"
           description: "{{ $value }} repo-dispatch lease waits exhausted their budget in 5m for repo {{ $labels.repo }} — enqueue is queueing behind a long-held lease (see #3927 db_lock) and autopilot runs are being requeued; check lease_wait_seconds and db_lock hold time."
 
+      # Issue #4081：插件代理缺插件上报降级（`report-missing` 回补闭环不可用）
+      # 语义：result=degraded 表示市场契约与统一确认队列都不可用，Agent 只能回帖协商
+      # 文本，补装闭环静默失效（此前该结果只有 logger.debug，值守只能翻 nginx 日志）。
+      # 排查：日志 grep "plugin report-missing degraded"；核对 plugin_install_requests
+      # 表与 src.api.plugin_market.create_plugin_install_request 可用性。
+      - alert: GrapePluginMissingReportDegraded
+        expr: sum by (result) (increase(grape_plugin_missing_report_total{result="degraded"}[10m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Plugin missing report degraded (comment fallback)"
+          description: "{{ $value }} report-missing submissions fell back to the comment channel in the last 10 minutes — the unified install-confirmation queue / plugin market contract is unavailable, so the missing-plugin discovery-to-refill loop is silent for the reporting agent."
+
+      # Issue #4081：插件代理端点不可用（本构建未实现 / 旧构建裸 404-405）
+      # 语义：第一分支 grape_plugin_agent_unimplemented_total 由 /api/plugins/agent/*
+      # 的路由级兜底自增（501 NOT_IMPLEMENTED，不再裸 404/405，只在本构建内可见）；
+      # 第二分支兜住**未升级的旧构建**：那里的请求根本不进本 router，应用侧只有
+      # SPA catch-all 的 404（route="/{path}"）与 Starlette 的 405（route="unmatched"），
+      # 应用指标 `grape_http_requests_total{route=...}` 的 route 是路由模板、永远不匹配
+      # `/api/plugins/agent/.*`（#3847 复盘：网关侧 404/405 不进应用侧指标）。因此第二
+      # 分支必须用 Alloy 从 nginx access.log 派生的 `nginx_upstream_requests_total`
+      # （deploy/alloy-config.alloy：path=真实请求路径、status=三位状态码）。
+      # 排查：GET /api/plugins/agent/capabilities 看 available / missing_operations
+      # （`/api/ping` 由 worker 进程承载、没有插件代理 router，不提供该能力位）；
+      # 对比发布版本（生产 8081 是否包含 src/domains/mgmt/routes/plugins_agent.py）。
+      - alert: GrapePluginAgentEndpointMissing
+        expr: |
+          sum by (method) (increase(grape_plugin_agent_unimplemented_total[10m])) > 0
+          or
+          sum(rate(nginx_upstream_requests_total{path=~"/api/plugins/agent/.*", status=~"404|405|501"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Plugin agent endpoint unavailable (404/405/501)"
+          description: "Plugin-agent calls are being answered as not-implemented (501) or 404/405 in the last minutes — the running build does not serve /api/plugins/agent/* for the calling runtime. Risk: missing-plugin discovery and install negotiation are dead on every runtime host. Check GET /api/plugins/agent/capabilities (available / missing_operations) and the deployed build version."
+
       # Issue #1938：事件回报丢失补偿频发
       # 语义：任务已终态但事件回报未落库，服务端级联收敛并自行生成/回填结论。
       # 频发 = worker 回报链路在丢消息，且事件结论已不属于 Agent 真实答复口径。

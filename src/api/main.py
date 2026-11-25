@@ -730,6 +730,15 @@ app.include_router(plugins_router)
 app.include_router(plugins_agent_router)  # Issue #1090 C2/D1-a：Agent 侧协商端点
 app.include_router(plugin_market_router)  # Issue #1079：上传/上架前 L0 强校验门禁
 
+# Issue #4081 结构性约束（必须保持）：`plugins_agent_router` 末位注册了一条命名空间兜底
+# `/api/plugins/agent/{rest:path}`（未登记路径/方法 → 501 NOT_IMPLEMENTED）。它只保证在
+# **本文件内**是最后一条，无法约束跨文件 include 顺序——任何在本行之后 include 的
+# router 若再定义 `/api/plugins/agent/*`，会先被兜底匹配返 501，而能力位仍报
+# available=true（端点被吞 + 能力位说谎）。新增该前缀路由请 include 在 plugins_agent
+# 之前，或合并进 `src/domains/mgmt/routes/plugins_agent.py`。
+# 看护：tests/mgmt/test_issue_4081_plugin_agent_contract.py::
+# TestNamespaceRegistrationOrder（断言命名空间内所有已登记 pair 的下标都早于兜底）。
+
 app.include_router(skills.router)
 
 app.include_router(search.router)

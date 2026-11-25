@@ -5031,10 +5031,21 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     # 两个 helper，没有接调用点 → user 档技能会被当成"显式授权"放行（979 用例）。
     if skill_name:
         try:
-            _gate_scene = evt.get("scene_id") or evt.get("_scene_id") or ""
+            # Issue #3788：门禁场景从「只看 evt」改成三态解析（evt → Issue 真实绑定
+            # → 仓库默认场景），确认无场景时显式传 scene_scope=None 放行。
+            _gate_scene, _gate_scope = _gate_scene_context(
+                repo_key, evt, issue_id or "")
             _ev_gate = _evaluate_skill_scope(
                 skill_name, repo_key, skill_id=int(skill_id or 0),
-                node_tag=agent_type or "", scene_id=_gate_scene)
+                node_tag=agent_type or "", scene_id=_gate_scene or "",
+                scene_scope=_gate_scope)
+            if _ev_gate.get("source") == "no_scene":
+                # 决策可观测（事件中心/日志可按 decision=no_scene 与 skill_resolve_failed 区分）
+                log.info(
+                    f"Pipeline: skill scope gate decision=no_scene, "
+                    f"skill={skill_name} actual_scope="
+                    f"{_ev_gate.get('actual_scope') or '-'} scene_id='' "
+                    f"agent={agent_type or '-'} seq={seq} (Issue #3788)")
             if not _ev_gate["ok"]:
                 return _fail_skill_resolve_event(
                     repo_key, skill_name, _gate_scene, agent_type or "",
@@ -7149,13 +7160,58 @@ def _resolve_event_issue_id(evt: dict, repo_key: str, api_token: str = "") -> st
     evt["_resolved_issue_id"] = issue_id or ""
     return evt["_resolved_issue_id"]
 
+def _gate_scene_context(repo_key: str, evt: dict,
+                        issue_id: str = "") -> tuple:
+    """派发门禁的场景三态解析（Issue #3788），返回 ``(scene_id, scene_scope)``。
+
+    修复背景：`normalize_event()` 不写 `scene_id`，门禁原先只看 `evt` → 恒为空串；
+    再叠上判官 `expected_scope = scene_scope or "repo"` 的回落，无场景 issue 的
+    session 级 user 档技能必然 mismatch（1 小时 11 条 `skill_resolve_failed`）。
+    因此「有没有场景」必须在门禁内可靠判定——否则「无场景放行」等于把
+    #1722/#1758 的派发期保护整体关掉。
+
+    三态口径（只有**确认未绑定**才表达「无场景」，即 `scene_scope=None`）：
+    - `evt` 已带场景（`scene_id` / `_scene_id`）→ 原样返回 + repo 口径；
+    - `evt` 缺失 → 回读 Issue 真实绑定（`_issue_authoritative_scene`）；非空 → repo 口径；
+    - 仍未绑定 → 再看仓库默认场景（`_repo_dev_scene`，与 `resolve_scene_id` 同源）；
+    - 两级都**确认**为空 → `("", None)`，由判官走 `source="no_scene"` 放行；
+    - 任一查询异常（未判定，helper 返回 `None`）→ `("", "repo")`，不放行（fail-closed）。
+    """
+    from src.api.scene_skill_scope import SCENE_SCOPE_REPO
+    _evt = evt if isinstance(evt, dict) else {}
+    _scene = _evt.get("scene_id") or _evt.get("_scene_id") or ""
+    if _scene:
+        return _scene, SCENE_SCOPE_REPO
+    _bound = _issue_authoritative_scene(repo_key, issue_id or "")
+    if _bound is None:
+        log.info(f"Pipeline: gate scene undetermined (issue binding lookup failed), "
+                 f"keep repo policy: repo={repo_key} issue={issue_id or '-'}")
+        return "", SCENE_SCOPE_REPO
+    if _bound:
+        return _bound, SCENE_SCOPE_REPO
+    _dev = _repo_dev_scene(repo_key)
+    if _dev is None:
+        log.info(f"Pipeline: gate scene undetermined (dev_scene lookup failed), "
+                 f"keep repo policy: repo={repo_key} issue={issue_id or '-'}")
+        return "", SCENE_SCOPE_REPO
+    if _dev:
+        return _dev, SCENE_SCOPE_REPO
+    return "", None
+
+
 def _evaluate_skill_scope(skill_name: str, repo_key: str, skill_id: int = 0,
-                          node_tag: str = "", scene_id: str = "") -> dict:
-    """派发门禁统一 scope 判定（Issue #1758）：直接调用单一判官。"""
+                          node_tag: str = "", scene_id: str = "",
+                          scene_scope: str | None = "repo") -> dict:
+    """派发门禁统一 scope 判定（Issue #1758）：直接调用单一判官。
+
+    ``scene_scope`` 默认 ``"repo"``（既有调用口径不变）；**仅**派发侧确认 Issue
+    无任何场景绑定时传 ``None``（Issue #3788「无场景」显式语义，判官返回
+    ``source="no_scene"``）。其余入口（保存/体检/详情/预检）不得传该入参。
+    """
     from src.api.scene_skill_scope import evaluate
     return evaluate({"skill": skill_name, "skill_id": skill_id,
                      "tag": node_tag or "", "id": node_tag or ""},
-                    repo_key, "repo", scene_id=scene_id)
+                    repo_key, scene_scope, scene_id=scene_id)
 
 def _fail_skill_resolve_event(repo_key: str, skill_name: str, scene_id: str,
                               agent_type: str, reason: str,
