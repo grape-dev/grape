@@ -11717,6 +11717,38 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/engines/meta": {
+      "get": {
+        "tags": [
+          "engines"
+        ],
+        "summary": "Get engine metadata",
+        "description": "Read-only engine metadata derived from engine descriptors (canonical/aliases/protocol/display/probe). New engines ship one descriptor JSON and appear here automatically.",
+        "operationId": "engines_meta",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
     "/api/plugins": {
       "get": {
         "tags": [
@@ -36495,6 +36527,7 @@
   "x-changelog": {
     "version": "2.3.0a1",
     "added": [
+      "/api/engines/meta",
       "/api/skills/by-id/{skill_id}/ai-fill",
       "/api/skills/by-id/{skill_id}/content",
       "/api/skills/by-id/{skill_id}/convert"
@@ -36505,7 +36538,7 @@
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 406,
+  "x-endpoint-count": 407,
   "x-groups": [
     "a2a",
     "agents",
@@ -36514,6 +36547,7 @@
     "chat",
     "dashboard",
     "devstage",
+    "engines",
     "events",
     "feedback",
     "feishu",
@@ -36540,6 +36574,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "da58452bf",
-  "x-generated-at": "2026-11-25T08:27:28.406493+00:00"
+  "x-source-commit": "9aed4c0e5",
+  "x-generated-at": "2026-11-25T12:41:18.326878+00:00"
 }

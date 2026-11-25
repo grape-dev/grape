@@ -33,7 +33,7 @@
 - [ ] A3 UI 可勾/不勾 chat；6 角色全选自动折叠为全能；保存后心跳不覆盖（已有角色行即跳过，含 `enabled=0`）
 - [ ] A4 认领侧以 engine_capabilities 为准，UI 改标签无需重启/重注册即时生效，role_tags 列改值不再影响认领
 - [ ] A5 写权限（2026-11-24 分层裁定）：本机直连（cred=0）任意登录用户 PUT tags → 200；凭据引擎（cred≠0）仅凭据 owner 本人 / org owner+admin / 平台管理员 → 200，其余登录用户与仓库管理员 → 403 且不写库；`session_token` → 403；不存在的 runtime → 404；写后审计 `engine_tag_change` 记录 operator
-- [ ] A6 Chat 兜底只落勾了 chat/all 的引擎，全不勾时明确提示不静默
+- [ ] A6 Chat 兜底只落勾了 chat/all 的引擎，全不勾时明确提示不静默（前端半边，2026-11-24 收尾 I4：离线/失联引擎弹层灰显+状态徽标+点选短路 `engine.unavailable`；选中键以 engine_uid 为准（#868 T10 uid 优先、runtime_id 兜底），名字兜底删除——同实例多引擎不再并列高亮/静默串台）
 - [ ] A7 手动清空标签的引擎任何角色两侧均不可调度（fail-closed）
 - [ ] A8 存量回归：未手工设标签的引擎（注册自动补 all）行为与基线一致不被误伤
 - [ ] A8b 声明兼容：注册带 `role_tags=['sre']`（特殊场景 only-sre 机器）→ 能力行播种为 `sre`（不补 all），派发/认领两侧仅放行 sre；存量行 `role_tags` 非空且仅有自动补的 `all` → 再注册/心跳改写为声明集合；`tags_user_set=1` 与既有非 all 角色行一律不覆盖

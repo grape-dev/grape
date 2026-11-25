@@ -36,7 +36,7 @@ ZH = re.compile(r"['\"]([^'\"]*[\u4e00-\u9fff][^'\"]*)['\"]")
 # 2026-11-13 迁移后快照（只减不增）
 FROZEN = {
     "AccountView.vue": 100, "AdminView.vue": 1, "AgentView.vue": 0,
-    "AutopilotView.vue": 12, "ChatView.vue": 76, "DashboardView.vue": 122,
+    "AutopilotView.vue": 12, "ChatView.vue": 80, "DashboardView.vue": 122,
     "EventView.vue": 113, "FeedbackDialog.vue": 36, "ImChannel.vue": 0,
     "IssuesView.vue": 180, "KnowledgeView.vue": 11, "MyFeedback.vue": 0,
     "MyFeedbackDetail.vue": 0, "ObservabilityView.vue": 3, "Organizations.vue": 17,

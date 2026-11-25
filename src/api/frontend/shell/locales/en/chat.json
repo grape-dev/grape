@@ -226,5 +226,11 @@
     "source_installed": "Installed",
     "source_market": "Market",
     "degraded_hint": "List may contain uninstalled plugins"
+  },
+  "engine": {
+    "unavailable": "This engine is currently unavailable; pick an online one",
+    "status_offline": "Offline",
+    "status_recently_lost": "Lost connection",
+    "status_about_to_gc": "Lost (due for GC)"
   }
 }
