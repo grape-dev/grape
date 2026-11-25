@@ -107,16 +107,20 @@ def delivery_verify_applies(agent_type: str, skill: str) -> bool:
     return s in delivery_verify_skills()
 
 
+def _issue_text(issue_id) -> str:
+    """规范化 issue_id 文本（去空白与前导 ``#``），供伪 id / 编号解析共用。"""
+    return str(issue_id or "").strip().lstrip("#")
+
+
 def is_pr_subscription_issue_id(issue_id) -> bool:
     """PR 订阅伪 issue_id（``#pr_123_scene``）——不是新需求交付目标。"""
-    text = str(issue_id or "").strip().lstrip("#")
-    return text.lower().startswith("pr")
+    return _issue_text(issue_id).lower().startswith("pr")
 
 
 def _issue_number_of(issue_id) -> int:
     """从 issue_id 解析原需求编号；PR 订阅伪 issue_id（#pr_123 等）返回 0。"""
-    text = str(issue_id or "").strip().lstrip("#")
-    if not text or text.lower().startswith("pr"):
+    text = _issue_text(issue_id)
+    if not text or is_pr_subscription_issue_id(issue_id):
         return 0
     digits = "".join(ch for ch in text if ch.isdigit())
     try:
@@ -233,12 +237,32 @@ def verify_coding_delivery(repo_key: str, issue_id, agent_type: str, skill: str)
     return result
 
 
+def verify_coding_delivery_safe(repo_key: str, issue_id, agent_type: str, skill: str) -> dict:
+    """带异常兜底的统一核实入口（两条收尾路径统一调用，禁止各自 try/except）。
+
+    关键约束：兜底只对**命中核实清单**的工作流按未交付处理；未命中清单的
+    coding 工作流即便核实链路异常也必须 ``applies=False, delivered=True``，
+    不得因兜底误杀（#4440 复审 Standards 判断项）。
+    """
+    if not delivery_verify_applies(agent_type, skill):
+        return {"applies": False, "delivered": True, "code": "", "reason": "", "prs": []}
+    try:
+        return verify_coding_delivery(repo_key, issue_id, agent_type, skill)
+    except Exception as e:  # fail-closed：仅命中清单的工作流按未交付处理
+        log.warning(f"delivery verify: crashed repo={repo_key} issue={issue_id!r} "
+                    f"skill={skill}: {e}")
+        return {"applies": True, "delivered": False,
+                "code": DELIVERY_CODE_PR_QUERY_FAILED,
+                "reason": f"交付核实异常：{str(e)[:200]}", "prs": []}
+
+
 def verify_task_delivery(task_id) -> dict | None:
     """按 agent_tasks 行字段执行交付核实（供无 repo_key/skill 入参的收尾链路复用）。
 
     Returns:
         核实结果 dict；任务不存在 / 非 coding 时返回 ``None``（调用方按不适用处理）。
-        读取失败同样返回 ``None``（不阻断既有收尾路径）。
+        读取失败同样返回 ``None``（不阻断既有收尾路径）；行内确认 coding 后走
+        ``verify_coding_delivery_safe``，核实链路异常按 fail-closed 未交付处理。
     """
     if not task_id:
         return None
@@ -253,7 +277,8 @@ def verify_task_delivery(task_id) -> dict | None:
         repo_key, issue_id, agent_type, skill = row
         if (agent_type or "").strip().lower() != "coding":
             return None
-        return verify_coding_delivery(repo_key or "", issue_id or "", agent_type, skill or "")
+        return verify_coding_delivery_safe(
+            repo_key or "", issue_id or "", agent_type, skill or "")
     except Exception as e:
         log.warning(f"delivery verify: load task {task_id} failed: {e}")
         return None

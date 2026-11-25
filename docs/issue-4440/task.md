@@ -9,3 +9,4 @@
 | 5 | 回归测试：三类场景 × 两条路径 + 未命中清单零改动 + 源级共用入口守卫 | ✅ |
 | 6 | 复审修复：-15 结构化复活 / 瞬时降级两条成功通道纳入核实；成功副作用后移；PR 订阅双路径同口径；direct exit_code=1 + 崩溃兜底码；查询超时；判定收敛为常量/helper；skill 为空显式留痕 | ✅ |
 | 7 | 门禁：新增测试 31 passed；相关回归 153 passed；make lint 通过；check-arch PASS | ✅ |
+| 8 | 第二轮复审修复：无需求编号 fail-open 闭合（worker/direct）；迟到提升接入核实；瞬时被拒统一 exit_code=1 + 未交付前缀；异常兜底仅命中清单 fail-closed；伪 id 解析去重；测试 38 passed | ✅ |

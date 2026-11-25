@@ -540,7 +540,8 @@ def _do_requeue(task_id):
 
 
 def retry_transient_task(task_id, exit_code, error_text: str, has_output: bool = False,
-                          tool_uses=None, result_text: str = "") -> bool:
+                          tool_uses=None, result_text: str = "",
+                          delivery_out: dict | None = None) -> bool:
     """判定层收口入口：可重试则安排退避 requeue 并返回 True。
 
     调用契约：仅在任务仍为 running、且调用方终态幂等检查之后调用
@@ -617,6 +618,10 @@ def retry_transient_task(task_id, exit_code, error_text: str, has_output: bool =
                 verify_task_delivery)
             _dv = verify_task_delivery(task_id)
             if is_delivery_unverified(_dv):
+                # 回传核实结果给调用方：统一落 exit_code=1 + 「Coding 未交付」前缀，
+                # 避免调用方沿用原 exit_code 且事件 result 无原因。
+                if delivery_out is not None:
+                    delivery_out.update(_dv)
                 try:
                     _append_task_error(task_id, delivery_unverified_error_entry(_dv))
                 except Exception:

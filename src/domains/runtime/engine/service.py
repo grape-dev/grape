@@ -5093,6 +5093,8 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
     # （skill 未命中核实清单）applies=False 直接放行，行为零改动。
     # 两条成功通道都必须核实：#1 入口 exit_code==0；#2 exit_code!=0 但带完整
     # 结构化产出将复活为 completed（如 -15）——自述不是 PR 交付证据。
+    # 无 issue_id 不再作为跳过条件（复审高：#4440 模块契约「无需求编号 → 未交付」）：
+    # 命中核实清单但无需求编号同样走核实并记未交付，与瞬时通道 fail-closed 同口径。
     _dv_result = None
     try:
         from src.api.event_store import parse_agent_output_json as _parse_out
@@ -5102,20 +5104,13 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
     _revive_to_success = bool(
         exit_code != 0 and _pre_output and _pre_output.get("actions")
         and _pre_output.get("conclusion"))
-    if (task and (task.get("agent_type") or "") == "coding" and task.get("issue_id")
+    if (task and (task.get("agent_type") or "") == "coding"
             and (exit_code == 0 or _revive_to_success)):
-        from src.domains.runtime.engine.delivery_verify import (
-            DELIVERY_CODE_PR_QUERY_FAILED, verify_coding_delivery)
-        try:
-            _dv_result = verify_coding_delivery(
-                task.get("repo_key") or "", task.get("issue_id") or "",
-                "coding", task.get("skill") or "")
-        except Exception as _dve:
-            # fail-closed：核实链路自身异常同样按未交付处理，不静默放行
-            _dv_result = {"applies": True, "delivered": False,
-                          "code": DELIVERY_CODE_PR_QUERY_FAILED,
-                          "reason": f"交付核实异常：{str(_dve)[:200]}", "prs": []}
-            log.warning(f"complete_task: delivery verify crashed for {task_id}: {_dve}")
+        from src.domains.runtime.engine.delivery_verify import verify_coding_delivery_safe
+        # safe 入口：未命中清单直接放行；命中清单异常才 fail-closed（不误杀其他工作流）
+        _dv_result = verify_coding_delivery_safe(
+            task.get("repo_key") or "", task.get("issue_id") or "",
+            "coding", task.get("skill") or "")
     from src.domains.runtime.engine.delivery_verify import is_delivery_unverified
     _dv_failed = is_delivery_unverified(_dv_result)
     if _dv_failed:
@@ -5136,16 +5131,27 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
     # 分支之外：无关联事件的任务同样适用；「exit!=0 但结构化产出」由闸门放行
     # （不重试，走既有 override-to-completed 路径）。
     # 交付核实未通过（#4440）不是上游抖动，不进瞬时重试，直接判死留痕。
+    # 瞬时降级被交付核实拒绝时，retry_transient_task 通过 delivery_out 回传核实结果，
+    # 调用方据此统一落 exit_code=1 + 「Coding 未交付」前缀（否则沿用原 exit_code=-1
+    # 且事件 result 无前缀，与 AC 的双路径同口径不符——#4440 复审 Spec 3）。
+    _dv_transient = {}
     if exit_code != 0 and not _dv_failed:
         try:
             from src.domains.runtime.engine.transient_retry import retry_transient_task
             if retry_transient_task(task_id, exit_code, "",
-                                    result_text=result_text or ""):
+                                    result_text=result_text or "",
+                                    delivery_out=_dv_transient):
                 log.info(f"Task {task_id}: transient failure scheduled for retry, "
                          f"skip terminal write (exit={exit_code})")
                 return
         except Exception as _e:
             log.warning(f"complete_task: transient retry check failed for {task_id}: {_e}")
+        if is_delivery_unverified(_dv_transient):
+            _dv_result = _dv_transient
+            _dv_failed = True
+            exit_code = 1
+            log.warning(f"Task {task_id}: transient degrade blocked by delivery verify "
+                        f"(code={_dv_result.get('code')}), overriding exit_code to 1")
     if task and task.get("event_seq"):
         try:
             from src.api.event_store import parse_agent_output_json, update_event_complete
@@ -5547,6 +5553,9 @@ def enrich_task_on_late_report(task_id: str, result_text: str = "") -> str:
     守卫：仅本任务、仅结构化结论、仅未落库的缺位；failed 提升仅限「no-output 占位失败」
     （exit_code in (0, NULL)），真实 crash（exit_code!=0）不提升。
     只改结果存储（task/event 的 structured_output/result），不重放任何副作用（评论/回帖）。
+
+    Issue #4440 复审 Spec 2：failed 占位提升 completed 也是成功通道，须经统一交付核实；
+    无关联 PR / 查询失败 → 不提升（保持 failed）并落 CODING_DELIVERY_UNVERIFIED。
     """
     task = get_task(task_id)
     if not task:
@@ -5585,6 +5594,24 @@ def enrich_task_on_late_report(task_id: str, result_text: str = "") -> str:
     # failed：仅占位失败可提升
     if task.get("exit_code") not in (0, None):
         return "already"
+    # Issue #4440：提升为 completed 前必须核实交付（无 PR / 查询失败不得记成功）。
+    from src.domains.runtime.engine.delivery_verify import (
+        delivery_unverified_error_entry, is_delivery_unverified,
+        verify_coding_delivery_safe)
+    _dv = verify_coding_delivery_safe(
+        task.get("repo_key") or "", task.get("issue_id") or "",
+        task.get("agent_type") or "", task.get("skill") or "")
+    if is_delivery_unverified(_dv):
+        try:
+            from src.domains.runtime.engine.transient_retry import _append_task_error
+            _append_task_error(
+                task_id, delivery_unverified_error_entry(_dv, task.get("skill") or ""))
+        except Exception as e:
+            log.warning(f"enrich late report: record delivery unverified failed for "
+                        f"{task_id}: {e}")
+        log.warning(f"enrich late report: task {task_id} promotion blocked by delivery "
+                    f"verify (code={_dv.get('code')}), keep failed")
+        return "blocked"
     _set_task_late_result(task_id, task, structured, status="completed")
     return "promoted"
 

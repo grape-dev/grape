@@ -1005,21 +1005,15 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # new_status 改判 failed、result_text 前缀「Coding 未交付」+ 原因，成功路径
     # 钩子（auto-advance/回帖/pending_review）因 status!=completed 全部不触发。
     # skill 未命中核实清单的工作流 applies=False 直接放行，行为零改动。
+    # 无 issue_id 不再作为跳过条件（复审高：#4440 模块契约「无需求编号 → 未交付」）。
     _dv_failed = False
-    if (new_status == "completed" and agent_type == "coding" and issue_id
+    if (new_status == "completed" and agent_type == "coding"
             and not evt.get("_pr_sub_pr_number")):
         from src.domains.runtime.engine.delivery_verify import (
-            DELIVERY_CODE_PR_QUERY_FAILED, not_delivered_message,
             delivery_unverified_error_entry, is_delivery_unverified,
-            verify_coding_delivery)
-        try:
-            _dv = verify_coding_delivery(repo_key, issue_id, "coding", skill_name)
-        except Exception as _dv_crash:
-            # fail-closed：核实链路自身异常同样按未交付处理，不静默放行
-            _dv = {"applies": True, "delivered": False,
-                   "code": DELIVERY_CODE_PR_QUERY_FAILED,
-                   "reason": f"交付核实异常：{str(_dv_crash)[:200]}", "prs": []}
-            log.warning(f"Exec agent: seq={seq} delivery verify crashed: {_dv_crash}")
+            not_delivered_message, verify_coding_delivery_safe)
+        # safe 入口：未命中清单直接放行；命中清单异常才 fail-closed（不误杀其他工作流）
+        _dv = verify_coding_delivery_safe(repo_key, issue_id, "coding", skill_name)
         if is_delivery_unverified(_dv):
             _dv_failed = True
             new_status = "failed"
@@ -1044,16 +1038,30 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # ∧ 无写操作证据 ∧ attempts 未耗尽）则退避 requeue 并跳过终态写入。
     # 交付核实未通过（#4440）不是上游抖动，不进瞬时重试，直接判死留痕。
     _retry_info = {}
+    _dv_transient = {}
     if new_status == "failed" and task_id and not _dv_failed:
         try:
             from src.domains.runtime.engine.transient_retry import retry_transient_task
             _err_txt = " ".join(str(e) for e in (_exec_done_errors or [])) + " " + str(_exec_done_stderr or "")
             if retry_transient_task(task_id, exit_code, _err_txt, has_output=has_output,
-                                    tool_uses=tool_uses, result_text=result_text or ""):
+                                    tool_uses=tool_uses, result_text=result_text or "",
+                                    delivery_out=_dv_transient):
                 log.info(f"Exec agent: seq={seq} transient retry scheduled, skip terminal write")
                 return
         except Exception as _e:
             log.warning(f"Exec agent: transient retry check failed for seq={seq}: {_e}")
+        # 瞬时降级被交付核实拒绝：与 worker 同口径落 exit_code=1 + 「Coding 未交付」前缀
+        # （否则沿用原 exit_code 且 result 无原因——#4440 复审 Spec 3）。
+        from src.domains.runtime.engine.delivery_verify import (
+            is_delivery_unverified, not_delivered_message)
+        if is_delivery_unverified(_dv_transient):
+            _dv_failed = True
+            exit_code = 1
+            _dv_msg = not_delivered_message(_dv_transient)
+            result_text = (f"{_dv_msg}\n{result_text}" if (result_text or "").strip()
+                           else _dv_msg)
+            log.warning(f"Exec agent: seq={seq} transient degrade blocked by delivery "
+                        f"verify (code={_dv_transient.get('code')}), exit_code=1")
     # Issue #403：耗尽/不可重试判死 → 分类失败摘要写 result_text（区分上游抖动
     # vs 配置错误 + 重试次数 + 原始错误摘要）。非重试场景（无 #403 记录）零变化。
     if new_status == "failed" and task_id and not (result_text or "").strip():

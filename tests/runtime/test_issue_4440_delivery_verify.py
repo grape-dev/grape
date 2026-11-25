@@ -108,6 +108,27 @@ class TestVerifyCodingDelivery:
         assert r["code"] == "no_issue_number"
         assert calls["n"] == 0, "无需求编号不得外呼查询"
 
+    def test_safe_wrapper_does_not_kill_other_skills_on_crash(self, monkeypatch):
+        """核实链路异常兜底只作用于命中清单的工作流，未命中清单不得误杀。"""
+        import src.domains.runtime.engine.delivery_verify as dv
+
+        def _boom(*a, **k):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(dv, "verify_coding_delivery", _boom)
+        other = dv.verify_coding_delivery_safe(REPO, "#4440", "coding", "coding-cli-1")
+        assert other["applies"] is False and other["delivered"] is True
+        selected = dv.verify_coding_delivery_safe(REPO, "#4440", "coding", VERIFY_SKILL)
+        assert selected["applies"] is True and selected["delivered"] is False
+        assert selected["code"] == "pr_query_failed"
+
+    def test_issue_ident_parse_dedup(self):
+        """伪 id 解析与编号解析共用同一规范化实现（复审判断项：去重复解析）。"""
+        from src.domains.runtime.engine.delivery_verify import (
+            _issue_number_of, is_pr_subscription_issue_id)
+        assert is_pr_subscription_issue_id("#pr_123_scene") is True
+        assert _issue_number_of("#pr_123_scene") == 0
+        assert _issue_number_of(" #4440 ") == 4440
+
     def test_pr_subscription_pseudo_issue_id_skips(self, _vcs):
         calls = _vcs(REPO)
         r = self._verify(issue_id="#pr_123_scene")
@@ -262,11 +283,20 @@ class TestWorkerCompleteTaskPath:
         assert calls["n"] == 0, "未命中清单不得外呼查询"
         assert len(_worker_hooks["advances"]) == 1
 
-    def test_no_issue_id_skips_gate(self, _vcs, _worker_hooks):
+    def test_no_issue_id_marks_not_delivered(self, _vcs, _worker_hooks):
+        """命中核实清单但无需求编号 → 同样核实并记未交付（不得 fail-open）。"""
         calls = _vcs(REPO, prs=[])
         _complete(issue_id="")
-        assert _task_row()[0] == "completed"
-        assert calls["n"] == 0
+        row = _task_row()
+        assert row[0] == "failed", "无需求编号不得记录为成功（模块契约 no_issue_number）"
+        assert row[1] == 1
+        errs = json.loads(row[3] or "[]")
+        assert any(isinstance(e, dict) and e.get("error_code") == "CODING_DELIVERY_UNVERIFIED"
+                   and e.get("code") == "no_issue_number" for e in errs), errs
+        assert "Coding 未交付" in (_event_row()[2] or "")
+        assert calls["n"] == 0, "无需求编号不得外呼查询"
+        assert not _worker_hooks["advances"]
+        assert not _worker_hooks["notes"]
 
     def test_non_coding_agent_skips_gate(self, _vcs, _worker_hooks):
         calls = _vcs(REPO, prs=[])
@@ -327,6 +357,68 @@ class TestTransientDegradeDeliveryGate:
         r = self._degrade()
         assert r is True
         assert _task_row()[0] == "completed", "有可核实 PR 才允许降级完成"
+
+    def test_complete_task_propagates_transient_block(self, _vcs, _worker_hooks,
+                                                      monkeypatch):
+        """瞬时降级被核实拒绝 → 调用方落 exit_code=1 + 「Coding 未交付」前缀。"""
+        import src.domains.runtime.engine.transient_retry as tr
+        _vcs(REPO, prs=[])
+        _seed_worker_task()
+        blocked = {"applies": True, "delivered": False, "code": "no_linked_pr",
+                   "reason": "Issue #4440 在托管平台无关联 PR", "prs": []}
+
+        def _blocked_retry(task_id, exit_code, error_text, **kw):
+            out = kw.get("delivery_out")
+            if out is not None:
+                out.update(blocked)
+            return False
+
+        monkeypatch.setattr(tr, "retry_transient_task", _blocked_retry)
+        from src.domains.runtime.engine.service import complete_task
+        complete_task(WTASK, "代码已推送", exit_code=-1)
+        row = _task_row()
+        assert row[0] == "failed" and row[1] == 1, "瞬时降级被拒须落 failed + exit_code=1"
+        assert "Coding 未交付" in (_event_row()[2] or ""), "事件 result 必须带未交付前缀"
+        errs = json.loads(row[3] or "[]")
+        assert any(isinstance(e, dict) and e.get("error_code") == "CODING_DELIVERY_UNVERIFIED"
+                   for e in errs), errs
+        assert not _worker_hooks["advances"]
+        assert not _worker_hooks["notes"]
+
+
+class TestLateReportPromotionGate:
+    """enrich_task_on_late_report 的 failed→completed 提升也是成功通道（复审 Spec 2）。"""
+
+    def _seed_failed_placeholder(self):
+        _seed_worker_task()
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE agent_tasks SET status='failed', self_reported=1, "
+                      "exit_code=0, result_text='' WHERE id=?", (WTASK,))
+            c.execute("UPDATE events SET status='failed' WHERE seq=?", (WSEQ,))
+            db.commit()
+
+    def test_promotion_blocked_without_pr(self, _vcs):
+        _vcs(REPO, prs=[])
+        self._seed_failed_placeholder()
+        structured = json.dumps({"actions": ["x"], "conclusion": "done"})
+        from src.domains.runtime.engine.service import enrich_task_on_late_report
+        r = enrich_task_on_late_report(WTASK, structured)
+        assert r == "blocked", "无关联 PR 不得提升为 completed"
+        row = _task_row()
+        assert row[0] == "failed", "保持 failed"
+        errs = json.loads(row[3] or "[]")
+        assert any(isinstance(e, dict) and e.get("error_code") == "CODING_DELIVERY_UNVERIFIED"
+                   for e in errs), errs
+
+    def test_promotion_allowed_with_pr(self, _vcs):
+        _vcs(REPO, prs=[_pr(101, "fixes #4440")])
+        self._seed_failed_placeholder()
+        structured = json.dumps({"actions": ["x"], "conclusion": "done"})
+        from src.domains.runtime.engine.service import enrich_task_on_late_report
+        r = enrich_task_on_late_report(WTASK, structured)
+        assert r == "promoted"
+        assert _task_row()[0] == "completed"
 
 
 # ===== direct 收尾路径：direct_executor._execute_agent_inner =====
@@ -487,6 +579,45 @@ class TestDirectExecPath:
         _run_direct(issue_id="#pr_123_scene")
         assert _direct_env["statuses"][-1][1] == "completed", "PR 订阅不是新交付目标"
         assert calls["n"] == 0, "PR 订阅不得外呼查询"
+
+    def test_no_issue_id_marks_not_delivered(self, _vcs, _direct_env):
+        """命中核实清单但无需求编号 → direct 同样核实并记未交付（不得 fail-open）。"""
+        calls = _vcs(REPO, prs=[])
+        _run_direct(issue_id="")
+        tid, status, kw = _direct_env["statuses"][-1]
+        assert status == "failed", "无需求编号不得记成功"
+        assert kw.get("exit_code") == 1
+        assert "Coding 未交付" in (_direct_env["events"][-1]["result"] or "")
+        assert calls["n"] == 0
+        assert not _direct_env["advances"]
+        assert not _direct_env["idles"]
+
+    def test_transient_block_propagates_reason(self, _vcs, _direct_env, monkeypatch,
+                                               tmp_path):
+        """direct 瞬时降级被核实拒绝 → exit_code=1 + 「Coding 未交付」前缀。"""
+        import src.domains.runtime.engine.executor as executor_mod
+        _vcs(REPO, prs=[])
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_tasks WHERE id=?", (DTASK,))
+            c.execute(
+                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, repo_key, "
+                "issue_id, agent_type, event_type, status, prompt, cwd, skill, event_seq) "
+                "VALUES (?, 'sess-4440', 0, ?, ?, 'coding', 'a2a_event', 'running', "
+                "'p', '/tmp', ?, ?)",
+                (DTASK, REPO, "#4440", VERIFY_SKILL, DSEQ))
+            db.commit()
+
+        def _transient_stream(*a, **k):
+            yield ("tool_use", {"cmd": "grape git push origin feat/issue-4440"})
+            yield ("done", {"exit_code": 1, "text": "", "oc_session_id": "",
+                            "errors": ["connection reset by peer"], "stderr": ""})
+        monkeypatch.setattr(executor_mod, "stream_devops_agent", _transient_stream)
+        _run_direct()
+        tid, status, kw = _direct_env["statuses"][-1]
+        assert status == "failed" and kw.get("exit_code") == 1
+        assert "Coding 未交付" in (_direct_env["events"][-1]["result"] or "")
+        assert not _direct_env["advances"]
 
 
 # ===== 双路径共用同一入口（源级守卫） =====
