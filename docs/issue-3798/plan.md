@@ -31,7 +31,7 @@ _log_unresolved_misses(sink)                # 轮末 ≤1 条 WARNING；空 sink
 - **文案不含旧字面量** `has no matching skill_category slug`：Loki 按该串计数的告警规则
   归零（验收项），信号由聚合行承载。样例上限复用常量 `_UNRESOLVED_SAMPLE_LIMIT = 3`。
 
-## 3. `content-generation` 补种（mgmt 迁移 `202611240012`）
+## 3. `content-generation` 补种（mgmt 迁移 `202611250008`）
 
 新文件 `src/domains/mgmt/migrations/skill_category_content_generation_seed.py`：
 
@@ -42,7 +42,7 @@ _log_unresolved_misses(sink)                # 轮末 ≤1 条 WARNING；空 sink
   ——同步侧只认 `is_active=1`，行在而停用等于没种；
 - `verify_content_generation_category(conn=None)`：post_check，行在位且启用才盖章，
   否则 `RuntimeError`（不盖章 → 下次启动重试）；
-- `MIGRATION = {version 202611240012, kind "backfill", domains ("mgmt",), post_check}`；
+- `MIGRATION = {version 202611250008, kind "backfill", domains ("mgmt",), post_check}`；
   注册在 `src/api/db_setup.py`，**字面量**登记 version/name/kind（供
   `tests/api/test_migration_track_guard.py` 解析）。
 

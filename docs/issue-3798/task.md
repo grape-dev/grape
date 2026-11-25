@@ -7,7 +7,7 @@
   循环内降 DEBUG 入 sink，轮末 ≤1 条 WARNING（slug + 次数 + ≤3 样例，无旧字面量）。
 - [x] **T3 种子补种**：`mgmt/migrations/skill_category_content_generation_seed.py`
   （`content-generation`，幂等插入 + 启用重申 + post_check）+ `db_setup` 注册
-  `202611240012`。
+  `202611250008`。
 - [x] **T4 回归用例**：`tests/runtime/test_issue_3798_skill_sync_category.py`
   （聚合计数/样例上限/无告警/ERROR+打点/空字典/端到端 1 条 WARNING/端到端 ERROR/
   种子幂等/启用映射命中/post_check 闸门/`category_id` 非 0）。

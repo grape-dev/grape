@@ -378,6 +378,15 @@ EXEMPT_FILES: dict = {
     ('domains/mgmt/public/__init__.py', 'except ValueError:'): 1,
     # event_store：终态收敛后 WAL checkpoint 尽力而为（锁已释放，失败只影响落盘时机）。
     ('domains/runtime/event_store.py', 'except Exception:'): 1,
+
+    # ── domains/runtime/engine/stale_uid.py（Issue #4349 带入的新文件，2026-11-25 登记）──
+    # 理由：stale uid 上报链的「探测/计量旁路」——三处均不影响主返回（first_in_window）。
+    # runtime_ids 归一：坏 runtime_id（非 int）跳过，只收正整数（探测语义本体）。
+    ('domains/runtime/engine/stale_uid.py', 'except (TypeError, ValueError):'): 1,
+    # Prometheus 计数器 inc：_stale_uid_total / _heartbeat_lost_total 在无 collector
+    # 或版本差异时 inc 失败无害，计数上报属可观测性旁路（fail-open 铁律），
+    # 主流程照常返回 first_in_window。
+    ('domains/runtime/engine/stale_uid.py', 'except Exception:'): 2,
 }
 
 

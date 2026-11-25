@@ -28,7 +28,7 @@
 - `src/domains/runtime/storage/skill_sync.py`：字典不可用口径（ERROR + 打点）、
   未命中轮级聚合。
 - `src/domains/mgmt/migrations/skill_category_content_generation_seed.py`（新增）+
-  `src/api/db_setup.py` 注册引导（`202611240012`，字面量登记）。
+  `src/api/db_setup.py` 注册引导（`202611250008`，字面量登记）。
 - `tests/runtime/test_issue_3798_skill_sync_category.py`（新增）；
   `tests/runtime/test_issue179_skills.py` 种子行数断言 15 → 16（种子集合法增长）。
 
@@ -52,7 +52,7 @@
 
 | 风险 | 处理 |
 |---|---|
-| 迁移号撞号被静默跳过（#3630 教训） | 号段核对到 `202611240012`（当前最大 `202611240011`），注册用字面量供守卫解析 |
+| 迁移号撞号被静默跳过（#3630 教训） | 基线已占 `202611240011`（#3564）/`202611240012`（#4063），本迁移顺延取 `202611250008`，注册用字面量供守卫解析 |
 | 补种行若 `is_active=0` 等于没种 | 迁移内显式重申 `is_active=1`，post_check 校验「行在位且启用」才盖章 |
 | 老分类体系复活的误解 | 迁移 docstring 写明：只新增该 slug，不重开 202611210002/202611230001 停用的 15 条 |
 | 聚合告警弱化真实缺失信号 | 聚合行保留 slug + 命中次数 + ≤3 样例，逐技能明细降 DEBUG 不丢证据 |
