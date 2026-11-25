@@ -24,12 +24,21 @@
           <input v-model="token" type="password" class="kb-input" :placeholder="t('paste_token')" />
         </div>
         <div v-if="error" class="pd__err">{{ error }}</div>
+        <div v-if="warning" class="pd__warn">
+          {{ warning }}
+          <a v-if="effectivePatUrl" :href="effectivePatUrl" target="_blank" rel="noopener noreferrer">{{
+            t('open_token_page')
+          }}</a>
+        </div>
         <details class="pd__help">
           <summary>{{ t('how_to_get_token') }}</summary>
           <div>{{ helpSteps }}</div>
         </details>
-        <button class="bt bt-p pd__wide" :disabled="busy || betaHint" @click="save()">
+        <button v-if="!warning" class="bt bt-p pd__wide" :disabled="busy || betaHint" @click="save()">
           {{ busy ? t('verifying') : t('save') }}
+        </button>
+        <button v-else class="bt bt-o pd__wide" @click="ackWarning()">
+          {{ t('close') }}
         </button>
       </div>
     </div>
@@ -61,7 +70,7 @@ const icon = computed(function () {
 })
 // 官方实测过的预选参数链接优先（与 BindDialog 同源），其余取平台卡 pat_create_url
 const PAT_CREATE_URLS = {
-  github: 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps',
+  github: 'https://github.com/settings/tokens/new?scopes=repo,workflow,admin:repo_hook&description=Grape%20DevOps',
   gitcode: 'https://gitcode.com/setting/token-classic/create',
 }
 const effectivePatUrl = computed(function () {
@@ -83,6 +92,7 @@ const helpSteps = computed(function () {
 
 const token = ref('')
 const error = ref('')
+const warning = ref('')
 const busy = ref(false)
 
 function openBetaApply() {
@@ -101,10 +111,16 @@ watch(
     if (v) {
       token.value = ''
       error.value = ''
+      warning.value = ''
       busy.value = false
     }
   }
 )
+
+function ackWarning() {
+  warning.value = ''
+  emit('saved', props.provider)
+}
 
 function save() {
   const val = (token.value || '').trim()
@@ -117,8 +133,17 @@ function save() {
   const body = { platform_tokens: {} }
   body.platform_tokens[props.provider] = val
   G.API.put('/settings/credentials', body, 15000)
-    .then(function () {
+    .then(function (resp) {
       busy.value = false
+      const warnings = (resp && resp.scope_warnings) || []
+      warnings.forEach(function (w) {
+        if (G.app && G.app.showToast) G.app.showToast(w, 'warning')
+      })
+      const missing = (resp && resp.missing_scopes && resp.missing_scopes[props.provider]) || []
+      if (missing.indexOf('workflow') >= 0) {
+        warning.value = t('github_workflow_scope_missing')
+        return
+      }
       emit('saved', props.provider)
     })
     .catch(function (e) {
@@ -203,6 +228,20 @@ function save() {
   padding: 4px 0;
   color: var(--r);
   font-size: 12px;
+}
+.pd__warn {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--c-warning);
+  border-radius: 8px;
+  background: var(--c-warning-soft);
+  color: var(--c-warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.pd__warn a {
+  margin-left: 6px;
+  text-decoration: underline;
 }
 .pd__help {
   margin: 8px 0;

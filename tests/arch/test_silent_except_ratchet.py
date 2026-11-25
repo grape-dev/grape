@@ -202,9 +202,6 @@ EXEMPT_FILES: dict = {
     # 理由：#2134/#1982 bootstrap 改造——子进程终止链（kill/socket close/wait/
     # stdin flush）收尾尽力而为 + 引擎 bin 路径探测候选循环逐个试错（探不到
     # 换下一个候选，探测语义本体）。
-    ('domains/runtime/engine/branch_guard.py', 'except Exception:'): 2,
-    # 理由：#2028/#2041 fail-open 族——守卫自检异常一律 fail-open（stderr 告警
-    # + exit 0，真实违规由 hook_main 显式阻断）/ hook 幂等检查与租约释放尽力而为。
     ('domains/runtime/engine/recovery.py', 'except Exception:'): 1,
     # 理由：#2133 引擎自动恢复链——恢复步骢单项失败不阻断整体恢复循环
     # （循环内 continue，失败已 log.warning 留痕）。
@@ -352,6 +349,12 @@ EXEMPT_FILES: dict = {
     # 回落语义），pass 即降级本身。──
     ('kernel/bulk_read.py', 'except Exception:'): 3,
     ('kernel/bulk_read.py', 'except RuntimeError:'): 1,
+
+    # ── domains/runtime/engine/metrics_collect.py（arch-weekly-11 合入带入的新文件，2026-11-24 登记）──
+    # 理由：worker 指标采集的 psutil 填充 + Windows ctypes / 性能计数器兜底段逐句容错——
+    # 取不到某项（坏环境/缺字段/权限不足）就回退空指标继续，心跳绝不能因采集失败挂掉；
+    # 12 处均为同一族的「探测语义本体」，无业务分支可被吞掉。
+    ('domains/runtime/engine/metrics_collect.py', 'except Exception:'): 12,
 }
 
 

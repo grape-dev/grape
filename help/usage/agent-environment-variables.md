@@ -94,6 +94,8 @@ printf '%s' "$BODY" > "$TMP/body.md"
 在落上游前校验正文主语 `Issue #N`、PR 标题首个 `#N`、`related_issue_nums` 与当前会话任务 Issue
 是否一致；不一致返回 409 且不产生线上写入。该断言无放行参数，仅会话 token 启用；用户 JWT / API Key（非会话 token）不启用该断言。
 
+> **`GRAPE_SERVER_URL` 注入守护（Issue #3766）**：注入前按候选链（`task_business_api_url` → 本机业务端口 → `server_base_url`）探测业务 API，依次尝试 `/api/health`（要求 `server=ok`）、`/openapi.json`（含 `/api/issues`、`/api/git-repo` 路由）、`/api/issues/mine`（2xx JSON 或 401/403 鉴权挑战）。命中 301/302/404 等 admin 前端接管签名时判为不可用并回退到下一个可用候选；全部不可用时默认 `warn`（保留运维声明值并 `error` 告警），`GRAPE_BUSINESS_API_GUARD=strict` 可阻断注入，`=off` 保留 Issue #1731 旧行为。`task_business_api_url` 必须指向业务 API，不能填 admin 前端域名。
+
 ## GitCode Token 互斥注入（关键）
 
 `_assemble_env`（`agent/executor.py`）按执行类型**互斥注入** token：

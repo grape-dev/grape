@@ -6244,6 +6244,20 @@ def get_host_user_id(repo_key: str):
     return _impl(repo_key)
 
 
+def credential_workflows_write(user_id: str, provider: str):
+    """该用户在某 VCS provider 上的 workflow 写能力（True/False/None=未知）。"""
+    from src.domains.mgmt.user.repo_manager import credential_workflows_write as _impl
+
+    return _impl(user_id, provider)
+
+
+def github_token_scopes(token: str):
+    """探测 GitHub token 的 OAuth scope 集合（None 表示未知）。"""
+    from src.domains.mgmt.user.repo_manager import get_github_token_scopes as _impl
+
+    return _impl(token)
+
+
 def resolve_skill_dispatch(skill_name: str, skill_id: int = 0, repo_key: str = "",
                            user_id: "str | int" = "", scene_id: str = "",
                            node_tag: str = "", agent_type: str = "") -> dict:

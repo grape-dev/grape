@@ -2374,12 +2374,16 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
             continue
         try:
             from src.api.event_store import update_event_complete
+            from src.domains.runtime.agents.failure_info import build_failure_info
             _reason = _fail_reason_by_tid.get(tid) or (
                 "recover-orphans attempts cap reached (possible self-restart loop)")
             update_event_complete(
                 _seq, "failed", exit_code=1,
                 completed_at=datetime.now(timezone.utc).isoformat(),
-                result=f"{_reason}, 任务判死")
+                result=f"{_reason}, 任务判死",
+                failure_info=build_failure_info(
+                    error_type="AttemptsExhausted", phase="recover",
+                    message=_reason, exit_code=1))
         except Exception as e:
             log.warning(f"recover-orphans event writeback failed tid={tid}: {e}")
     if recovered or skipped_active or force_failed or skipped_young:
@@ -2410,7 +2414,8 @@ def get_task_status(task_id: str, user: dict = Depends(require_no_session_token)
         "completed_at": task.get("completed_at"),
     }
 
-def _cwd_or_derived(cwd: str, repo_key: str, agent_type: str, issue_id: str, task_id: str) -> str:
+def _cwd_or_derived(cwd: str, repo_key: str, agent_type: str, issue_id: str, task_id: str,
+                    pr_number: str = "") -> str:
     """任务工作目录：原值为空时按平台同一规则推导。
 
     `agent_tasks.cwd` 只有部分入队路径会回填；走 claim 的任务常常留空——worker 执行时
@@ -2421,7 +2426,7 @@ def _cwd_or_derived(cwd: str, repo_key: str, agent_type: str, issue_id: str, tas
         return cwd
     try:
         from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
-        return get_agent_workdir(repo_key, agent_type, issue_id or "")
+        return get_agent_workdir(repo_key, agent_type, issue_id or "", pr_number)
     except Exception as e:
         log.warning(f"cwd fallback failed (task={task_id}): {e}")
         return cwd
@@ -2487,8 +2492,11 @@ def get_task_detail(task_id: str, user: dict = Depends(require_no_session_token)
     task = service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    from src.kernel.pr_scope import pr_number_from_env_extra
+    _pr_cwd = pr_number_from_env_extra(task.get("env_extra"))
     _cwd = _cwd_or_derived(task.get("cwd") or "", task.get("repo_key") or "",
-                           task.get("agent_type") or "", task.get("issue_id") or "", task_id)
+                           task.get("agent_type") or "", task.get("issue_id") or "", task_id,
+                           _pr_cwd)
     return {
         "id": task["id"],
         "status": task["status"],

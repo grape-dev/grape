@@ -10,7 +10,7 @@
 出参结构 = gitcode 平台实际结构（与技能 `gitcode-api-reference.md` 一致，见 docs/openapi/10-git-repos.md）。
 """
 from src.kernel.user_ids import has_user_id
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Any
 
@@ -85,7 +85,6 @@ def _write_idempotency_contract() -> dict:
             },
         },
     }
-
 # 完整 sha（40-hex，git object id）：tree 接口直连免存在性预校验（Issue #734）
 import re as _re
 
@@ -418,6 +417,87 @@ def _provider(user: dict = Depends(get_current_user_or_api_key)) -> str:
     return p
 
 
+# Issue #3397：请求路径的原始 (provider, owner, repo)，供上游 404 诊断文案使用。
+import contextvars as _contextvars
+_REPO_PATH_CTX: "_contextvars.ContextVar[tuple]" = _contextvars.ContextVar(
+    "git_repo_path", default=())
+
+
+def _canonical_repo_path(request: Request, p: str = Depends(_provider)) -> None:
+    """把路径中的 owner/repo 大小写改写为仓登记（managed_repos）权威写法。
+
+    FastAPI 在依赖求解后才从 `request.path_params` 提取端点参数，故在此依赖内
+    原地改写即可让后续全部 git-repo 端点使用 VCS 实际路径（大小写混合仓库不再 404）。
+    未登记/歧义（同 owner 下仅大小写不同的多个仓库）→ 保持原样，由上游 404 兜底
+    （`_vcs_req` 会补「实际路径为 X」诊断文案）。
+    """
+    owner = str(request.path_params.get("owner") or "")
+    repo = str(request.path_params.get("repo") or "")
+    if not owner or not repo:
+        return
+    bare_owner = _strip_owner_prefix(p, owner)
+    _REPO_PATH_CTX.set((p, bare_owner, repo))
+    try:
+        from src.kernel.repo_key import parse_repo_key, resolve_repo_key_ci, to_repo_key
+        resolved = resolve_repo_key_ci(to_repo_key(f"{bare_owner}/{repo}", p))
+        if not resolved:
+            return
+        _rp, new_owner, new_repo = parse_repo_key(resolved)
+        if not new_owner or not new_repo:
+            return
+        # Issue #3397：路径已归一为实际大小写后，诊断上下文也同步为实际路径——
+        # 否则真实上游 404（仓库存在但资源不存在）会被误报成「大小写不一致」。
+        _REPO_PATH_CTX.set((p, new_owner, new_repo))
+        if new_owner == bare_owner and new_repo == repo:
+            return
+        request.path_params["owner"] = (
+            f"{p}:{new_owner}" if owner != bare_owner else new_owner)
+        request.path_params["repo"] = new_repo
+        log.info(f"git-repo path canonicalized: {bare_owner}/{repo} -> {new_owner}/{new_repo}")
+    except Exception as e:
+        log.debug(f"git-repo path canonicalization skipped ({owner}/{repo}): {e}")
+
+
+def _repo_case_mismatch_hint() -> str:
+    """上游 404 时给出大小写诊断（命中仓登记但写法不同才返回，否则空串）。"""
+    try:
+        provider, owner, repo = _REPO_PATH_CTX.get()
+    except Exception:
+        return ""
+    if not provider or not owner or not repo:
+        return ""
+    try:
+        from src.kernel.repo_key import (parse_repo_key, repo_keys_ci,
+                                         resolve_repo_key_ci, to_repo_key)
+        _key = to_repo_key(f"{owner}/{repo}", provider)
+        resolved = resolve_repo_key_ci(_key)
+        if not resolved:
+            # Issue #3397：歧义（仅大小写不同的多仓）不得静默裸 404——给出可操作诊断。
+            _keys = repo_keys_ci(_key)
+            if len(_keys) > 1:
+                _names = ", ".join(
+                    f"{_o}/{_r}" for _o, _r in
+                    (parse_repo_key(_k)[1:] for _k in sorted(_keys)))
+                return (f"仓库路径存在大小写歧义：请求 {owner}/{repo} 命中多个仅大小写"
+                        f"不同的登记仓库：{_names}；请使用完整实际路径")
+            return ""
+        _, actual_owner, actual_repo = parse_repo_key(resolved)
+        actual = f"{actual_owner}/{actual_repo}"
+        if not actual or actual == f"{owner}/{repo}":
+            return ""
+        return (f"仓库路径大小写与实际不一致：请求 {owner}/{repo}，实际路径为 {actual}"
+                f"（请使用实际大小写路径）")
+    except Exception:
+        return ""
+
+
+# Issue #3397：路径大小写归一依赖。不重建 router（重建会丢失 :33 基线的
+# route_class=IdempotentAPIRoute，破坏 Issue #2084 幂等键体系），改为向既有
+# router 的 dependencies 原位追加——FastAPI 在注册每条路由时快照当时的
+# router.dependencies，下方全部端点生效，且 route_class 保持不变。
+router.dependencies.append(Depends(_canonical_repo_path))
+
+
 def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
     """解析仓库平台 token（git-repo 透传端点共用）。
 
@@ -448,7 +528,8 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
         # 接管 token（tko_）= 人以 agent 身份在"自己那条任务仓库"里干活：
         # 只放行同仓库，且接管会话必须仍是 active（finish/abort 会立即吊销 token，这里是二次校验）。
         tk_repo = str(user.get("repo_key") or "")
-        if tk_repo and tk_repo != rk:
+        from src.kernel.repo_key import same_repo_key as _same_rk
+        if tk_repo and not _same_rk(tk_repo, rk):
             raise HTTPException(status_code=403, detail={
                 "code": 403, "message": f"该接管 token 仅限其任务仓库（{tk_repo}），不能操作 {rk}"})
         try:
@@ -645,6 +726,11 @@ def _vcs_req(provider: str, method: str, url: str, token: str, body: dict | None
     except UpstreamAPIError as e:
         log.warning(f"Git repo API {method} {url} upstream error: {e}")
         msg = e.message or f"{provider} API 上游错误 ({e.status_code})"
+        # Issue #3397：仓库级 404 且仓登记显示写法不同 → 返回可诊断文案而非裸 404。
+        if e.status_code == 404:
+            _hint = _repo_case_mismatch_hint()
+            if _hint:
+                msg = f"{msg}；{_hint}"
         raise HTTPException(status_code=e.status_code,
                             detail={"code": e.status_code, "message": msg})
     except UpstreamTimeoutError as e:

@@ -207,8 +207,9 @@ class GenericVcsProvider(VCSProvider):
     def provider_name(self) -> str:
         return self._card.provider
 
-    def _http(self, method: str, path: str, token: str, data: dict | None = None,
-              form: bool = False) -> dict:
+    def _http_with_headers(self, method: str, path: str, token: str,
+                           data: dict | None = None, form: bool = False,
+                           ) -> "tuple[dict, dict]":
         import json as _json
         import urllib.request
         import urllib.error
@@ -247,7 +248,9 @@ class GenericVcsProvider(VCSProvider):
                 log.info(f"vcs upstream {self._card.provider} {method} "
                          f"{self._card.api_base}{_log_path} -> {getattr(resp, 'status', 200)} "
                          f"{( _time.monotonic() - _t0) * 1000:.0f}ms")
-                return _payload
+                # Issue #3386：响应头一并带出（X-OAuth-Scopes 等），调用方可复用
+                # 校验响应解析 scope，不再重复打一次 /user。
+                return _payload, dict(getattr(resp, "headers", {}) or {})
         except urllib.error.HTTPError as e:
             # 带上游响应体：4xx 的 {"message": ...} 才是可行动的诊断（建仓被拒等）
             try:
@@ -261,11 +264,19 @@ class GenericVcsProvider(VCSProvider):
                 f"{self._card.name} API {method} {path} failed ({e.code}): {e}"
                 + (f" | {_detail}" if _detail else "")) from e
 
-    def verify_token(self, token: str) -> dict:
-        info = self._http("GET", "/user", token)
+    def _http(self, method: str, path: str, token: str, data: dict | None = None,
+              form: bool = False) -> dict:
+        return self._http_with_headers(method, path, token, data=data, form=form)[0]
+
+    def verify_token_with_headers(self, token: str) -> "tuple[dict, dict]":
+        """校验 token 并带出响应头（Issue #3386：X-OAuth-Scopes 复用，免二次 /user）。"""
+        info, headers = self._http_with_headers("GET", "/user", token)
         if not isinstance(info, dict) or not info:
             raise RuntimeError(f"{self._card.name} token verify: empty user info")
-        return info
+        return info, headers
+
+    def verify_token(self, token: str) -> dict:
+        return self.verify_token_with_headers(token)[0]
 
     def resolve_repo_token(self, repo_key: str) -> str:
         """仓库 token 统一读链（2026-11-13 if/else 收口，基类能力）：

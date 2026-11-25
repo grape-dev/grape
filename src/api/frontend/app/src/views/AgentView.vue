@@ -35,14 +35,11 @@
       <div class="ag__st">
         <div class="v">{{ totalEvents }}</div>
         <div class="l">{{ t('agents.event.total') }}</div>
+        <div class="s">{{ t('agents.event.raw_total', { n: rawTotal }) }}</div>
       </div>
-      <div class="ag__st">
-        <div class="v">{{ completed }}</div>
-        <div class="l">{{ t('agents.event.completed') }}</div>
-      </div>
-      <div class="ag__st">
-        <div class="v">{{ running }}</div>
-        <div class="l">{{ t('agents.event.running') }}</div>
+      <div v-for="card in statusCards" :key="card.key" class="ag__st">
+        <div class="v">{{ card.count }}</div>
+        <div class="l">{{ t('agents.event.' + card.key) }}</div>
       </div>
     </div>
 
@@ -201,14 +198,24 @@ const m = computed(function () {
 const es = computed(function () {
   return m.value.event_stats || {}
 })
-const completed = computed(function () {
-  return es.value.completed || 0
+// Issue #4240：状态集合单一来源（与后端 EVENT_STATUSES 对齐），驱动统计卡与总量
+const EVENT_STATUSES = ['pending', 'completed', 'running', 'failed', 'cancelled']
+const statusCards = computed(function () {
+  return EVENT_STATUSES.map(function (s) {
+    return { key: s, count: es.value[s] || 0 }
+  })
 })
-const running = computed(function () {
-  return es.value.running || 0
-})
+// Issue #4240：总量取五状态之和，保证状态卡数字加总等于总量
 const totalEvents = computed(function () {
-  return m.value.total_events || 0
+  return statusCards.value.reduce(function (sum, c) {
+    return sum + c.count
+  }, 0)
+})
+// Issue #4240：原始总数（不受 keyword 影响）；缺省/不可用时回退状态之和
+const rawTotal = computed(function () {
+  const raw = m.value.total_events_raw
+  if (raw === undefined || raw === null) return totalEvents.value
+  return raw || 0
 })
 const highlightId = computed(function () {
   return props.data.highlight_issue_id || ''
@@ -427,6 +434,7 @@ onMounted(function () {
 }
 .ag__stats {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--s-2);
   margin: var(--s-4) 0;
 }
@@ -447,6 +455,12 @@ onMounted(function () {
 .ag__st .l {
   font-size: 10px;
   color: var(--c-text-2);
+}
+.ag__st .s {
+  font-size: 9px;
+  color: var(--c-text-3);
+  margin-top: 2px;
+  white-space: nowrap;
 }
 .ag__evt-head {
   display: flex;

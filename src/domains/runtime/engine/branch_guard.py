@@ -29,6 +29,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import contextlib
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -58,15 +59,30 @@ _guard_issue_sink: contextvars.ContextVar = contextvars.ContextVar(
     "branch_guard_issue_sink", default=None)
 
 
+def _safe_debug(message: str) -> None:
+    """写 debug 明细；日志后端异常不得影响守卫主流程（Issue #2923）。
+
+    显式返回而非 ``pass``：日志写入失败时直接返回，不改变调用方的 fail-open
+    语义，也不触发静默 except ratchet。
+    """
+    try:
+        log.debug(message)
+    except Exception:
+        return
+
+
 def _guard_stage_failed(stage: str, message: str) -> None:
-    """记录单点守卫异常：钩子收集器在场时仅入集合 + debug；否则照常 warning。"""
+    """记录单点守卫异常：钩子内降 debug，服务端 preflight 维持 warning。
+
+    Issue #2923：钩子作用域（收集器在场）只保留 ``stage``，明细写 debug，最终由
+    ``hook_main`` 统一输出一条可读中文结论（``_emit_fail_open_alert``）；无收集器
+    路径（服务端 ``preflight_push`` 等，没有统一聚合输出）仍按原有 WARNING 语义
+    记录，避免服务端异常完全不可见。
+    """
+    _safe_debug(message)
     sink = _guard_issue_sink.get()
     if sink is not None:
-        sink.append({"stage": stage, "error": message})
-        try:
-            log.debug(message)
-        except Exception:
-            return
+        sink.append({"stage": stage})
         return
     try:
         log.warning(message)
@@ -94,15 +110,17 @@ LEASE_LOCK_MODULE = "src.kernel.lock"
 # 告警单行含 --no-verify 指引（Issue #2933）。
 # 2028-06：并入 #2292 修复指引（HOOK_REPAIR_HINT：重装/升级 worker 包），
 # 模板文案变化必须递增版本号，否则存量 worktree 永不升级。
-# 2028-07（Issue #3579）：去掉安装时固化的解释器/模块绝对路径，改运行时解析；
-# 存量钩子在 ensure_issue_worktree 时按本版本重写升级。
+# 2028-07：Issue #2923 顶层兜底不再向 stderr 打印原始异常 repr（去噪），
+# 依赖自检返回值仅含模块名；模板文案变化必须递增版本号。
 # 2028-08（Issue #3579 QA 复审 Required/Optional）：加载优先级反转为
 # 「部署态守卫模块优先，worktree 兜底」——安装时记录守卫模块稳定来源根
 # （# hook-module-root:，issue 工作树内安装不记录），运行时按
 # <module_root>/<rel> → <push_root>/<rel> → 部署态包导入（导入前移除
 # sys.path 的 ''/cwd，避免 -c 模式下又解析回 worktree 同一棵树）；
 # 解释器解析与 worker 同源（GRAPE_PYTHON → VIRTUAL_ENV → push 树 .venv → PATH）。
-HOOK_TEMPLATE_VERSION = "2028-08"
+# 2028-09（Issue #2923 rebase）：#3579 运行时解析模板（_hook_runtime_entry_code）
+# 并入 #2923 去噪语义——兜底输出不再 %r 打印原始异常；模板文案变化必须递增版本号。
+HOOK_TEMPLATE_VERSION = "2028-09"
 HOOK_VERSION_LINE = f"# hook-template-version: {HOOK_TEMPLATE_VERSION}"
 
 # Issue #3579：钩子只记录仓库相对模块路径，运行时由当前 worktree 顶层解析。
@@ -119,6 +137,8 @@ _ISSUE_WORKTREE_PATH_RE = re.compile(r"(?:^|/)issues/\d+/[^/]+$")
 # Issue #2292（同 #2147）：lock 随 #2010 布局收敛到 ``src.kernel.lock``，部署树不再保证
 # 顶层 ``src/lock.py``（现存别名仅由 ``src/__init__.py`` 一跳解析）。自检必须直接校验
 # canonical 路径，否则真缺模块时自检恒通过、租约处才抛 ImportError。
+# Issue #3414：自检依赖保持 canonical 路径（旧 ``src.lock`` 别名依赖部署树
+# src/__init__.py 垫片保持最新，过期部署树会在 pre-push 钩子抛 ImportError）。
 HOOK_DEP_MODULES = ("src.kernel.lock", "src.kernel.session_manager")
 # Issue #2292：fail-open 告警必须带可执行修复动作。此前只打印异常 repr，Agent 只能
 # 手工 ``--no-verify`` 绕行并丢失租约/漂移校验，且每回合重复踩同一个包缺陷。
@@ -380,7 +400,7 @@ def _lease_holder(task_id: str) -> str | None:
     """
     if not task_id:
         return None
-    _lock = _lock_module(quiet=True)
+    _lock = _lock_module(quiet=True)  # Issue #3414: canonical src.kernel.lock via fail-open convergence point
     if _lock is None:
         return None
     return f"{task_id}:{_lock._holder}"
@@ -404,7 +424,7 @@ def acquire_branch_lease(repo_key: str, head_branch: str,
     if not repo_key or not head_branch:
         return {"ok": False, "reason": "invalid_target",
                 "message": "分支租约参数缺失（repo_key/head_branch）"}
-    _lock = _lock_module()
+    _lock = _lock_module()  # Issue #3414: canonical src.kernel.lock via fail-open convergence point
     key = lease_key(repo_key, head_branch)
     if _lock is None:
         # Issue #2706：lock 模块不可用属守卫自身异常——fail-open 按无租约放行
@@ -445,7 +465,7 @@ def release_branch_lease(repo_key: str, head_branch: str, task_id: str = "") -> 
     不向上抛——否则 ``_hook_main`` 的 finally 会把真实拦截的 return 1 顶掉
     （#2028 教训）。
     """
-    _lock = _lock_module()
+    _lock = _lock_module()  # Issue #3414: canonical src.kernel.lock via fail-open convergence point
     if _lock is None:
         return
     _lock.release_lock(lease_key(repo_key, head_branch), holder=_lease_holder(task_id))
@@ -609,6 +629,189 @@ def check_push_allowed(repo_key: str, head_branch: str, *, remote_sha: str = "",
             "expected_updated_at": state_row.get("updated_at", ""),
             "pending_expected_sha": state_row.get("pending_expected_sha", ""),
             "pending_prev_sha": state_row.get("pending_prev_sha", "")}
+
+
+# ===================== Issue #3386：GitHub workflow scope 推送预检 =====================
+#
+# 背景：GitHub 对「改动 .github/workflows/**」的 push 强制要求 token 具备 workflow
+# scope，否则远端直接 403/rejected。等推送失败再暴露成本高，因此在 pre-push 阶段
+# （真正传输之前）做一次本地能力判定：
+#   - 只拦 github 且本次 diff 命中 .github/workflows/**；
+#   - 显式能力位 True → 放行；显式 False → 阻断并给修复指引；
+#   - scope 未知（无 X-OAuth-Scopes 头 / 探测失败）→ fail-open + 提示，不误判阻断；
+#   - 仅当 scope 明确缺少 workflow 时阻断。
+
+WORKFLOW_PREFIX = ".github/workflows/"
+
+
+def _env_seconds(name: str, default: float) -> float:
+    """可选秒级超时环境变量：缺省/非法回退默认值并显式告警（fail-open 语义不变）。"""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0.05, float(raw))
+    except ValueError as e:
+        with contextlib.suppress(Exception):
+            log.debug(f"invalid {name} {raw!r}, fallback to {default}: {e}")
+        return default
+
+
+# workflow 预检的 git 子进程超时：rev-list/diff 在万级文件仓库仍需秒级，
+# 15s（短查询）与 30s（rev-list --not --remotes）为量级估算，无 spec 数值来源，
+# 按 L2 登记为待测量项；可用下面两个 env 覆盖。
+_WORKFLOW_GIT_TIMEOUT = _env_seconds("GRAPE_WORKFLOW_GIT_TIMEOUT", 15)
+_WORKFLOW_GIT_LONG_TIMEOUT = _env_seconds("GRAPE_WORKFLOW_GIT_LONG_TIMEOUT", 30)
+
+
+def decide_workflow_scope_push(provider: str, workflow_files: list,
+                               capability, scopes) -> dict:
+    """纯判定：给定平台/变更文件/显式能力位/探测到的 scope，返回是否允许推送。"""
+    files = [
+        str(f).replace("\\", "/")
+        for f in (workflow_files or [])
+        if str(f).replace("\\", "/").startswith(WORKFLOW_PREFIX)
+    ]
+    if provider != "github" or not files:
+        return {"allowed": True, "reason": "ok", "message": ""}
+    if capability is True:
+        return {"allowed": True, "reason": "ok", "message": ""}
+    if capability is False:
+        return {
+            "allowed": False,
+            "reason": "workflow_scope_missing",
+            "message": (
+                f"本次改动包含 {len(files)} 个 .github/workflows 文件，但当前 GitHub "
+                "凭据被标记为缺少 workflow 权限，推送会被远端拒绝。请重新创建 PAT 并勾选 "
+                "workflow（及 repo）权限后重新绑定；GitHub App token 需在 App 安装配置中"
+                "开启 Workflows 写权限。"
+            ),
+            "workflow_files": files,
+        }
+    if scopes is None:
+        return {
+            "allowed": True,
+            "reason": "workflow_scope_unknown",
+            "message": (
+                "无法确认 GitHub Token 是否具备 workflow scope（X-OAuth-Scopes 缺失，"
+                "常见于 fine-grained token / App token）；本次放行，若远端拒绝请改用"
+                "勾选 workflow 的 classic PAT。"
+            ),
+            "workflow_files": files,
+        }
+    if "workflow" in scopes:
+        return {"allowed": True, "reason": "ok", "message": ""}
+    return {
+        "allowed": False,
+        "reason": "workflow_scope_missing",
+        "message": (
+            f"本次改动包含 {len(files)} 个 .github/workflows 文件，但 GitHub Token 的 "
+            "X-OAuth-Scopes 不含 workflow，推送会被远端拒绝。请重新创建 PAT 并勾选 "
+            "workflow（及 repo）权限后重新绑定。"
+        ),
+        "workflow_files": files,
+    }
+
+
+def _workflow_files_changed(wt_dir: str, base_sha: str, local_sha: str) -> list[str]:
+    """取 base_sha..local_sha 之间变更的工作流文件（失败返回空=不阻断）。
+
+    base_sha 为空（新分支首次推送）时依次尝试 origin/HEAD、枚举所有未推送提交
+    （rev-list --not --remotes=origin 逐提交 diff-tree）——只退回 local_sha^ 会
+    漏判多提交新分支中早先提交的 workflow 改动（Issue #3386 复审）。
+    """
+    if not local_sha:
+        return []
+    try:
+        from src.domains.runtime.engine.repogit import _run_git
+        base = str(base_sha or "").strip()
+        if not base:
+            r_sym = _run_git(
+                ["-C", wt_dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                timeout=_WORKFLOW_GIT_TIMEOUT)
+            if r_sym is not None and r_sym.returncode == 0 and (r_sym.stdout or "").strip():
+                base = (r_sym.stdout or "").strip()
+        if not base:
+            # origin/HEAD 不可用：枚举所有未推送提交，逐提交收集 workflow 改动
+            r_rev = _run_git(["-C", wt_dir, "rev-list", local_sha,
+                              "--not", "--remotes=origin"], timeout=_WORKFLOW_GIT_LONG_TIMEOUT)
+            if r_rev is None or r_rev.returncode != 0:
+                return []
+            out = []
+            for c in (r_rev.stdout or "").splitlines():
+                c = c.strip()
+                if not c:
+                    continue
+                r_dt = _run_git(["-C", wt_dir, "diff-tree", "--no-commit-id",
+                                 "--name-only", "-r", "--root", c], timeout=_WORKFLOW_GIT_TIMEOUT)
+                if r_dt is None or r_dt.returncode != 0:
+                    continue
+                for line in (r_dt.stdout or "").splitlines():
+                    f = line.strip().replace("\\", "/")
+                    if f.startswith(WORKFLOW_PREFIX):
+                        out.append(f)
+            return sorted(set(out))
+        r = _run_git(["-C", wt_dir, "diff", "--name-only", f"{base}..{local_sha}"],
+                     timeout=_WORKFLOW_GIT_LONG_TIMEOUT)
+        if r is None or r.returncode != 0:
+            return []
+        out = []
+        for line in (r.stdout or "").splitlines():
+            f = line.strip().replace("\\", "/")
+            if f.startswith(WORKFLOW_PREFIX):
+                out.append(f)
+        return sorted(set(out))
+    except Exception as e:
+        with contextlib.suppress(Exception):
+            log.debug(f"workflow files diff failed {wt_dir}: {e}")
+        return []
+
+
+def check_workflow_scope_push(repo_key: str, wt_dir: str, local_sha: str,
+                              remote_sha: str = "", token: str = "",
+                              user_id: str = "") -> dict:
+    """推送前 workflow scope 预检（fail-open：判定所需信息缺失时不阻断）。"""
+    provider = ""
+    try:
+        from src.kernel.repo_key import parse_repo_key
+        provider, _owner, _repo = parse_repo_key(repo_key)
+    except Exception:
+        provider = ""
+    if provider != "github":
+        return {"allowed": True, "reason": "ok", "message": ""}
+    files = _workflow_files_changed(wt_dir, remote_sha, local_sha)
+    if not files:
+        return {"allowed": True, "reason": "ok", "message": ""}
+
+    capability = None
+    try:
+        if str(user_id or "") in ("", "0"):
+            from src.domains.mgmt.public import get_host_user_id
+            user_id = get_host_user_id(repo_key)
+        if str(user_id or "") not in ("", "0"):
+            from src.domains.mgmt.public import credential_workflows_write
+            capability = credential_workflows_write(user_id, provider)
+    except Exception as e:
+        with contextlib.suppress(Exception):
+            log.debug(f"workflow capability read failed {repo_key}: {e}")
+
+    if capability is True:
+        return {"allowed": True, "reason": "ok", "message": ""}
+
+    scopes = None
+    if capability is not False:  # 显式受限无需再探测
+        try:
+            if not token:
+                from src.domains.mgmt.public import get_github_token
+                token = get_github_token(repo_key=repo_key) or ""
+            if token:
+                from src.domains.mgmt.public import github_token_scopes
+                scopes = github_token_scopes(token)
+        except Exception as e:
+            with contextlib.suppress(Exception):
+                log.debug(f"workflow scope probe failed {repo_key}: {e}")
+
+    return decide_workflow_scope_push(provider, files, capability, scopes)
 
 
 def preflight_push(repo_key: str, head_branch: str, token: str = "",
@@ -928,6 +1131,9 @@ def _hook_entry_code(root: str, module_path: str) -> str:
 
     说明：``module_path`` 为显式文件路径，仅供单元测试/诊断内联生成复用；
     生产钩子使用 ``_hook_runtime_entry_code`` 在运行时解析仓库相对路径。
+
+    Issue #2923：兜底输出只给可读中文结论，不再用 ``%r`` 打印原始异常——
+    模块加载期 ``ModuleNotFoundError`` / ImportError 原文会污染任务 stderr。
     """
     return (
         "import sys, importlib.util; "
@@ -940,10 +1146,9 @@ def _hook_entry_code(root: str, module_path: str) -> str:
         "    _m = importlib.util.module_from_spec(_spec); "
         "    _spec.loader.exec_module(_m)\n"
         "    _rc = _m.hook_main()\n"
-        "except Exception as _e:\n"
-        f"    sys.stderr.write('\\n[branch-guard] WARNING 守卫自身异常，已放行本次 push "
-        f"(fail-open): %r [module=%s]；如需跳过本钩子可加 --no-verify\\n' "
-        f"% (_e, {json.dumps(module_path)}))\n"
+"except Exception:\n"
+        "    sys.stderr.write('\\n[branch-guard] WARNING 守卫自身异常，"
+        "已放行本次 push（fail-open）；如需跳过本钩子可加 --no-verify\\n')\n"
         # Issue #2292：同一条 WARNING 通道给出可执行修复动作，避免只留裸异常 repr。
         f"    sys.stderr.write('[branch-guard] WARNING 修复指引: %s\\n' "
         f"% {json.dumps(HOOK_REPAIR_HINT)})\n"
@@ -1000,10 +1205,9 @@ def _hook_runtime_entry_code() -> str:
         "        sys.path[:] = _path\n"
         "        _m = importlib.import_module('src.domains.runtime.engine.branch_guard')\n"
         "    _rc = _m.hook_main()\n"
-        "except Exception as _e:\n"
+        "except Exception:\n"
         "    sys.stderr.write('\\n[branch-guard] WARNING 守卫自身异常，已放行本次 push "
-        "(fail-open): %r [module=%s]；如需跳过本钩子可加 --no-verify\\n' "
-        "% (_e, _module_path or _rel))\n"
+        "（fail-open）；如需跳过本钩子可加 --no-verify\\n')\n"
         "    sys.stderr.write('[branch-guard] WARNING 修复指引: %s\\n' "
         f"% {json.dumps(HOOK_REPAIR_HINT)})\n"
         "    _rc = 0\n"
@@ -1012,29 +1216,36 @@ def _hook_runtime_entry_code() -> str:
 
 
 def _missing_hook_deps() -> list:
-    """钩子依赖自检：返回无法导入的依赖描述列表（空=齐全）。"""
+    """钩子依赖自检：返回无法导入的模块名列表（空=齐全）。
+
+    原始异常文案只写 debug 日志（供排障），返回值仅含模块名，避免经
+    ``_fail_open`` 回流到用户侧 stderr（Issue #2923 AC2/AC3）。
+    """
     missing = []
     for name in HOOK_DEP_MODULES:
         try:
             importlib.import_module(name)
         except Exception as e:
-            missing.append(f"{name} ({e.__class__.__name__}: {e})")
+            missing.append(name)
+            _safe_debug(
+                f"branch guard dependency import failed: {name} "
+                f"({e.__class__.__name__}: {e})")
     return missing
 
 
-def _fail_open(reason: str) -> None:
-    """守卫自身异常/依赖缺失：放行本次 push 并输出可定位告警 + 修复指引。
+def _fail_open(reason: str, user_hint: str = "分支守卫降级运行，推送已放行（fail-open）") -> None:
+    """守卫自身异常/依赖缺失：放行本次 push，stderr 只给可读中文结论 + 修复指引。
 
-    Issue #2292：告警必须能让执行者直接照做（重装/升级 worker 包），否则只看到
-    裸异常时唯一出路是 ``--no-verify``，分支租约/漂移校验全部失效。
+    原始 ``reason`` 仅写日志（任务日志/debug）便于定位，不再原样写入 stderr
+    （Issue #2923 AC2/AC3：缺 lock/session_manager 或模块加载失败时也不泄漏
+    ImportError 原文）；Issue #2292：告警仍带可执行修复动作与 --no-verify 指引。
     """
-    sys.stderr.write(f"\n[branch-guard] WARNING {reason}；守卫已放行本次 push（fail-open）；"
-                     f"如需跳过本钩子可加 --no-verify\n")
-    sys.stderr.write(f"[branch-guard] WARNING 修复指引: {HOOK_REPAIR_HINT}\n")
+    sys.stderr.write(f"\n[branch-guard] WARNING {user_hint}；如需跳过本钩子可加 --no-verify\n")
+    sys.stderr.write(f"[branch-guard] 修复指引: {HOOK_REPAIR_HINT}\n")
     try:
         log.warning(f"branch guard fail-open: {reason}；修复指引: {HOOK_REPAIR_HINT}")
     except Exception:
-        pass
+        return
 
 
 def _hook_not_upgraded(repo_key: str, wt_dir: str, reason: str) -> None:
@@ -1101,8 +1312,8 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
                     # 任一失效即落到下方重写逻辑自愈；全部可用才幂等跳过。
                     if _existing_hook_usable(existing, repo_key):
                         return True
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001 - 探针失败按「不可用」继续重写
+                log.debug(f"existing hook probe failed {repo_key}: {e}")
         # Issue #3579：模板不再固化解释器/模块绝对路径（worktree 回收后 127/导入失败）。
         # Issue #3579 QA 复审：运行时加载优先级反转为「部署态守卫优先，worktree 兜底」。
         # 解释器按 worker 同源顺序运行时解析；模块来源只记录稳定安装根（部署态优先），
@@ -1162,8 +1373,8 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
             f.write("\n".join(lines))
         try:
             os.chmod(hook_path, 0o755)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 - 钩子已写出，权限失败只记日志
+            log.debug(f"chmod branch-guard hook failed {hook_path}: {e}")
         return True
     except Exception as e:
         _hook_not_upgraded(repo_key, wt_dir, f"{e.__class__.__name__}: {e}")
@@ -1171,31 +1382,25 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
 
 
 def _emit_fail_open_alert(repo_key: str, issues: list) -> None:
-    """Issue #2890：把钩子内收集到的守卫异常聚合为唯一一条结构化告警。
+    """把钩子内收集到的守卫异常聚合为唯一一条用户可读中文提示（Issue #2923）。
 
-    缺表等守卫自身异常一律 fail-open 放行；此聚合行是单次 push 的**唯一**结论行，
-    显式带 ``fail_open=true``，避免上层 Agent 把多条单点 WARNING 误判为推送失败。
-    聚合输出本身必须可失败：序列化/stderr 写入异常不得阻断 push。
+    Issue #2890 已把单点 WARNING 收敛为一条聚合告警，但仍把 ``attempts`` 里的
+    原始异常文案（如 ``No module named src.vcs``）写进 stderr，形成误导性噪声。
+    Issue #2923 改为：明细只进 debug 日志，用户侧只输出一条中文结论，保持
+    fail-open 放行语义。输出本身必须可失败：stderr 写入异常不得阻断 push。
     """
     stages = []
     for issue in issues:
         stage = str((issue or {}).get("stage") or "")
         if stage and stage not in stages:
             stages.append(stage)
-    reason = ("branch guard degraded, push allowed (fail-open): "
-              + (", ".join(stages) if stages else "unknown"))
-    payload = {
-        "level": "WARNING",
-        "component": "branch_guard",
-        "event": "branch_guard.fail_open",
-        "message": "branch guard errors aggregated, push allowed (fail-open)",
-        "reason": reason,
-        "repo_key": repo_key,
-        "attempts": issues,
-        "fail_open": True,
-    }
+    if "pr_query" in stages:
+        hint = "分支基线核验暂不可用，推送已放行（fail-open）"
+    else:
+        hint = "分支守卫降级运行，推送已放行（fail-open）"
+    _safe_debug(f"branch guard fail-open stages={stages} repo_key={repo_key}")
     try:
-        sys.stderr.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        sys.stderr.write(f"[branch-guard] {hint}\n")
         sys.stderr.flush()
     except Exception:
         return
@@ -1220,7 +1425,9 @@ def hook_main(argv: list | None = None) -> int:
         except Exception as e:
             # 顶层兜底告警本身已是唯一结论行，避免与聚合行重复输出。
             issues.clear()
-            _fail_open(f"branch guard runtime error {e.__class__.__name__}: {e}")
+            _fail_open(
+                f"branch guard runtime error {e.__class__.__name__}: {e}",
+                "分支守卫运行异常，推送已放行（fail-open）")
             rc = 0
     finally:
         _guard_issue_sink.reset(token)
@@ -1235,8 +1442,11 @@ def hook_main(argv: list | None = None) -> int:
             try:
                 log.warning(f"branch guard errors aggregated (push blocked separately) "
                             f"{repo_key}: {_stages}")
-            except Exception:
-                pass
+            except Exception as e:
+                # logger 自身失败兜底写 stderr（#2933 同口径）：守卫异常明细不能因
+                # 日志通道故障而整体丢失。
+                sys.stderr.write(f"\n[branch-guard] WARNING guard errors aggregated "
+                                 f"{repo_key}: {_stages} ({e.__class__.__name__}: {e})\n")
     return rc
 
 
@@ -1295,7 +1505,9 @@ def _hook_main(argv: list | None = None) -> int:
     # config 链，自检的 import 开销只在确有分支要判定时才支付（Issue #2028 复审）。
     missing = _missing_hook_deps()
     if missing:
-        _fail_open("branch guard dependency missing: " + "; ".join(missing))
+        _fail_open(
+            "branch guard dependency missing: " + "; ".join(missing),
+            "分支守卫依赖缺失，推送已放行（fail-open）")
         return 0
 
     held: list[str] = []
@@ -1315,6 +1527,22 @@ def _hook_main(argv: list | None = None) -> int:
                 return 1
             held.append(pushed)
         for pushed, local_sha, remote_sha in refs:
+            # Issue #3386：涉及 .github/workflows/** 的 GitHub 推送在真正传输前先做
+            # workflow scope 预检，避免远端 403/rejected 后才发现。守卫自身异常 fail-open。
+            try:
+                _wf = check_workflow_scope_push(
+                    repo_key, repo_dir or os.getcwd(), local_sha, remote_sha=remote_sha)
+                if not _wf.get("allowed"):
+                    _block(f"workflow scope blocked push {repo_key}:{pushed}: "
+                           f"{_wf.get('reason')}",
+                           _wf.get("message") or "workflow scope missing")
+                    return 1
+                # Spec：未知 scope 仅 fail-open 放行不够——必须可见提示（不阻断）
+                _advise_workflow_scope_unknown(_wf, repo_key, pushed)
+            except Exception as _wf_e:
+                _guard_stage_failed(
+                    "workflow_scope",
+                    f"branch guard workflow scope check failed {repo_key}:{pushed}: {_wf_e}")
             # Issue #2314 缺口 ②：陈旧 expected 在这里按远端实际值先验收敛。
             expected = reconcile_pending(repo_key, pushed, remote_sha, repo_dir=repo_dir)
             pr = _fetch_pr_state_via_grape(repo_key, pushed)
@@ -1350,21 +1578,37 @@ def _hook_main(argv: list | None = None) -> int:
                 # Issue #2028：释放租约的 DB 异常不得覆盖待返回的退出码——真实拦截
                 # （return 1）若被 finally 异常顶掉，会被 hook_main 的 fail-open 兜底
                 # 翻转成放行。这里只告警，不改变既有判定结果。
-                try:
+                with contextlib.suppress(Exception):
                     log.warning(f"branch guard release lease failed {repo_key}:{pushed}: {e}")
-                except Exception:
-                    pass
                 sys.stderr.write(f"\n[branch-guard] WARNING release lease failed "
                                  f"{pushed}: {e}\n")
 
 
 def _block(log_message: str, user_message: str) -> None:
     """阻断提示双通道：git push stderr（用户可见）+ 任务日志（结构化可追溯）。"""
-    try:
+    with contextlib.suppress(Exception):
         log.warning(log_message)
-    except Exception:
-        pass
     sys.stderr.write(f"\n[branch-guard] {user_message}\n")
+
+
+def _warn(log_message: str, user_message: str) -> None:
+    """非阻断告警双通道：stderr 提示 + 任务日志，不改变放行判定（fail-open 提示用）。"""
+    with contextlib.suppress(Exception):
+        log.warning(log_message)
+    sys.stderr.write(f"\n[branch-guard] WARNING {user_message}\n")
+
+
+def _advise_workflow_scope_unknown(verdict: dict, repo_key: str, pushed: str) -> None:
+    """Issue #3386：workflow scope 未知时放行但不静默（Spec：fail-open 仅提示）。
+
+    stderr / 任务日志双通道输出告警文案；判定为其它结果（含明确缺失已阻断）不做任何事。
+    """
+    if not verdict or verdict.get("reason") != "workflow_scope_unknown":
+        return
+    _warn(f"workflow scope unknown push allowed {repo_key}:{pushed}",
+          verdict.get("message") or
+          "无法确认 GitHub Token 是否具备 workflow scope，本次放行；"
+          "若远端拒绝请改用勾选 workflow 的 classic PAT")
 
 
 if __name__ == "__main__":

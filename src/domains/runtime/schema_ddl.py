@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS events (
     report_missing INTEGER DEFAULT 0,
     triggered_by TEXT DEFAULT '',
     cascade_task_status TEXT DEFAULT '',
-    cascade_prev_event_status TEXT DEFAULT ''
+    cascade_prev_event_status TEXT DEFAULT '',
+    failure_info TEXT DEFAULT ''
 )
 """
 
@@ -327,6 +328,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     engine_uid         VARCHAR(36) DEFAULT NULL,  -- Issue #646: runtime_id 的 uid 引用（孤儿/历史置 NULL）
     engine_name_snapshot TEXT DEFAULT '',         -- Issue #646: 引擎展示名快照（引擎删除后历史可读）
     pool_engine_source TEXT DEFAULT '',           -- pool_engine_ids 来源：scene=用户场景绑定 / auto=自动选择 / directed=engine_config.runtime_id 定向锁定（降级判别，local-claimer 设计 + Issue #2791）
+    engine_priorities  TEXT DEFAULT '',           -- Issue #3564：实例绑定优先级映射（JSON {"<engine_id>":1..9}，1 最高；空=未配置=旧行为）
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/pending_self_report/completed/failed/timeout_failed/cancelled（Issue #537 新增 pending_self_report 中间态 + timeout_failed 终态）
     exit_code         INTEGER DEFAULT NULL,
     result_text       MEDIUMTEXT DEFAULT '',

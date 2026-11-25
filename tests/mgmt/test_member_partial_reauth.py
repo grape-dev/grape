@@ -51,17 +51,19 @@ def client():
 
     from src.domains.mgmt.auth import grape_account_db as acct_db
 
-    def _fake_identities(uid):
-        return [{"provider": "gitcode"}, {"provider": "github"}]
+    def _fake_links(uid):
+        return [{"provider": "gitcode", "token_usable": True},
+                {"provider": "github", "token_usable": True}]
 
     def _fake_get_user_repos(uid):
         return list(CACHED)
 
     def _fake_get_synced_at(uid):
-        return None  # 缓存无时间 → 视为过期 → 走实时拉取
+        return None  # 缓存无时间 → 视为过期 → stale-while-revalidate 后台刷新
 
-    def _fake_save(uid, repos):
+    def _fake_save(uid, repos, providers=None):
         _saved_repos["repos"] = list(repos)
+        _saved_repos["providers"] = list(providers) if providers is not None else None
         return True
 
     orig_get = user_db.get_user_repos
@@ -72,17 +74,25 @@ def client():
     user_db.get_user_repos_synced_at = _fake_get_synced_at
     user_db.save_user_repos = _fake_save
 
-    orig_acct_identities = acct_db.get_user_identities
-    acct_db.get_user_identities = _fake_identities
+    orig_linked = acct_db.list_platform_links
+    acct_db.list_platform_links = _fake_links
+
+    orig_probe = repos_route._start_stale_probe_async
+    repos_route._start_stale_probe_async = lambda *a, **kw: None
+    with repos_route._REFRESH_GUARD:
+        repos_route._REFRESH_INFLIGHT.clear()
 
     app.dependency_overrides[get_current_user] = lambda: USER
     app.dependency_overrides[get_current_user_or_api_key] = lambda: USER
     yield TestClient(app)
     app.dependency_overrides.clear()
-    acct_db.get_user_identities = orig_acct_identities
+    acct_db.list_platform_links = orig_linked
+    repos_route._start_stale_probe_async = orig_probe
     user_db.get_user_repos = orig_get
     user_db.get_user_repos_synced_at = orig_synced
     user_db.save_user_repos = orig_save
+    with repos_route._REFRESH_GUARD:
+        repos_route._REFRESH_INFLIGHT.clear()
     _saved_repos.clear()
 
 
@@ -103,19 +113,21 @@ def test_member_partial_reauth_saves_cache(client, monkeypatch):
     r = client.get("/api/repos/member")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body.get("_partial") is True
-    assert body.get("_reauth_provider") == "github"
+    # Issue #3356: 过期缓存先返回旧值（stale-while-revalidate），刷新在后台进行
+    assert body.get("_cached") is True
+    assert body.get("_stale") is True
+    # 刷新期间旧列表仍然正常返回
+    assert {x["repo_key"] for x in body["repos"]} == {
+        "gitcode:me/old1", "gitcode:me/old2", "github:me/gh1"}
 
-    keys = {x["repo_key"] for x in body["repos"]}
-    # 大厅看到实时 gitcode（含新仓库）+ github 旧缓存补齐
-    assert "gitcode:me/new1" in keys
-    assert "gitcode:me/old1" in keys
-    assert "github:me/gh1" in keys
+    key = repos_route._member_refresh_key(UID, ["gitcode", "github"])
+    assert repos_route._wait_member_refresh(key, 5), "后台刷新未完成"
 
-    # 核心：落库了，且含新仓库和失败平台的旧缓存
+    # 核心：后台刷新落库，且含新仓库和失败平台的旧缓存
     saved = _saved_repos.get("repos")
     assert saved is not None, "partial 分支未调用 save_user_repos（旧bug复现）"
     saved_keys = {x["repo_key"] for x in saved}
     assert "gitcode:me/new1" in saved_keys, "新仓库未落库 → check_repo_access 会 403"
     assert "github:me/gh1" in saved_keys, "失败平台旧缓存被覆盖丢失"
     assert len(saved) == 4, saved_keys  # old1 old2 new1 gh1 去重后 4 个
+    assert _saved_repos.get("providers") == ["gitcode"], "只替换成功平台"

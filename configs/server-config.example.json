@@ -13,5 +13,6 @@
   "task_vcs_api_url": "https://vcs.grape.example.com:8081",
   "task_issue_api_url": "https://issue.grape.example.com:8081",
   "task_a2a_api_url": "https://a2a.grape.example.com:8082",
-  "task_gateway_base_url": ""
+  "task_gateway_base_url": "",
+  "_comment_issue_3766": "Issue #3766 任务业务 API 注入守护：注入 task_business_api_url 前会探测 /api/health → /openapi.json → /api/issues/mine，确认命中业务 API（301/302/404 等 admin 前端接管签名判为不可用）并自动回退到可用候选；GRAPE_BUSINESS_API_GUARD=warn（默认，回退+error 告警）、strict（无可用候选时阻断注入）、off（保留 Issue #1731 旧行为）。task_business_api_url 必须指向业务 API，不能填 admin 前端域名。"
 }

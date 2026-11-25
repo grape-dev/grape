@@ -16,6 +16,8 @@ readiness 标记，把 worker 打成永续 not_ready（标记只在 worker 启�
 import os
 import time
 
+from src.kernel.config import log
+
 DEFAULT_DRAIN_FILE = "/tmp/grape-worker-draining"
 DEFAULT_MAIN_DRAIN_FILE = "/tmp/grape-main-webhook-draining"
 _DEFAULT_DRAIN_SECONDS = 5.0
@@ -43,17 +45,17 @@ def _write_marker(path: str) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(str(time.time()))
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"drain-state: write marker failed {path}: {e}")
 
 
 def _remove_marker(path: str) -> None:
     try:
         os.remove(path)
     except FileNotFoundError:
-        pass
-    except Exception:
-        pass
+        log.debug(f"drain-state: marker absent on clear {path}")
+    except Exception as e:
+        log.warning(f"drain-state: remove marker failed {path}: {e}")
 
 
 def begin_drain(path: "str | None" = None) -> None:

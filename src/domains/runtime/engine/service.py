@@ -133,6 +133,16 @@ def _get_task_token(task: dict) -> str:
 # Issue #1938：级联收敛补偿的归因模型（枚举/终态映射/文案渲染/展示判定）
 from src.domains.runtime.engine import cascade as _cascade
 
+# Issue #3564：优先级默认档常量唯一真源 = pipeline_config（与写侧校验同源）。
+# 模块级导入（QA #3564 复审：去掉 _claim_priority_gate 内逐次 try/except 兜底+静默吞 import）；
+# 导入失败时留痕并退回字面量 9，保证认领主路径可用性不受配置模块加载异常影响。
+try:
+    from src.domains.mgmt.pipeline_config import ENGINE_PRIORITY_DEFAULT
+except Exception as _prio_const_err:  # pragma: no cover - 防御性兜底，须留痕
+    log.warning(f"engine service: import ENGINE_PRIORITY_DEFAULT failed: {_prio_const_err}, "
+                f"fallback to literal 9")
+    ENGINE_PRIORITY_DEFAULT = 9
+
 # R16.2.1: 统一 error_code → message 映射（task errors / dashboard 展示用）
 _R16_ERROR_MESSAGES = {
     "TOKEN_EXPIRED": "user token expired or revoked",
@@ -648,7 +658,7 @@ _TASK_COLUMNS = (
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
     "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, pool_engine_ids, "
     "pool_engine_uids, pool_selector, engine_uid, engine_name_snapshot, "
-    "pool_engine_source, "
+    "pool_engine_source, engine_priorities, "
     "status, stream_ended, self_reported, pending_since, "
     "exit_code, result_text, errors, stderr, "
     "usage_json, started_at, completed_at, created_at, "
@@ -1539,7 +1549,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
                  project_info_file_urls=None, knowledge_file_urls=None,
                  pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids="",
-                 pool_engine_source="", pool_selector=""):
+                 pool_engine_source="", pool_selector="", engine_priorities=""):
     """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。
 
     引擎池（agent-cluster-design.md §4.1/§4.2）：runtime_id=0 + pool_agent_type 非空
@@ -1739,6 +1749,18 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             _server_url = get_worker_connect_url()
         except Exception:
             pass
+    # Issue #3564：实例绑定优先级映射随任务落库（空=未配置=旧行为）。
+    # 调用方未显式传时，按任务 env 中的场景（_inject_scene_env 已注入）解析节点旁挂
+    # engine_priorities；仅 pool_engine_ids 非空（确有场景绑定）时才需要。
+    if not engine_priorities and pool_engine_ids and agent_type:
+        try:
+            _prio_scene = env.get("GRAPE_SCENE_ID") or ""
+            if _prio_scene:
+                from src.domains.runtime.engine.engine_select import get_scene_engine_priorities
+                engine_priorities = get_scene_engine_priorities(
+                    _prio_scene, agent_type, repo_key=repo_key, user_id=user_id)
+        except Exception as _prio_e:
+            log.warning(f"enqueue: resolve engine priorities failed for {repo_key}/{agent_type}: {_prio_e}")
     # MR-2（2026-11-05）：任务生命周期根 span "task.enqueue" + W3C trace_context 存行。
     # OTel 未启用/失败 → _task_trace_context="" 且无 span，业务零影响。
     _task_span = None
@@ -1828,6 +1850,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                 # 未迁移旧库（无列）经 _avail 过滤自然降级）
                 "pool_selector": pool_selector or "",
                 "pool_engine_source": pool_engine_source or "",
+                "engine_priorities": engine_priorities or "",
                 "status": "queued", "exit_code": None, "result_text": "",
                 "errors": (json.dumps([_token_diag], ensure_ascii=False)
                            if _token_diag else ""),
@@ -2492,6 +2515,178 @@ def _has_verified_executor(probe_status: str, worker_version: str,
     return bool(worker_version) or _ps not in ("pending",)
 
 
+def _normalize_task_priority_map(raw) -> dict[int, int]:
+    """Issue #3564：任务优先级映射归一化（{engine_id: 1..9}，1 最高）。
+
+    归一化唯一真源 = src.domains.mgmt.pipeline_config.normalize_engine_priorities
+    （与写侧校验 / copy_scene 清洗同一把尺子）；此处仅负责 JSON 字符串入参解析、
+    键转 int（认领侧按 int engine_id 比对）与正 id 过滤。
+    """
+    if not raw:
+        return {}
+    data = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return {}
+    try:
+        from src.api.pipeline_config import normalize_engine_priorities
+        _canon = normalize_engine_priorities(data)
+    except Exception:
+        return {}
+    out: dict[int, int] = {}
+    for _k, _p in _canon.items():
+        try:
+            _eid = int(_k)
+        except (TypeError, ValueError):
+            log.warning("normalize_task_priority_map: skip non-numeric engine id %r", _k)
+            continue
+        if _eid > 0:
+            out[_eid] = _p
+    return out
+
+
+def _task_queued_age_seconds(created_at) -> float:
+    """queued 任务已等待秒数；无法解析返回 0（不触发超时旁路）。"""
+    if not created_at:
+        return 0
+    try:
+        _s = str(created_at).strip().replace("Z", "+00:00")
+        _dt = datetime.fromisoformat(_s)
+        if _dt.tzinfo is None:
+            _dt = _dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - _dt).total_seconds())
+    except Exception:
+        return 0
+
+
+def _engine_claimable_now(cursor, engine_id: int, task_tag: str, task_repo: str,
+                          task_uid: int) -> bool:
+    """Issue #3564 优先级闸尺子：高优引擎当前可接取（物理可达 + 健康分达标 + 未满载）。
+
+    与 claim_by_tag 认领守卫链同口径（QA #3564：不可接取的高优引擎不得压制低优）：
+    - 幽灵执行器闸复用 _has_verified_executor（与 claim_by_tag 认领前同口径：
+      probe_status=pending 且无 worker_version 的远端引擎、spawn_failed、未安装/不健康
+      的本机引擎均不构成可接取）；
+    - 可达判定复用 _check_pool_engines_reachable（在线/健康/探活/tag/scope）；
+    - 健康分闸复用 health_scorer.is_healthy(force_refresh=True)（与 claim_by_tag 的
+      低分拦截同一把尺子：现算不读 60s 缓存陈旧分；判定异常时保守视为不可接取）；
+    - 满槽判定复用 _real_active_count >= max_concurrent（与 claim_by_tag 同尺子）。
+    max_concurrent 为空/0 视为不限并发。Lock contract：调用方已持有 db_lock。
+    """
+    # 幽灵执行器闸：与 claim_by_tag（service.py 认领守卫）同口径，pending 无执行器的
+    # 远端引擎不得参与优先级压制（否则池内低优会被压到 120s 超时旁路才可接）。
+    try:
+        cursor.execute("SELECT probe_status, credential_id, installed, healthy "
+                      "FROM agent_runtimes WHERE id=?", (engine_id,))
+        _pv = cursor.fetchone()
+        _probe_status = (_pv[0] or "") if _pv else ""
+        _cred_id = (_pv[1] or 0) if _pv else 0
+        _installed = bool(_pv[2]) if _pv else False
+        _healthy_flag = bool(_pv[3]) if _pv else False
+        _worker_version = ""
+        try:
+            cursor.execute("SELECT worker_version FROM agent_runtimes WHERE id=?", (engine_id,))
+            _wv = cursor.fetchone()
+            _worker_version = (_wv[0] or "") if _wv else ""
+        except Exception:
+            _worker_version = ""
+        if not _has_verified_executor(_probe_status, _worker_version,
+                                       credential_id=_cred_id,
+                                       installed=_installed, healthy=_healthy_flag):
+            return False
+    except Exception:
+        return False
+    try:
+        if not _check_pool_engines_reachable(
+                [engine_id], task_tag or "", task_repo or "", task_user_id=task_uid or 0):
+            return False
+    except Exception:
+        return False
+    try:
+        from src.domains.runtime.engine.health_scorer import is_healthy as _is_engine_healthy
+        if not _is_engine_healthy(engine_id, force_refresh=True):
+            return False
+    except Exception as _he:
+        log.warning(f"claim guard [priority]: health check failed for engine {engine_id}: {_he}, "
+                    f"treat as not claimable")
+        return False
+    try:
+        cursor.execute("SELECT max_concurrent FROM agent_runtimes WHERE id=?", (engine_id,))
+        _row = cursor.fetchone()
+        _mc = (_row[0] if _row else 0) or 0
+        if _mc and _real_active_count(cursor, engine_id) >= _mc:
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _claim_priority_gate(cursor, task_id: str, runtime_id: int) -> tuple[bool, str]:
+    """Issue #3564 认领侧优先级闸（claim_by_tag 守卫链末尾、FIFO 跳过段之前）。
+
+    池内存在 p' < 本机 p 且当前可接取（可达+健康分达标+未满载）的引擎时，跳过该任务继续下一个；
+    否则放行。未配置 engine_priorities（空列）= 旧行为，直接放行且不产生决策日志。
+    未配置优先级的机器按池内最低档（ENGINE_PRIORITY_DEFAULT=9）处理。
+    候选判定限定在任务 pool_engine_ids 与优先级映射的交集内（QA #3564：入队池已按
+    健康过滤，被排除出池的高优引擎不得压制池内低优）；pool_engine_ids 为空（全量
+    广播）维持旧语义——遍历全部映射键。
+    queued 超时（>= _STALE_QUEUED_THRESHOLD）后忽略优先级，防高优可达但从不出手饿死低优。
+
+    Lock contract：调用方（claim_by_tag）已持有 db_lock，判定与认领同临界区。
+    返回 (should_skip, log_message)。
+    """
+    try:
+        if "engine_priorities" not in _table_columns("agent_tasks"):
+            return False, ""
+        cursor.execute(
+            "SELECT engine_priorities, pool_engine_ids, created_at, pool_tag, repo_key, user_id "
+            "FROM agent_tasks WHERE id=?", (task_id,))
+        _row = cursor.fetchone()
+        if not _row:
+            return False, ""
+        pmap = _normalize_task_priority_map(_row[0])
+        if not pmap:
+            return False, ""  # 未配置 → 旧行为（逐字节一致）
+        # 超时兜底：优先级不能无限期压住低优引擎（高优可达但从不出手场景）
+        _age = _task_queued_age_seconds(_row[2])
+        if _age >= _STALE_QUEUED_THRESHOLD:
+            return False, (f"claim guard [priority]: bypass task={task_id} runtime={runtime_id} "
+                           f"queued {int(_age)}s >= {_STALE_QUEUED_THRESHOLD}s, ignore priority")
+        # 候选限定：任务 pool_engine_ids 非空时只看交集（空池=全量广播=旧语义看全部键）
+        _pool_ids: set[int] = set()
+        try:
+            _pool_raw = json.loads(_row[1]) if _row[1] else []
+            if isinstance(_pool_raw, list):
+                _pool_ids = {int(_x) for _x in _pool_raw
+                             if isinstance(_x, (int, str)) and str(_x).strip().isdigit()}
+        except Exception:
+            _pool_ids = set()
+        if _pool_ids:
+            pmap = {eid: p for eid, p in pmap.items() if eid in _pool_ids}
+            if not pmap:
+                return False, ""
+        _task_tag = _row[3] or ""
+        _task_repo = _row[4] or ""
+        _task_uid = _row[5] or 0
+        _own_p = pmap.get(runtime_id, ENGINE_PRIORITY_DEFAULT)
+        for _eid in sorted(pmap, key=lambda _e: (pmap[_e], _e)):
+            _p = pmap[_eid]
+            if _p >= _own_p:
+                continue
+            if _engine_claimable_now(cursor, _eid, _task_tag, _task_repo, _task_uid):
+                return True, (
+                    f"claim guard [priority]: skip task={task_id} for runtime={runtime_id} "
+                    f"(p={_own_p}) — engine {_eid}(p={_p}) reachable and not full")
+        return False, ""
+    except Exception as _e:
+        # 判定异常保守放行（不改变旧派发可用性）；异常留痕便于排障
+        log.warning(f"claim guard [priority]: check failed for task={task_id} runtime={runtime_id}: {_e}")
+        return False, ""
+
+
+
 def claim_by_tag(tag: str, runtime_id: int, expected_task_id=None, expected_event_seq=None) -> dict | None:
     """按标签认领任务 + scope 隔离（event-dispatch-redesign-v2.md §2.4）
 
@@ -2772,6 +2967,16 @@ def claim_by_tag(tag: str, runtime_id: int, expected_task_id=None, expected_even
                             _skip = True
                     except Exception as _he:
                         log.warning(f"claim_by_tag: health check failed for engine {runtime_id}: {_he}, reject this round")
+                        _skip = True
+                if not _skip:
+                    # === 优先级闸（Issue #3564，守卫链末尾 / FIFO 跳过段之前）===
+                    # 池内存在更高优先级且当前可接取（可达+未满载）的引擎 → 跳过本任务，
+                    # 继续尝试下一个；未配置 engine_priorities 的任务直接放行（旧行为）。
+                    # 判定与认领同处 db_lock 临界区，认领仍是下方原子 UPDATE。
+                    _prio_skip, _prio_log = _claim_priority_gate(c, task_id, runtime_id)
+                    if _prio_log:
+                        log.info(_prio_log)
+                    if _prio_skip:
                         _skip = True
                 if not _skip:
                     break  # 当前任务可认领
@@ -3128,7 +3333,7 @@ def _cascade_real_result(cursor, event_seq: int, task_result_text: str = None,
 def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int = None,
                             triggered_by: str = _cascade.TRIGGER_UPDATE_TASK_STATUS,
                             task_status: str = "", task_result_text: str = None,
-                            task_id: str = ""):
+                            task_id: str = "", failure_phase: str = ""):
     """Issue #3927 审查 R1 复审：级联终态写纳入 event_lock(seq)。
 
     与 `update_event_complete`/`update_event_status` 共用同一把事件维度锁，
@@ -3140,13 +3345,14 @@ def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int 
         return _cascade_event_terminal_impl(
             cursor, event_seq, status, exit_code=exit_code,
             triggered_by=triggered_by, task_status=task_status,
-            task_result_text=task_result_text, task_id=task_id)
+            task_result_text=task_result_text, task_id=task_id,
+            failure_phase=failure_phase)
 
 
 def _cascade_event_terminal_impl(cursor, event_seq: int, status: str, exit_code: int = None,
                                  triggered_by: str = _cascade.TRIGGER_UPDATE_TASK_STATUS,
                                  task_status: str = "", task_result_text: str = None,
-                                 task_id: str = ""):
+                                 task_id: str = "", failure_phase: str = ""):
     """Issue #587/#1938: 任务终态级联事件收敛（事务内，幂等，终态保护）。
 
     仅当事件仍处于活跃态（pending/running/dispatched）时同步为任务终态；
@@ -3183,13 +3389,41 @@ def _cascade_event_terminal_impl(cursor, event_seq: int, status: str, exit_code:
                 triggered_by=triggered_by)
             _structured = None
         _now = datetime.now(timezone.utc).isoformat()
+        # Issue #3433：级联收敛同属「超时/孤儿判死」来源，failed 终态须写结构化失败原因，
+        # 否则前端只能走历史降级提示（详见 tests/runtime/test_issue_3433_failure_info.py）。
+        _failure_sql = ""
+        _failure_param = ()
+        if _event_status == "failed":
+            try:
+                from src.api.event_store import _events_column_exists
+                if _events_column_exists(cursor, "failure_info"):
+                    _agent = _runtime = ""
+                    _has_runtime = _events_column_exists(cursor, "runtime")
+                    _meta = cursor.execute(
+                        "SELECT agent_type" + (", runtime" if _has_runtime else "")
+                        + " FROM events WHERE seq=?", (event_seq,)).fetchone()
+                    if _meta:
+                        _agent = str(_meta[0] or "")
+                        _runtime = str(_meta[1] or "") if _has_runtime else ""
+                    from src.domains.runtime.agents.failure_info import (
+                        failure_info_for_cascade, failure_info_json)
+                    _fi = failure_info_for_cascade(
+                        task_status=_task_status, result=_result, exit_code=_event_exit,
+                        phase=failure_phase, agent=_agent, runtime=_runtime)
+                    _failure_sql = ", failure_info=?"
+                    _failure_param = (failure_info_json(_fi),)
+            except Exception as _fe:
+                log.warning(f"_cascade_event_terminal: build failure_info failed "
+                            f"for seq={event_seq}: {_fe}")
         cursor.execute(
             "UPDATE events SET status=?, exit_code=?, completed_at=?, result=?, "
             "structured_output=COALESCE(?, structured_output), "
             "cascade_reason=?, report_missing=1, triggered_by=?, "
-            "cascade_task_status=?, cascade_prev_event_status=? WHERE seq=?",
+            "cascade_task_status=?, cascade_prev_event_status=?"
+            + _failure_sql + " WHERE seq=?",
             (_event_status, _event_exit, _now, _result, _structured,
-             _reason, (triggered_by or ""), _task_status, _prev_event_status, event_seq))
+             _reason, (triggered_by or ""), _task_status, _prev_event_status)
+            + _failure_param + (event_seq,))
         # Issue #587 审查修复：级联收敛须同步释放 event_active_guard（与
         # update_event_status 终态路径语义一致），否则守卫残留只能靠 TTL 30min 兜底。
         # 在同一事务/游标内完成，避免嵌套获取不可重入的 db_lock。
@@ -3212,6 +3446,47 @@ def _cascade_event_terminal_impl(cursor, event_seq: int, status: str, exit_code:
     except Exception as _e:
         log.warning(f"_cascade_event_terminal: failed for event {event_seq} -> {status}: {_e}")
         return False
+
+
+def _recover_orphan_event_terminal(cursor, event_seq: int, *, reason: str, phase: str,
+                                   exit_code: int = 1,
+                                   statuses=("pending", "running")) -> int:
+    """孤儿/超时回收直接判死（Issue #3433）：failed 终态补结构化失败原因。
+
+    与 :func:`_cascade_event_terminal` 区分：后者按任务终态映射收敛（还写 cascade_* 归因），
+    本函数只覆盖扫到无活跃任务支撑、需直接置 failed 的活跃事件；仍在调用方事务/游标内
+    执行，避免嵌套获取不可重入的 db_lock。
+    """
+    _failure_sql = ""
+    _failure_param = ()
+    try:
+        from src.api.event_store import _events_column_exists
+        if _events_column_exists(cursor, "failure_info"):
+            _agent = _runtime = ""
+            _has_runtime = _events_column_exists(cursor, "runtime")
+            _meta = cursor.execute(
+                "SELECT agent_type" + (", runtime" if _has_runtime else "")
+                + " FROM events WHERE seq=?", (event_seq,)).fetchone()
+            if _meta:
+                _agent = str(_meta[0] or "")
+                _runtime = str(_meta[1] or "") if _has_runtime else ""
+            from src.domains.runtime.agents.failure_info import (
+                failure_info_for_cascade, failure_info_json)
+            _fi = failure_info_for_cascade(
+                result=reason, exit_code=exit_code, phase=phase,
+                agent=_agent, runtime=_runtime)
+            _failure_sql = ", failure_info=?"
+            _failure_param = (failure_info_json(_fi),)
+    except Exception as _fe:
+        log.warning(f"_recover_orphan_event_terminal: build failure_info failed "
+                    f"for seq={event_seq}: {_fe}")
+    _placeholders = ",".join("?" for _ in statuses)
+    _now = datetime.now(timezone.utc).isoformat()
+    cur = cursor.execute(
+        "UPDATE events SET status='failed', exit_code=?, completed_at=?, result=?"
+        + _failure_sql + f" WHERE seq=? AND status IN ({_placeholders})",
+        (exit_code, _now, reason) + _failure_param + (event_seq, *statuses))
+    return getattr(cur, "rowcount", 0) or 0
 
 
 def mark_task_takeover(task_id: str) -> dict:
@@ -4621,11 +4896,17 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
             if _premature:
                 # 事件列表/详情直接看到「没走到收尾」，不必翻完整 result_text
                 _result_show = f"⚠️ {_pm} 疑似提前结束（未走到收尾）：{_result_show}"
+            _failure_info = None
+            if status == "failed":
+                from src.domains.runtime.agents.failure_info import failure_info_for_exit
+                _failure_info = failure_info_for_exit(
+                    None, result_text or _result_show, exit_code)
             update_event_complete(task["event_seq"], status, exit_code=exit_code,
                                   duration=duration,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
                                   result=_result_show,
                                   structured_output=output or None,
+                                  failure_info=_failure_info,
                                   revive_from_timeout_failed=(
                                       revive_from_timeout_failed and status == "completed"),
                                   task_id=task_id)
@@ -4652,8 +4933,8 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
     if exit_code == 0 and task:
         try:
             _reset_baseline_failure(task.get("issue_id"))
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug(f"complete_task: reset baseline failure chain skipped: {e}")
     # 新会话续接指针回写——仅写回 Issue 级执行会话
     # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回写。
     # 引擎守卫（B2）：usage.engine 为本次执行引擎（worker done 事件带上），回写时
@@ -5476,10 +5757,14 @@ def fail_task(task_id, error, exit_code=-1):
                                    exit_code, None, None,
                                    tokens=[_get_task_token(task)],
                                    issue_num_hint=task.get("issue_id") or "")
-            update_event_complete(task["event_seq"], "failed", exit_code=exit_code,
-                                  completed_at=datetime.now(timezone.utc).isoformat(),
-                                  result=(_result_show or (error or ""))[:200],
-                                  task_id=task_id)
+            from src.domains.runtime.agents.failure_info import failure_info_for_exit
+            _fail_msg = (_result_show or (error or ""))[:200]
+            update_event_complete(
+                task["event_seq"], "failed", exit_code=exit_code,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                result=_fail_msg, task_id=task_id,
+                failure_info=failure_info_for_exit([error] if error else None,
+                                                   _fail_msg, exit_code))
         except Exception as e:
             log.warning(f"fail_task finalize failed: {e}")
     # Issue #403：耗尽判死时 errors 合并而非覆盖——上方 retry 检查已把
@@ -6500,10 +6785,12 @@ def sync_task_session_token(task_id: str, force: bool = False) -> str:
 
                 snapshot_token = str(env.get("GRAPE_SESSION_TOKEN") or "")
                 info = verify_session_token(snapshot_token) if snapshot_token else None
+                from src.kernel.repo_key import same_repo_key as _same_rk_sync
                 token_ok = bool(
                     info
                     and info.get("session_key") == task_id
-                    and info.get("repo_key") == repo_key
+                    and info.get("repo_key")
+                    and _same_rk_sync(info.get("repo_key"), repo_key)
                     and info.get("agent_type") == agent_type
                 )
                 if token_ok and not force:

@@ -492,7 +492,7 @@ class TestFailureSceneLifecycle:
         blocker = tmp_path / "blocker"
         blocker.write_text("not a dir", encoding="utf-8")
         monkeypatch.setattr(repogit, "issue_dir_for",
-                            lambda rk, agent, num: str(blocker / "deep" / f"issue-{num}"))
+                            lambda rk, agent, num, pr_number="": str(blocker / "deep" / f"issue-{num}"))
 
         assert repogit.ensure_issue_worktree(REPO, "coding", "3923") is None
         scene = repogit.worktree_last_failure(RK, issue_num="3923", agent_type="coding")

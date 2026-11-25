@@ -1080,15 +1080,24 @@ async def gitcode_webhook(request: Request):
         log.warning("Webhook: invalid JSON body")
         return JSONResponse(status_code=400, content={"code": 400, "message": "invalid body"})
 
+    # Issue #3397：优先 repository.full_name（VCS 实际路径，大小写权威），
+    # project.path_with_namespace 仅在缺失时回退（webhook 该字段可能被归一为全小写）。
     repo = ""
-    if "project" in payload and isinstance(payload["project"], dict):
-        repo = payload["project"].get("path_with_namespace", "")
-    if not repo and "repository" in payload and isinstance(payload["repository"], dict):
-        repo = payload["repository"].get("full_name", "")
+    if isinstance(payload.get("repository"), dict):
+        repo = payload["repository"].get("full_name", "") or ""
+    if not repo and isinstance(payload.get("project"), dict):
+        repo = payload["project"].get("path_with_namespace", "") or ""
 
     if not repo:
         log.warning("Webhook: could not extract repo from payload")
         return JSONResponse(status_code=400, content={"code": 400, "message": "missing repository"})
+
+    # Issue #3397：按已存登记回填权威大小写，避免全小写路径导致 managed_repos 查不到
+    try:
+        from src.kernel.repo_key import canonicalize_repo_full_name
+        repo = canonicalize_repo_full_name(repo, "gitcode") or repo
+    except Exception as e:
+        log.warning(f"Webhook: canonicalize repo path failed (repo={repo}): {e}")
 
     log.info(f"Webhook: extracted repo={repo}")
 
@@ -1268,7 +1277,8 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
     _raw_session_info = verify_session_token(_auth)
     if _raw_session_info and _raw_session_info.get("repo_key"):
         _session_repo = _raw_session_info["repo_key"]
-        if _session_repo != repo_key:
+        from src.kernel.repo_key import same_repo_key as _same_session_repo
+        if not _same_session_repo(_session_repo, repo_key):
             # 检查 1: 两仓 bot token 相同（同一运维主体）
             _session_bot_token = get_repo_bot_token_no_global(_session_repo) or ""
             if _session_bot_token and _session_bot_token == _expected:
@@ -2416,7 +2426,12 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             from src.domains.mgmt.public import get_managed_repos
             managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
             if repo_key not in managed:
-                raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
+                # Issue #3427：a2a 403 与 token 类错误解耦——此处失败与凭据无关，
+                # 是 user_repos 未关联（未同步/未加入该仓库），文案指向关联动作。
+                raise HTTPException(status_code=403, detail={
+                    "code": 403, "error_code": "REPO_NOT_BOUND_TO_USER",
+                    "message": "当前用户未关联该仓库（user_repos 无关联记录，与凭据无关）："
+                                "请先在仓库列表同步/加入该仓库，或由托管人在仓库成员中添加后再发起 A2A"})
         else:
             # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
             _a2a_session_info = _authorize_a2a(request, repo_key)

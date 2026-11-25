@@ -9,6 +9,7 @@
 - 非末节点（中间节点）完成 → noop:not_last_node
 - 幂等：已 completed 的 issue 再次调用 → noop:terminal
 """
+import json
 import os
 import sys
 from unittest.mock import patch
@@ -57,15 +58,31 @@ def _seed(status="processing", stage="sre"):
     set_issue_stage(_REPO, f"#{_NUM}", stage, stage)
 
 
-def _seed_events(statuses: dict):
+def _seed_events(statuses: dict, issue_id: str = ""):
     """按 agent_type 造事件（每 agent 一条最新事件）。"""
+    _issue_id = issue_id or f"#{_NUM}"
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM events WHERE repo_key=?", (_REPO,))
         for _ag, _st in statuses.items():
             c.execute(
                 "INSERT INTO events (repo_key, issue_id, event_type, agent_type, status) VALUES (?,?,?,?,?)",
-                (_REPO, f"#{_NUM}", "a2a_event", _ag, _st))
+                (_REPO, _issue_id, "a2a_event", _ag, _st))
+        db.commit()
+
+
+def _seed_dedup_leftover(issue_id: str, agent_type: str = "sre"):
+    """造一条去重留痕事件（seq 大于真实事件，携带真实 agent_type 供审计）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO events (repo_key, issue_id, event_type, agent_type, status,"
+            " title, summary, payload, result) VALUES (?,?,?,?,?,?,?,?,?)",
+            (_REPO, issue_id, "issue_comment", agent_type, "skipped",
+             "重复评论已去重", "源评论 id=80001, 原事件 seq=1",
+             json.dumps({"_dedup": {"deduped": True,
+                                    "reason": "duplicate_comment_content"}}),
+             "duplicate_comment_content"))
         db.commit()
 
 
@@ -243,3 +260,47 @@ def test_terminal_compensates_stage_alignment():
         assert _res == "noop:terminal", _res
         _cli.return_value.close_issue.assert_not_called()
     assert _issue_row()[3] == "done", "stage must be compensated to done"
+
+
+# ---- Issue #3444 re-review: dedup leftover must not block auto-finalize ----
+
+import pytest  # noqa: E402  (kept next to the regression cases it serves)
+
+
+@pytest.mark.parametrize("real_form,leftover_form", [
+    (f"#{_NUM}", f"{_NUM}"),
+    (f"{_NUM}", f"#{_NUM}"),
+])
+def test_dedup_leftover_after_all_completed_still_finalizes(real_form, leftover_form):
+    """末节点（sre）真实 completed + 后到 skipped 去重留痕 → 仍推进 pending_review。
+
+    Issue #3444 复审阻塞项：留痕 seq 更大且 agent_type=sre，若按 MAX(seq) 选为
+    「最新事件」会把 sre 覆盖成 skipped → noop:node_pending:sre，末节点完成也无法
+    进入待人工确认。兼容 events.issue_id 带/不带 `#` 两种历史形态。
+    """
+    from src.api.issues_center import finalize_issue_to_pending_review
+    _seed(status="processing", stage="sre")
+    _seed_events(_ALL_COMPLETED, issue_id=real_form)
+    _seed_dedup_leftover(leftover_form, agent_type="sre")
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
+        _res = finalize_issue_to_pending_review(_REPO, f"#{_NUM}", "sre", source="test")
+        _cli.return_value.close_issue.assert_not_called()
+    assert _res == "pending_review", _res
+    _st, _at, _reason, _stage = _issue_row()
+    assert _st == "pending_review", "自动路径只能推进到待确认，不能停在 processing"
+    assert _stage == "pending_review"
+    assert not _reason and not _at
+
+
+def test_dedup_leftover_alone_does_not_count_as_completed():
+    """对照：节点只有 skipped 留痕（无真实完成事件）时仍视为未完成 → noop。"""
+    from src.api.issues_center import finalize_issue_to_pending_review
+    _seed(status="processing", stage="sre")
+    _events = {k: v for k, v in _ALL_COMPLETED.items() if k != "sre"}
+    _seed_events(_events)
+    _seed_dedup_leftover(f"#{_NUM}", agent_type="sre")
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
+        _res = finalize_issue_to_pending_review(_REPO, f"#{_NUM}", "sre", source="test")
+        _cli.return_value.close_issue.assert_not_called()
+    assert _res == "noop:node_pending:sre", _res
+    assert _issue_row()[0] == "processing"

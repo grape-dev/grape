@@ -279,3 +279,39 @@ def test_every_generic_path_call_site_declares_gitlab_form():
             if len(node.args) < 2 and not has_kw:
                 offenders.append(node.lineno)
     assert not offenders, f"_generic_path 调用点未声明 GitLab 形态（行号）: {offenders}"
+
+
+def test_issue_3348_get_user_hits_card_users_endpoint(gitee_card, monkeypatch):
+    """Issue #3348：BOT_USERNAME 校验走 GET /users/{username}（卡 api_base + 鉴权）。"""
+    seen = _calls(monkeypatch)
+    c = VcsApiClient("gitee", "TK", "oschina", "grape")
+    resp = c.get_user("grape bot")
+    assert "error" not in resp
+    req = seen[-1]
+    assert req.url == "https://gitee.com/api/v5/users/grape%20bot?access_token=TK"
+    assert req.method == "GET"
+
+
+def test_issue_3348_gitlab_get_user_exact_match(gitlab_card, monkeypatch):
+    """GitLab 用户查询需 username 精确匹配，避免模糊命中他人后误判有效。"""
+    client = VcsApiClient("gitlab", "tok", "grp", "repo")
+    seen = {}
+
+    def _fake_request(method, path, data=None, form=False, timeout=30):
+        seen["path"] = path
+        return [{"username": "grape_bot_extra"}, {"username": "grape_bot", "id": 7}]
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    user = client.get_user("grape_bot")
+    assert seen["path"] == "/users?username=grape_bot"
+    assert user["id"] == 7
+
+
+def test_issue_3348_gitlab_get_user_network_error_not_404(gitlab_card, monkeypatch):
+    """GitLab 网络异常应原样返回错误 dict（非 404），由调用方 fail-open。"""
+    client = VcsApiClient("gitlab", "tok", "grp", "repo")
+    monkeypatch.setattr(client, "_request",
+                        lambda *a, **kw: {"error": "connection reset"})
+    resp = client.get_user("grape_bot")
+    assert resp.get("error") == "connection reset"
+    assert resp.get("status_code") is None

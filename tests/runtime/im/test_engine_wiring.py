@@ -170,8 +170,9 @@ def _build_engine(db_path, api, rec):
 
 def _fake_process_command(rec):
     async def _cmd(ctx, api_, text, chat_id, sender_id, db, account="",
-                   msg_id="", sender_open_id="", card_value=None, action_token=""):
-        rec.calls.append(("command", text))
+                   msg_id="", sender_open_id="", card_value=None, action_token="",
+                   channel_type=""):
+        rec.calls.append(("command", text, str(channel_type)))
         return "cmd-ok"
     return _cmd
 

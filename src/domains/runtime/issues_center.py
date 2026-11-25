@@ -507,8 +507,11 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 # 仅显式 POST /issues/{id}/resume 可恢复（避免取消后卡片重新回到待澄清列表）。
                 log.info(f"ensure_issue_task: keep cancelled issue #{issue_number} repo={repo_key} "
                          f"(late event must not revive; resume endpoint only)")
-            elif _cur_st not in ("active", "processing"):
+            elif _cur_st not in ("active", "processing", "pending_review"):
                 # 复用终态/待澄清卡：重新武装为 active（继续在任务中心处理，避免另建新卡）
+                # Issue #4063：pending_review 审核点只能由显式审核动作（review-pass /
+                # review-reject / 置位内容变更）驱动，issue_comment 等非审核事件在此
+                # 复用分支不得把在位审核点回落 active（否则 AC2 失败）。
                 c.execute("UPDATE issue SET status='active', completed_reason=NULL, completed_at=NULL WHERE id=?",
                           (task_id,))
             if title:
@@ -720,6 +723,69 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
                 "任务已被 bot 接管并转入待审核，请确认后续处理方式")
         return c.rowcount
 
+# ===== Issue #4170：交付终态（PR merged + Issue closed）判定（单点，派发/复位共用）=====
+
+TERMINAL_DELIVERY_SUPPRESS_REASON = "terminal_delivery_suppressed"
+
+
+def _issue_has_merged_pr(repo_key: str, issue_number) -> bool:
+    """承载 PR 合入证据：events 表中该 Issue 存在真实 ``pull_request_merged`` 事件。
+
+    口径对齐 ``src.domains.mgmt.org_dispatch._pr_evidence``——合入判定只看 VCS 权威
+    的 merge 事件，不猜 PR 状态。兼容 issue_id 带/不带 ``#`` 两种历史落库形态。
+    查询异常返回 False（fail-open：读失败不得误抑制派发）。
+    """
+    _num = str(native_issue_number(issue_number) or "").strip()
+    if not _num:
+        return False
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute(
+                "SELECT 1 FROM events WHERE repo_key=? AND issue_id IN (?, ?) "
+                "AND event_type='pull_request_merged' LIMIT 1",
+                (repo_key, f"#{_num}", _num))
+            return c.fetchone() is not None
+    except Exception as _e:
+        log.warning(f"terminal-check: merged PR evidence query failed "
+                    f"{repo_key}/#{_num}: {_e}")
+        return False
+
+
+def _issue_repo_state_closed(repo_key: str, issue_number) -> bool:
+    """Issue 仓库态是否 closed（VCS 权威读；无 token/查询失败返回 False 即 fail-open）。"""
+    _num = native_issue_number(issue_number)
+    if not _num:
+        return False
+    try:
+        client = _pr_vcs_client(repo_key)
+        if client is None:
+            return False
+        return client.get_issue_state(_num) == "closed"
+    except Exception as _e:
+        log.warning(f"terminal-check: issue state read failed {repo_key}/#{_num}: {_e}")
+        return False
+
+
+def is_issue_delivery_terminal(repo_key: str, issue_number) -> bool:
+    """Issue 是否已达「交付终态」：承载 PR 已 merged **且** Issue 仓库态 closed（双条件）。
+
+    单一判定点，供两处复用：
+    - `event_pipeline` 的 ``issue_comment`` 派发守卫（终态仅记录、不派发）；
+    - 本模块 ``_resume_issue_waiting`` 的 stage/task_status 复位抑制（终态不写回）。
+
+    reopen 后仓库态变回 open → 脱离终态，守卫自然失效（无需单独 reopen 策略）。
+    任一条件读不到/异常 → False（fail-open，宁放过不错杀在途单）。
+    """
+    try:
+        if not _issue_has_merged_pr(repo_key, issue_number):
+            return False
+        return _issue_repo_state_closed(repo_key, issue_number)
+    except Exception as _e:
+        log.warning(f"terminal-check failed {repo_key}/#{issue_number}: {_e}")
+        return False
+
+
 # 进入 pending_review 时可能写入的哨兵 owner_agent（非真实流水线节点）；
 # resume 回落 stage 时不能直接采用，避免阶段取值非法。
 _RESUME_STAGE_SENTINELS = ("", "bot_takeover", "issue_closed", "pending_review")
@@ -808,7 +874,14 @@ def _resume_issue_waiting(repo_key: str, issue_number: int,
 
     Issue #2816 复审：状态迁移走 ``_resume_issue_rows`` 单源；仅真实翻转时才回落
     stage（``pending_review`` → ``_resume_stage(owner_agent)``）。
+
+    Issue #4170：交付终态（PR merged + Issue closed）后评论不再复位审核点——
+    终态直接短路，stage/task_status 均不写回（不把 pending_review 打回 processing）。
     """
+    if is_issue_delivery_terminal(repo_key, issue_number):
+        log.info(f"Issue waiting resume suppressed: {repo_key}/#{issue_number} "
+                 f"delivery terminal (PR merged + issue closed), stage/task_status preserved")
+        return False
     _from_statuses = ("awaiting_input",) if preserve_review else ("awaiting_input", "pending_review")
     try:
         _changed, _stage, _owner = _resume_issue_rows(
@@ -831,23 +904,90 @@ def _resume_issue_waiting(repo_key: str, issue_number: int,
         log.warning(f"resume issue from waiting failed {repo_key}/#{issue_number}: {_e}")
         return False
 
-def _set_issue_pending_review(repo_key: str, issue_number: int) -> bool:
-    """Agent 显式设置阶段审核点（幂等）：`active/processing/awaiting_input → pending_review`，不改 stage。"""
+# 可被审核点置位覆盖的源状态（与旧 UPDATE 的 IN 集合严格一致）。
+_PENDING_REVIEW_SOURCE_STATUSES = ("active", "processing", "awaiting_input")
+
+
+def _set_issue_pending_review_with_prior(repo_key: str, issue_number: int,
+                                         review_points: str = "",
+                                         references: str = "") -> tuple[str, str, bool]:
+    """设置阶段审核点并回传「写入前状态 → 写后状态」对账三元组（Issue #4103）。
+
+    返回 ``(prior_status, status, changed)``：
+
+    - ``prior_status``：写入前在**同一事务/锁内**实读到的 issue.status（与
+      ``issues status get`` 同源）；
+    - ``status``：写后复读到的真实 issue.status（未写入时为当前实读值）；
+    - ``changed``：**本次是否真实写入**（``cursor.rowcount > 0``）。首次置位、
+      审核点内容变更均为 True；并发方抢先置位导致条件更新命中 0 行时必须保持
+      False，通知也不得重复触发。
+
+    Issue #4063：已在位（``pending_review``）时按 review_points/review_refs 内容判断——
+    内容等价 → 幂等短路零写入；内容变更 → 仅刷新快照，状态不迁移；存量在位行无快照
+    （review_points 为空）→ 无法证明变更，按幂等返回 False（兼容 #725）。
+
+    并发语义：源状态属于 ``active/processing/awaiting_input`` 时用**条件写入**
+    （``WHERE status=prior_status``）把写入基线钉在读取值上；若读后又被并发事件
+    改走，则条件更新不命中，不会覆盖新状态。
+    """
+    _prior = ""
+    _content = (review_points or "").strip()
+    _refs = (references or "").strip()
     try:
         with db_lock:
             c = _rt_db.cursor()
+            _prior = _read_issue_status(repo_key, issue_number, c=c)
             c.execute(
-                "UPDATE issue SET status='pending_review', completed_reason=NULL, completed_at=NULL "
-                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input')",
+                "SELECT review_points, review_refs FROM issue "
+                "WHERE repo_key=? AND issue_number=?",
                 (repo_key, issue_number))
-            _rt_db.commit()
-            _changed = c.rowcount > 0
+            _row = c.fetchone()
+            if not _row:
+                return "", "", False
+            _stored = ((_row[0] if _row[0] is not None else "") or "").strip()
+            _stored_refs = ((_row[1] if len(_row) > 1 and _row[1] is not None else "") or "").strip()
+            _wrote = 0
+            if _prior == "pending_review":
+                if not _stored:
+                    # 存量在位行无内容快照：保持 #725 幂等语义（不重复写会话/通知）
+                    return _prior, _prior, False
+                if _stored == _content and _stored_refs == _refs:
+                    return _prior, _prior, False
+                c.execute(
+                    "UPDATE issue SET review_points=?, review_refs=? "
+                    "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
+                    (_content, _refs, repo_key, issue_number))
+                _wrote = c.rowcount
+                _rt_db.commit()
+            elif _prior in _PENDING_REVIEW_SOURCE_STATUSES:
+                c.execute(
+                    "UPDATE issue SET status='pending_review', completed_reason=NULL, completed_at=NULL, "
+                    "review_points=?, review_refs=? "
+                    "WHERE repo_key=? AND issue_number=? AND status=?",
+                    (_content, _refs, repo_key, issue_number, _prior))
+                _wrote = c.rowcount
+                _rt_db.commit()
+            _status = _read_issue_status(repo_key, issue_number, c=c)
+        _changed = _wrote > 0
         if _changed:
-            log.info(f"Issue pending_review set: {repo_key}/#{issue_number}")
-        return _changed
+            log.info(f"Issue pending_review set: {repo_key}/#{issue_number} "
+                     f"prior={_prior or '<empty>'} status={_status or '<empty>'}")
+        return _prior, _status, _changed
     except Exception as _e:
         log.warning(f"set issue pending_review failed {repo_key}/#{issue_number}: {_e}")
-        return False
+        return _prior, _prior, False
+
+
+def _set_issue_pending_review(repo_key: str, issue_number: int,
+                              review_points: str = "", references: str = "") -> bool:
+    """Agent 显式设置阶段审核点（幂等）：`active/processing/awaiting_input → pending_review`，不改 stage。
+
+    Issue #4103：布尔返回保留给既有调用方；需要 prior/status 对账的入口改用
+    ``_set_issue_pending_review_with_prior``。
+    """
+    _, _, _changed = _set_issue_pending_review_with_prior(
+        repo_key, issue_number, review_points, references)
+    return _changed
 
 # Issue #2381：末节点判据统一口径——`next=="done"` 与空串（无下游）均视为末节点。
 # 此前 _is_last_stage_node 仅认 "done"、_pipeline_last_node_check 同时认 ""，CLI 流水线
@@ -1127,15 +1267,23 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
 # Issue #1599：审核动作未命中原因分类所依赖的终态集合
 _ISSUE_TERMINAL_STATUSES = ("completed", "cancelled")
 
-def _read_issue_status(repo_key: str, issue_number: int) -> str:
-    """回读 issue 表真实 status（空串 = 无行或回读失败，由调用方兜底）。"""
+def _read_issue_status(repo_key: str, issue_number: int, c=None) -> str:
+    """回读 issue 表真实 status（空串 = 无行或回读失败，由调用方兜底）。
+
+    传入 ``c`` 时复用调用方游标（调用方须已持 ``db_lock``），用于同一事务内的读取/写后复读；
+    不传则自取锁与游标。
+    """
+    _sql = "SELECT status FROM issue WHERE repo_key=? AND issue_number=?"
+    _args = (repo_key, issue_number)
     try:
-        with db_lock:
-            c = _rt_db.cursor()
-            c.execute(
-                "SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
-                (repo_key, issue_number))
+        if c is not None:
+            c.execute(_sql, _args)
             _r = c.fetchone()
+            return ((_r[0] if _r else "") or "").strip()
+        with db_lock:
+            _cur = _rt_db.cursor()
+            _cur.execute(_sql, _args)
+            _r = _cur.fetchone()
         return ((_r[0] if _r else "") or "").strip()
     except Exception as _e:
         log.warning(f"read issue status failed {repo_key}/#{issue_number}: {_e}")
@@ -1256,21 +1404,33 @@ def _issue_latest_event_status_by_agent(repo_key: str, issue_id_tag: str) -> dic
     """该 issue 每个 agent_type 的最新事件状态（seq 最大者），用于「全部节点 completed」检测。
 
     兼容 events.issue_id 带/不带 `#` 两种历史形态（同一 issue 归并后取全局最新）。
+
+    Issue #3444：去重留痕（status='skipped'/'deduped'）不参与「最新事件」判定。
+    这类行由 append_comment_dedup_event 写入，携带真实 agent_type 仅供审计，
+    不代表节点执行进度；若按 MAX(seq) 选中，会把末节点已 completed 的真实状态
+    覆盖成 skipped，使 auto-finalize / 审核点检测卡在 noop:node_pending。
+    内外层查询都排除，口径与 pipeline_status.is_dedup_leftover_event 一致。
     """
     out = {}
     _num_s = (issue_id_tag or "").strip().lstrip("#")
     if not _num_s:
         return out
     try:
+        from src.api.pipeline_status import DEDUP_LEFTOVER_STATUSES
+        _leftover = tuple(DEDUP_LEFTOVER_STATUSES)
+        _leftover_ph = ",".join("?" for _ in _leftover)
         with db_lock:
             c = _rt_db.cursor()
             c.execute(
                 "SELECT agent_type, status, seq FROM events e WHERE repo_key=? "
                 "AND issue_id IN (?, ?) "
+                f"AND status NOT IN ({_leftover_ph}) "
                 "AND seq = (SELECT MAX(seq) FROM events e2 "
                 "WHERE e2.repo_key=e.repo_key AND e2.issue_id IN (?, ?) "
-                "AND e2.agent_type=e.agent_type)",
-                (repo_key, f"#{_num_s}", _num_s, f"#{_num_s}", _num_s))
+                "AND e2.agent_type=e.agent_type "
+                f"AND e2.status NOT IN ({_leftover_ph}))",
+                (repo_key, f"#{_num_s}", _num_s, *_leftover,
+                 f"#{_num_s}", _num_s, *_leftover))
             for _ag, _st, _seq in c.fetchall():
                 if _ag:
                     _st = _st or ""
@@ -3698,47 +3858,66 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # JWT 登录用户的 token 是 session JWT 不是 GitCode API token，不能走此路径
     # grape_ 前缀的是用户级 API Key（CLI 用户），同样不是 GitCode token，不能走此路径
     _preauth_token = ""
+    # token 来源标记（Issue #3427 复审 Spec-1）：
+    # _resolver_source: 单点解析器命中层（rc/global/user），空 = 解析器未命中；
+    # _token_from_user_fallback: legacy 用户 token 兜底是否真正提供了本次 token。
+    _resolver_source = ""
+    _token_from_user_fallback = False
     if user.get("auth_type") in ("api_key", "internal") and user.get("token"):
         _token_val = user["token"]
         if not _token_val.startswith("grape_"):
             _preauth_token = _token_val
     if _preauth_token:
         api_token = _preauth_token
-    elif _is_github:
-        # Issue #343: GitHub 写操作走仓库 bot token；
-        # B2 补齐（对齐 gitcode/gitee 链）：bot token 缺席时回落用户 token
-        # （get_user_token_for_repo 按 repo_key 前缀派生 provider——github PAT
-        # 绑定后建单不再 400「Bot Token 未配置」）。
-        from src.domains.mgmt.public import get_github_token  # 跨域走 owner public
-        api_token = get_github_token(repo_key=repo_key) or ""
-        if not api_token:
+    else:
+        # Issue #3427（复审 Spec-1）：建单入口与 host 同口径——单点解析器首选
+        # （固定顺序 rc → global → user，probe=True 对命中 token 探活，过期但
+        # 非空的 bot token 也能暴露为 TOKEN_REJECTED_UPSTREAM → 401）。
+        # 用户 token 仅在解析器全链未命中（TOKEN_MISSING / TOKEN_DECRYPT_FAILED）
+        # 时兜底；解析器已判 401 时禁止兜底（继续用同一失效 token 只会再失败）。
+        # github / gitcode / gitee 等所有 provider 分支同口径（含分层 error_code）。
+        from src.domains.mgmt.auth.credential_resolver import resolve_credential_detailed
+        from src.kernel.credential_errors import (CredentialErrorCode,
+                                                  credential_error_code_for,
+                                                  credential_error_detail_for)
+        _p_name = _provider
+        try:
+            from src.domains.runtime.vcs.platform_card import get_platform_card
+            _c = get_platform_card(_provider)
+            _p_name = (_c.name if _c else _provider) or _provider
+        except Exception as _e:
+            log.debug(f"platform card lookup failed: {_e}")
+        api_token = ""
+        _cred = resolve_credential_detailed(repo_key, probe=True)
+        if _cred and _cred.ok and _cred.token:
+            log.info(f"create_task: credential resolver hit "
+                     f"source={_cred.source} repo={repo_key}")
+            api_token = _cred.token
+            _resolver_source = _cred.source or ""
+        elif (credential_error_code_for(_cred)
+                in (CredentialErrorCode.TOKEN_MISSING.value,
+                    CredentialErrorCode.TOKEN_DECRYPT_FAILED.value)):
+            # 兜底：用户 token（get_user_token_for_repo 按 repo_key 前缀派生
+            # provider——S70/D37 口径：gitee 仓不折叠为 gitcode 链）。
             from src.api.deps import get_user_token_for_repo
             api_token = get_user_token_for_repo(repo_key, user["username"],
                                                 user_id=str(user.get("id") or ""))
+            _token_from_user_fallback = bool(api_token)
         if not api_token:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 GitHub Bot Token 未配置，且当前用户未绑定 GitHub Token，请绑定后重试"})
-    else:
-        # S70（D37/S57 漏点收口，实弹发现）：用户 token 按 repo_key 前缀派生
-        # provider（get_user_token_for_repo）——gitee 仓不再折叠为 gitcode 链
-        # （原 get_user_token_with_refresh 仅 gitcode，gitee PAT 绑定后仍取空 → 400）。
-        # 语义保持：token 缺失/失效 ≠ 回落 bot——明确引导用户重新绑定/登录对应平台。
-        from src.api.deps import get_user_token_for_repo
-        api_token = get_user_token_for_repo(repo_key, user["username"], user_id=user["id"])
-        if not api_token:
-            _p_name = _provider
-            try:
-                from src.domains.runtime.vcs.platform_card import get_platform_card
-                _c = get_platform_card(_provider)
-                _p_name = (_c.name if _c else _provider) or _provider
-            except Exception as _e:
-                log.debug(f"cursor close failed: {_e}")
-            raise HTTPException(status_code=400, detail={
-                "code": 400,
-                "message": f"{_p_name} Token 未配置或已失效，请重新绑定/登录后重试",
-            })
+            # Spec：按错误码分层返回 400/401（status 取 detail["code"]）
+            _detail = credential_error_detail_for(_cred, _p_name)
+            raise HTTPException(status_code=_detail["code"], detail=_detail)
     # 是否使用「用户自己的 GitCode token」：用于 401 时区分「用户登录失效」（引导重新绑定）
     # 与「仓库 bot token 失效」（提示检查仓库 Bot Token 配置）两套文案。
-    _using_user_token = (not _preauth_token) and (not _is_github)
+    # Issue #3427 复审 Spec-1：按 token 实际来源判定——仅 legacy 用户 token 兜底命中
+    # 或解析器 source=user（用户身份）时为 True；rc/global bot 来源 401 属仓库 bot
+    # 配置问题，走 bot-token 文案/分层码，不触发用户刷新与 OAuth 跳转。
+    # GitHub 语境下 source=user 同样是用户凭据失效（需 401，不得当 bot 502），
+    # 但 GitHub 无 GitCode OAuth 刷新链路——下方 401 分支对 _is_github 单独文案、
+    # 不返回 action=reauth_required（复审 Spec-2）。
+    _using_user_token = ((not _preauth_token)
+                         and (_token_from_user_fallback
+                              or _resolver_source == "user"))
     # Issue #649: assignee 不再默认填创建者——非成员默认指派会触发上游 403，
     # 误导排查方向。不传 assignee 时留空，由仓库方后续分派；显式传入时走下方成员资格预校验。
     assignee = (body.assignee or "").strip()
@@ -3771,6 +3950,15 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     except RuntimeError as _dedup_err:
         from src.domains.runtime.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG, GITCODE_USER_TOKEN_INVALID_MSG
         if is_auth_error_exc(_dedup_err) and _using_user_token:
+            if _is_github:
+                # GitHub 用户凭据 401：按分层码返回 401（非 bot 502），
+                # 且不得跳 GitCode OAuth（GitHub 无该刷新链路）。
+                raise HTTPException(status_code=401, detail={
+                    "code": 401,
+                    "error_code": "TOKEN_REJECTED_UPSTREAM",
+                    "message": "查重失败，GitHub 用户凭据已被上游拒绝（401，已失效或被吊销），"
+                               "请重新绑定 GitHub 账号或改用仓库 Bot Token 后重试",
+                })
             # 用户自己的 GitCode token 401 → 主动刷新一次并重试；仍失败给「重新登录」引导
             _renewed = _refresh_user_gitcode_token(user)
             if _renewed:
@@ -3793,7 +3981,11 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     "idempotency_key": _idempotency_key,
                 })
         elif is_auth_error_exc(_dedup_err):
-            raise HTTPException(status_code=502, detail={"code": 502,
+            # bot 来源 401（rc/global bot token 失效）→ bot-token 文案 + 分层码，
+            # 不触发用户 token 刷新与 OAuth 跳转（Issue #3427 复审 Spec-1）。
+            # 状态码与 credential_errors 映射对齐：TOKEN_REJECTED_UPSTREAM → 401。
+            raise HTTPException(status_code=401, detail={"code": 401,
+                                                         "error_code": "TOKEN_REJECTED_UPSTREAM",
                                                          "message": f"查重失败，{BOT_TOKEN_INVALID_MSG}: {str(_dedup_err)[:200]}",
                                                          "idempotency_key": _idempotency_key})
         else:
@@ -3906,6 +4098,14 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             _codes = _re.findall(r'\((\d{3})\)', _err_msg)
             _http_code = int(_codes[0]) if _codes else 0
             if _http_code == 401 and _using_user_token:
+                if _is_github:
+                    # GitHub 用户凭据 401：直接分层 401，不刷新 GitCode OAuth。
+                    raise HTTPException(status_code=401, detail={
+                        "code": 401,
+                        "error_code": "TOKEN_REJECTED_UPSTREAM",
+                        "message": "创建 Issue 失败：GitHub 用户凭据已被上游拒绝（401，已失效或被吊销），"
+                                   "请重新绑定 GitHub 账号或改用仓库 Bot Token 后重试",
+                    })
                 # 用户自己的 GitCode token 401 → 刷新一次再重试；仍失败走下方 401 分支给「重新登录」引导
                 _renewed = _refresh_user_gitcode_token(user)
                 if _renewed:
@@ -3992,8 +4192,11 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                         "action": "reauth_required",
                     })
                 from src.domains.runtime.vcs.token_error import BOT_TOKEN_INVALID_MSG
-                raise HTTPException(status_code=502, detail={
-                    "code": 502,
+                # 状态码与 credential_errors 映射对齐：TOKEN_REJECTED_UPSTREAM → 401
+                # （bot 401 与用户 401 同码不同文案，不再套 502）。
+                raise HTTPException(status_code=401, detail={
+                    "code": 401,
+                    "error_code": "TOKEN_REJECTED_UPSTREAM",
                     "message": f"创建 Issue 失败：{BOT_TOKEN_INVALID_MSG}",
                 })
             else:
@@ -4689,6 +4892,7 @@ def _batch_fetch_agent_statuses(keys: list) -> dict:
         {(repo_key, issue_id): [{agent, label, status, status_num, latest_seq, latest_title}, ...]}
     """
     from src.domains.runtime.routes.pipeline import AGENT_ORDER, AGENT_LABELS, STAGE_STATUS_MAP
+    from src.api.pipeline_status import DEDUP_LEFTOVER_STATUSES
 
     out: dict = {}
     if not keys:
@@ -4724,7 +4928,11 @@ def _batch_fetch_agent_statuses(keys: list) -> dict:
         _statuses = []
         for i, agent in enumerate(AGENT_ORDER):
             # row: (repo_key, issue_id, agent_type, status, seq, title)
-            _agent_events = [e for e in _issue_events if e[2] == agent]
+            # Issue #3444：status='skipped'/'deduped' 为去重留痕（真实 agent_type 仅
+            # 供审计），取「最新事件」时排除，避免覆盖 running/completed 的真实状态。
+            _agent_events = [
+                e for e in _issue_events
+                if e[2] == agent and str(e[3] or "") not in DEDUP_LEFTOVER_STATUSES]
             if not _agent_events:
                 _statuses.append({
                     "agent": agent,

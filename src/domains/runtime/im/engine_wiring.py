@@ -1049,9 +1049,11 @@ def _inbound_to_parsed(msg: InboundMessage) -> dict:
             image_key = ref.storage_key
         elif ref.type in (MsgType.FILE, MsgType.MEDIA):
             file_key = ref.storage_key
+    _ctype = msg.source.channel_type
     parsed = {
         "type": "message",
         "chat_id": msg.source.chat_id,
+        "channel_type": str(getattr(_ctype, "value", _ctype) or ""),
         "chat_type": msg.source.chat_type.value,
         "sender_open_id": msg.source.sender_id,
         "sender_id": msg.source.sender_id,
@@ -1893,6 +1895,9 @@ class ImEngine:
                     await _reply_text(chat_id, "你当前还没有绑定 grape 账号，请点「绑定我」。")
                 return None
             fn = engine._process_command or engine._legacy_process_command()
+            # Issue #3475 复审修复：真实命令路径必须透传渠道，否则微信等新引擎渠道的
+            # 命令提示会退回飞书文案（BotContext 无 channel_type 属性可兜底）
+            _ctype = msg.source.channel_type
             try:
                 # 本文件属 runtime 域、由 mgmt 进程执行：命令处理用到的
                 # repo_im_group_binding / issue / chat_agent_session 都是 runtime 基表，
@@ -1906,6 +1911,7 @@ class ImEngine:
                 account=ctx.app_id, msg_id=msg_id,
                 sender_open_id=msg.source.sender_id,
                 card_value=_card_value_of(msg), action_token=_action_token_of(msg),
+                channel_type=str(getattr(_ctype, "value", _ctype) or ""),
             )
             if result:
                 await eg.reply_text(ctx, msg_id, result)
