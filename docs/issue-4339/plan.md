@@ -7,7 +7,7 @@
 | `src/domains/runtime/schema_ddl.py` | `_EVENTS_TABLE_DDL`：`payload TEXT DEFAULT '{}'` → `payload MEDIUMTEXT DEFAULT '{}'` |
 | `src/domains/runtime/migrations_ddl.py` | 新增 `ALTER_EVENTS__EVENTS_PAYLOAD_MEDIUMTEXT`（含 `MODIFY COLUMN`） |
 | `src/domains/runtime/migrations/events_payload_mediumtext.py` | 新增幂等迁移（探测短路 + `_destructive_ddl` + ALTER 后复检 + post_check） |
-| `src/api/db_setup.py` | 注册 `202611250001`（runtime 域）与 `202611250002`（mgmt 域） |
+| `src/api/db_setup.py` | 注册 `202611250003`（runtime 域，原 202611250001，门禁复审 renumber）与 `202611250002`（mgmt 域） |
 | `src/domains/runtime/event_store.py` | `_insert_event_row` 前置字节守卫；判定抽成可复用 `payload_size_exceeded` / `payload_size_guard` |
 | `src/domains/runtime/pipeline/event_pipeline.py` | 去重快路径裸 INSERT 前置同一份守卫（R1）；`seq==0` fail-closed 不派发（R2） |
 | `src/domains/mgmt/schema_ddl.py` | `_CHANNEL_OUTBOUND_CARD_DDL`：`payload TEXT NOT NULL DEFAULT '{}'` → `MEDIUMTEXT` |
@@ -19,7 +19,7 @@
 文件头与 `scripts/gen-migration-baseline.py` 都规定只在发布评审时整体刷新并单独提交；
 且 `--write` 会把本分支全部未发布迁移（`202611231001`~`202611240010`）一次性写成
 「已发布」，语义不成立。`tests/arch/test_migration_version_integrity.py` 的 R3 只要求
-**新号大于基线 max（202611230012）**，`202611250001/2` 天然满足，因此不改基线也能全绿。
+**新号大于基线 max（202611230012）**，`202611250003` / `202611250002` 天然满足，因此不改基线也能全绿。
 
 `_EVENTS_TABLE_DDL` 由 `src/api/db_setup.py` 的 `_NEW_TABLES` 注册（`("events", _EVENTS_TABLE_DDL)`），
 单点改动即双端生效；SQLite 无长度语义，`MEDIUMTEXT` 只是类型名，行为无变化。
@@ -103,11 +103,11 @@ ORDER BY seq DESC;
 
 | 版本号 | 名称 | 域 |
 |--------|------|----|
-| `202611250001` | `issue4339-events-payload-mediumtext` | runtime |
+| `202611250003` | `issue4339-events-payload-mediumtext` | runtime |
 | `202611250002` | `issue4339-channel-outbound-card-payload-mediumtext` | mgmt |
 
 基线已发布最大号 `202611230012`，本分支来源最大已注册号 `202611240010`，两个新号顺延至
-`202611250001/2`。合并前须人工对目标环境 `grape_t_schema_migrations` 复核（同号不同名会被
+`202611250003`/`202611250002`。合并前须人工对目标环境 `grape_t_schema_migrations` 复核（同号不同名会被
 执行器 ERROR 并跳过）。
 
 ## 7. 测试

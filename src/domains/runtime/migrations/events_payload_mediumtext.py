@@ -57,7 +57,10 @@ COLUMN = "payload"
 #: 目标/更宽类型：已是二者之一即视为收敛（longtext 比 mediumtext 更宽，无需收窄）。
 TARGET_TYPES = ("mediumtext", "longtext")
 #: 注册迁移版本号（与 src/api/db_setup.py 的 register_migration 字面量一致）。
-MIGRATION_VERSION = "202611250001"
+#: 原为 202611250001，与同批三条迁移撞号（PR #2157 门禁复审 Critical：台账按
+#: version 判「已执行」，同号后登记者永久跳过）→ renumber 到 202611250003；
+#: 001 保留给 events-cascade-compensation-columns。
+MIGRATION_VERSION = "202611250003"
 MIGRATION_NAME = "issue4339-events-payload-mediumtext"
 
 _PROBE_SQL = (

@@ -213,3 +213,88 @@ def test_migration_registered_as_mgmt_cleanup_with_post_check():
     assert tuple(mer.domains) == ("mgmt",), "autopilot_tasks 归 mgmt 域"
     assert callable(mer.fn)
     assert callable(mer.post_check), "默认值可判定，必须带 post_check（Issue #3648）"
+
+
+# ===== 6. 收窄前预留量预检（PR #2157 复审 Optional） =====
+
+
+def _conn_with_rows(rows) -> sqlite3.Connection:
+    """建一张最小 autopilot_tasks（带三列）并插入给定 dispatch_state_reason。"""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        f"CREATE TABLE {mig.TABLE} (id INTEGER PRIMARY KEY, dispatch_state TEXT, "
+        "dispatch_state_reason TEXT, dispatch_state_at TEXT)")
+    for reason in rows:
+        conn.execute(
+            f"INSERT INTO {mig.TABLE} (dispatch_state_reason) VALUES (?)", (reason,))
+    conn.commit()
+    return conn
+
+
+def test_ensure_reports_overlong_values_before_any_ddl(mysql_info):
+    """strict 下超长值收窄必报 1406：必须先报「列/行数/最长」，且一条 DDL 都不发。"""
+    rec = mysql_info({col: None for col in COLS})
+    conn = _conn_with_rows(["x" * 400, "ok"])
+    with pytest.raises(RuntimeError) as ei:
+        mig.ensure_state_column_defaults(conn)
+
+    message = str(ei.value)
+    assert "dispatch_state_reason" in message
+    assert "400" in message and "1 行" in message
+    assert "1406" in message, "报错要写明 strict 下的真实失败码（运维才能定位）"
+    assert rec.ddls == [], "超长预检必须早于第一列 MODIFY（不留改了一半的半态）"
+
+
+def test_ensure_proceeds_when_length_probe_unmeasurable(mysql_info):
+    """量不到长度（表还没建/方言不支持）不得阻断迁移：预检只是诊断，不是判据。"""
+    rec = mysql_info({col: None for col in COLS})
+    assert mig.ensure_state_column_defaults(_conn()) == 3
+    assert len(rec.ddls) == 3
+
+
+def test_length_probe_falls_back_to_sqlite_length(mysql_info):
+    """SQLite 没有 CHAR_LENGTH：探测要退化成 LENGTH，而不是静默报 0。"""
+    mysql_info({col: None for col in COLS})
+    conn = _conn_with_rows(["y" * 300])
+    rows, longest = mig._overlong_state_values(conn, "dispatch_state_reason")
+    assert (rows, longest) == (1, 300)
+
+
+# ===== 7. 台账之外的启动期核对（PR #2157 复审 Required） =====
+
+
+def test_verify_migration_targets_exposes_state_default_drift(monkeypatch, tmp_path):
+    """旧判据盖章的库不会再跑 202611240011：启动核对必须自己把漂移暴露出来。"""
+    ds = _db_setup()
+    # 其余两处 mgmt 目标校验置为通过，隔离出「状态列默认值」这一条
+    monkeypatch.setattr(_module("src.domains.mgmt.migrations.category_collapse_dict"),
+                        "verify_category_collapse", lambda conn=None: None)
+    monkeypatch.setattr(_module("src.domains.mgmt.migrations.org_repo_create_options"),
+                        "verify_org_repo_create_columns", lambda conn=None: None)
+
+    def _drift(conn=None):
+        raise RuntimeError("DEFAULT not normalized for [('dispatch_state', None)]")
+
+    monkeypatch.setattr(mig, "state_column_defaults_converged", _drift)
+    conn = sqlite3.connect(str(tmp_path / "mgmt.db"))
+    failures = ds.verify_migration_targets(conn=conn, domain="mgmt")
+    assert any("autopilot" in f and "dispatch_state" in f for f in failures), failures
+    with pytest.raises(RuntimeError):
+        ds.verify_migration_targets(conn=conn, domain="mgmt", raise_on_fail=True)
+    conn.close()
+
+
+def test_verify_migration_targets_calls_converged_check(monkeypatch, tmp_path):
+    """核对点必须真的调到 `state_column_defaults_converged`（同一真源，不复制判据）。"""
+    ds = _db_setup()
+    monkeypatch.setattr(_module("src.domains.mgmt.migrations.category_collapse_dict"),
+                        "verify_category_collapse", lambda conn=None: None)
+    monkeypatch.setattr(_module("src.domains.mgmt.migrations.org_repo_create_options"),
+                        "verify_org_repo_create_columns", lambda conn=None: None)
+    calls = []
+    monkeypatch.setattr(mig, "state_column_defaults_converged",
+                        lambda conn=None: calls.append(conn))
+    conn = sqlite3.connect(str(tmp_path / "mgmt2.db"))
+    assert ds.verify_migration_targets(conn=conn, domain="mgmt") == []
+    assert calls == [conn], "mgmt 分支必须调用状态列默认值核对（否则旧盖章库漂移无人发现）"
+    conn.close()

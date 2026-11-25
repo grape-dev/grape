@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import closing
 from datetime import datetime, timezone
 from typing import Any
 
@@ -26,16 +27,23 @@ log = logging.getLogger(__name__)
 
 TABLE = "autopilot_tasks"
 
-#: （列名, DDL）：TEXT 带非 NULL DEFAULT 在 MySQL 上走不了 INSTANT/INPLACE，
-#: 补列时必须传 allow_copy=True（autopilot_tasks 是小表，COPY 安全）。
-#: VARCHAR 而非 TEXT：MySQL 8.0.13 之前 TEXT 不支持 DEFAULT，且本仓实测该 DDL 落地后
-#: 列变成 `text NOT NULL DEFAULT NULL`（strict 下任何不给值的 INSERT 直接 1364）——
-#: 建单接口就是被这个打成 500 的。三列都是短码/时间戳，VARCHAR(255) 足够。
+#: （列名, DDL）：三列都是短码 / 时间戳，**VARCHAR(255) 足够，且必须是 VARCHAR 而非 TEXT**:
+#: MySQL 8.0.13 之前 TEXT 不支持 DEFAULT，而本仓实测 `TEXT NOT NULL DEFAULT ''` 在
+#: 8.0.46 上落地成 `text NOT NULL DEFAULT NULL`（strict 下任何不给值的 INSERT 直接
+#: 1364）—— 建单接口就是被这个打成 500 的（Issue #3733，实测见 PR #2157）。
+#: 补列时仍传 allow_copy=True：这是对旧版本 MySQL（TEXT 时代补列的 COPY 语义）的
+#: 兜底，autopilot_tasks 是小表，即便退化到 COPY 也安全（复审 Optional：原注释仍按
+#: TEXT 描述，与现在的 VARCHAR DDL 漂移）。
 STATE_COLUMNS = (
     ("dispatch_state", "VARCHAR(255) NOT NULL DEFAULT ''"),
     ("dispatch_state_reason", "VARCHAR(255) NOT NULL DEFAULT ''"),
     ("dispatch_state_at", "VARCHAR(255) NOT NULL DEFAULT ''"),
 )
+
+#: VARCHAR(255) 的存宽。收窄 MODIFY 前必须量一次存量长度（PR #2157 复审 Optional）：
+#: strict 模式下超长值让 MySQL 直接报 1406 而不是截断，迁移会「每次启动重试、日志只有
+#: 一行 1406」；先量一次就能把「哪一列 / 最长多少 / 几行」写进报错，运维按图清理。
+MAX_STATE_COLUMN_LEN = 255
 
 #: `COLUMN_DEFAULT` 的三态判据（PR #2157 门禁复审 BLOCKED 的最小修复）。
 #:
@@ -154,6 +162,56 @@ def _state_column_defaults(conn: Any) -> dict:
     return out
 
 
+def _overlong_state_values(conn: Any, col: str) -> tuple:
+    """量一列存量值里超过 `MAX_STATE_COLUMN_LEN` 的行数与最长长度。
+
+    返回 ``(超长行数, 最大长度)``。长度函数按方言挑：MySQL 是 `CHAR_LENGTH`（按字符，
+    与 VARCHAR 的 1406 口径一致），SQLite 没有它、退化成 `LENGTH`。两种都探测不出来
+    （表还没建 / 权限不足）就 raise，由调用方 `_precheck_state_column_lengths` 记
+    WARNING 后按 0 处理 —— 这是收窄 DDL 前的**诊断前置检查**，不是收敛判据：
+    量不到不该阻断迁移，真超长时 MODIFY 自己会 1406（只是日志里没有可操作信息）。
+    """
+    row = None
+    with closing(conn.cursor()) as cursor:
+        for expr in ("CHAR_LENGTH", "LENGTH"):   # MySQL / SQLite 方言
+            try:
+                row = cursor.execute(
+                    f"SELECT COUNT(*), COALESCE(MAX({expr}({col})), 0) FROM {TABLE} "
+                    f"WHERE {expr}({col}) > ?", (MAX_STATE_COLUMN_LEN,)).fetchone()
+            except Exception as e:  # noqa: BLE001 - 换方言重试；两种都失败由调用方 WARNING
+                log.debug(f"autopilot state length probe {expr} unsupported: {e}")
+                row = None
+            if row is not None:
+                break
+    if row is None:
+        raise RuntimeError(f"autopilot state column length probe failed: {TABLE}.{col}")
+    return int(row[0] or 0), int(row[1] or 0)
+
+
+def _precheck_state_column_lengths(conn: Any, cols) -> None:
+    """发 MODIFY 前统一预检存量长度：任一列超长就 raise（不盖章，零 DDL）。
+
+    strict 模式下把宽列收窄到 `VARCHAR(255)` 遇超长值是 1406 而不是截断，迁移就会
+    每次启动重试、日志只剩一行 SQL 错误码；这里把「哪一列 / 最多几行 / 最长多少」
+    一次报全。不静默截断业务值——那是改数据，属运维手工动作。
+    """
+    overlong = []
+    for col in cols:
+        try:
+            rows, longest = _overlong_state_values(conn, col)
+        except Exception as e:  # noqa: BLE001 - 探测失败只少一条诊断，不阻断迁移
+            log.warning(f"autopilot state column length probe failed for {col}: {e}")
+            rows, longest = 0, 0
+        if rows:
+            overlong.append(f"{TABLE}.{col}: {rows} 行，最长 {longest}")
+    if overlong:
+        raise RuntimeError(
+            "autopilot state column defaults: 存量值超过 VARCHAR("
+            f"{MAX_STATE_COLUMN_LEN})，strict 下 MODIFY 必报 1406："
+            + "; ".join(overlong)
+            + "。先清理/截断这些行再重试（本迁移不盖章，不静默截断业务值）")
+
+
 def ensure_state_column_defaults(conn: Any = None) -> int:
     """把三列从「TEXT NOT NULL 无默认」修正为 `VARCHAR(255) NOT NULL DEFAULT ''`。
 
@@ -170,6 +228,9 @@ def ensure_state_column_defaults(conn: Any = None) -> int:
     - 幂等：只对**已收敛为空串默认值**（``classify_column_default == DEFAULT_OK``）的列
       零写，其余三态（NULL / 表达式默认 / 缺列）分别 MODIFY 与 raise，返回值 = 实际修正列数
       （PR #2157 门禁复审：只按「默认值非空串」判待修会把 NULL 当成已修，迁移空转却盖章）。
+    - 收窄前预检存量长度（`_overlong_state_values`）：有超长值就 raise 并报出「列 / 行数 /
+      最长长度」，避免 strict 下的 1406 变成每次启动只有一行 SQL 错误码的黑盒重试
+      （PR #2157 复审 Optional；不静默截断业务值）。
     列缺失时 raise：本迁移只改列定义，改不了缺列，交补列迁移 202611240007 重试。
     SQLite（单实例、无蓝绿共存）列已是 TEXT DEFAULT ''，无需修正，返回 0。
     """
@@ -197,9 +258,13 @@ def ensure_state_column_defaults(conn: Any = None) -> int:
                 raise RuntimeError(
                     "autopilot state column defaults: columns missing "
                     f"{missing} - 补列迁移 202611240007 未落地，本迁移不盖章")
-            for col, ddl in STATE_COLUMNS:
-                if classify_column_default(current, col) == DEFAULT_OK:
-                    continue          # 已是空串默认值，零写
+            to_fix = [(col, ddl) for col, ddl in STATE_COLUMNS
+                      if classify_column_default(current, col) != DEFAULT_OK]
+            # 先把该修的单子拉出来、统一预检长度，再发 DDL：任何一列超长都在动
+            # 第一列之前就 raise，不留下「改了一半」的半态。
+            if to_fix:
+                _precheck_state_column_lengths(target, [col for col, _ddl in to_fix])
+            for col, ddl in to_fix:
                 if not _ds._destructive_ddl(
                         cursor, f"ALTER TABLE {TABLE} MODIFY COLUMN {col} {ddl}",
                         kind_hint="cleanup"):

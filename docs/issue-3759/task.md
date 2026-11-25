@@ -4,7 +4,7 @@
 |---|------|------|------|
 | T1 | 窗口日志去重原语（kernel） | done | `src/kernel/log_dedupe.py`；`tests/kernel/test_issue_3759_log_dedupe.py`（8 例） |
 | T2 | 永久失败判定 + 退避档位 | done | `is_permanent_status` / `backoff_seconds`；`TestClassification`（14 参数化例） |
-| T3 | 仓库级存在性探测 + 台账列 + 幂等迁移 | done | `probe_repo`；`migrations/repo_vcs_health_columns.py`（`202611250001`） |
+| T3 | 仓库级存在性探测 + 台账列 + 幂等迁移 | done | `probe_repo`；`migrations/repo_vcs_health_columns.py`（`202611250005`，原 202611250001 撞号已 renumber） |
 | T4 | 熔断判定与短路（`_vcs_get_issue` / `issues get` 路由） | done | `TestProbeAndFuse` / `TestReadPathShortCircuit` |
 | T5 | 自动恢复 + 运维 reset 入口 + 列表字段 | done | `note_recovery` / `POST vcs-health/reset` / `/managed` 的 `vcs_*` |
 | T6 | `_vcs_req` 与 `api_client` 日志降噪 | done | `TestUpstreamReqDedupe`（含 429 不标 permanent 与状态码透传回归） |

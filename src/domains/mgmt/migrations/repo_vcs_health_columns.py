@@ -1,4 +1,9 @@
-"""managed_repos 补「VCS 存在性熔断」8 列（迁移 202611250001，Issue #3759）。
+"""managed_repos 补「VCS 存在性熔断」8 列（迁移 202611250005，Issue #3759）。
+
+版本号原为 202611250001，与 events-cascade-compensation-columns /
+issue4339-events-payload-mediumtext / create-autopilot-payload-guard-table 撞号
+（PR #2157 门禁复审 Critical：台账按 version 判「已执行」，同号后登记者永久跳过）；
+001 保留给 events-cascade-compensation-columns，本条 renumber 到 202611250005。
 
 上游 VCS 已不存在的孤儿仓库卡（如 `huaweicloud-mate/repository-requests`）当前
 没有任何字段承载「仓库不在上游」这一事实：巡检每轮逐 issue 打上游，404 被当作
@@ -72,12 +77,12 @@ def verify_repo_vcs_health_columns(conn: Any = None) -> None:
     missing = [col for col, _ddl in COLUMNS if col not in cols]
     if missing:
         raise RuntimeError(
-            f"202611250001 post_check 未收敛：{TABLE} 缺列 {missing}（不盖章，下次启动重试）")
-    log.info(f"202611250001 post_check 通过：{TABLE} VCS 熔断台账列在位")
+            f"202611250005 post_check 未收敛：{TABLE} 缺列 {missing}（不盖章，下次启动重试）")
+    log.info(f"202611250005 post_check 通过：{TABLE} VCS 熔断台账列在位")
 
 
 MIGRATION = {
-    "version": "202611250001",
+    "version": "202611250005",
     "name": "repo-vcs-health-breaker-columns",
     "kind": "safe",
     "fn": add_repo_vcs_health_columns,
