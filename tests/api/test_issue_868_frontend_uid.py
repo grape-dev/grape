@@ -237,10 +237,18 @@ class TestTraceTaskItemUid:
         assert item["engine_uid"] == ""
 
 
+def _force_single_db(monkeypatch):
+    """本类用例断言「单库拓扑回落进程主库」：显式钉死拓扑，避免宿主环境
+    导出的 GRAPE_DSN_RUNTIME / GRAPE_DOMAIN_LIB（三库部署机）改变路由判定。"""
+    monkeypatch.setenv("GRAPE_DOMAIN_LIB", "0")
+    monkeypatch.delenv("GRAPE_DSN_RUNTIME", raising=False)
+
+
 # ---------- F4 解绑引擎提示 ----------
 
 class TestDetachedEngineHintsUid:
     def test_hints_carry_engine_uid(self, monkeypatch):
+        _force_single_db(monkeypatch)
         conn = _db_with_runtimes(uid=True)
         conn.execute(_DETACH_LOG)
         conn.execute("INSERT INTO scene_engine_detach_log (scene_row_id, scene_id, node_tag, runtime_id, runtime_name) "
@@ -248,11 +256,15 @@ class TestDetachedEngineHintsUid:
         conn.commit()
         _patch_db(monkeypatch, conn)
         es = importlib.import_module("src.domains.runtime.engine.engine_select")
-        hints = es.get_detached_engine_hints(scene_row_id=11)
+        # Issue #3909：返回 {hints, degraded, reason}（原为裸 list）
+        res = es.get_detached_engine_hints(scene_row_id=11)
+        hints = res["hints"]
+        assert res["degraded"] is False
         assert hints and hints[0].get("runtime_id") == 1
         assert hints[0].get("engine_uid") == UID_OPENCODE
 
     def test_hints_missing_column_degrades_empty(self, monkeypatch):
+        _force_single_db(monkeypatch)
         conn = _db_with_runtimes(uid=False)
         conn.execute(_DETACH_LOG)
         conn.execute("INSERT INTO scene_engine_detach_log (scene_row_id, scene_id, node_tag, runtime_id, runtime_name) "
@@ -260,5 +272,7 @@ class TestDetachedEngineHintsUid:
         conn.commit()
         _patch_db(monkeypatch, conn)
         es = importlib.import_module("src.domains.runtime.engine.engine_select")
-        hints = es.get_detached_engine_hints(scene_row_id=11)
+        res = es.get_detached_engine_hints(scene_row_id=11)
+        hints = res["hints"]
+        assert res["degraded"] is False
         assert hints and hints[0].get("engine_uid") == ""
