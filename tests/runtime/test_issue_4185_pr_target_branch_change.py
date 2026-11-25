@@ -104,6 +104,9 @@ def _skipped_reasons():
             "SELECT reason FROM event_skipped WHERE repo_key=?", (_REPO,)).fetchall()]
 
 
+# GitCode MR update webhook payload fixture（假设来源：GitCode changes 条目采用
+# previous/current 前后值形态，与 PR #2053 引入的 changes 规范化口径一致；
+# 未获得线上真实事件日志，键名以此假设为准，如后续拿到真实事件请校正判定键名）。
 _TARGET_SWITCH_CHANGES = {
     "target_branch": {"previous": _OLD_BRANCH, "current": _NEW_BRANCH},
 }
@@ -190,19 +193,81 @@ class TestPRTargetBranchChange:
 
 
 class TestPRTargetBranchChangeDetector:
+    """直接单测：判定 helper（event_types.py 单点实现）。
+
+    fixture 假设来源：GitCode MR update webhook 的 changes 条目采用
+    ``{"previous": ..., "current": ...}`` 前后值形态（与 PR #2053 引入的
+    changes 规范化口径一致）；未获得线上真实事件日志，键名以
+    object_attributes.target_branch + changes.target_branch 假设为准。
+    """
+
     def test_changed_shapes(self):
-        from src.domains.runtime.pipeline.event_pipeline import _pr_target_branch_changed
-        assert _pr_target_branch_changed({"changes": {
+        from src.domains.runtime.vcs.event_types import pr_target_branch_changed
+        assert pr_target_branch_changed({"changes": {
             "target_branch": {"previous": "a", "current": "b"}}}) is True
-        assert _pr_target_branch_changed({"changes": {
+        assert pr_target_branch_changed({"changes": {
             "target_branch": {"from": "a", "to": "b"}}}) is True
-        assert _pr_target_branch_changed({"changes": {
+        assert pr_target_branch_changed({"changes": {
             "target_branch": {"old": "a", "new": "b"}}}) is True
 
     def test_unchanged_or_missing(self):
-        from src.domains.runtime.pipeline.event_pipeline import _pr_target_branch_changed
-        assert _pr_target_branch_changed({"changes": {
+        from src.domains.runtime.vcs.event_types import pr_target_branch_changed
+        assert pr_target_branch_changed({"changes": {
             "target_branch": {"previous": "a", "current": "a"}}}) is False
-        assert _pr_target_branch_changed({"changes": {}}) is False
-        assert _pr_target_branch_changed({}) is False
-        assert _pr_target_branch_changed({"object_attributes": {"target_branch": "a"}}) is False
+        assert pr_target_branch_changed({"changes": {}}) is False
+        assert pr_target_branch_changed({}) is False
+        assert pr_target_branch_changed({"object_attributes": {"target_branch": "a"}}) is False
+
+    def test_trigger_helper_commit_or_branch_change(self):
+        """单点触发判定：有新 commit 或目标分支变化 → True；皆无 → False。"""
+        from src.domains.runtime.vcs.event_types import pr_update_triggers_subscription
+        # 有新 commit（commits / oldrev）
+        assert pr_update_triggers_subscription({"commits": [{"id": "c1"}]}) is True
+        assert pr_update_triggers_subscription({
+            "object_attributes": {"oldrev": "abc"}}) is True
+        # 目标分支变化（GitCode MR update webhook previous/current 形态）
+        assert pr_update_triggers_subscription({"changes": {
+            "target_branch": {"previous": "a", "current": "b"}}}) is True
+        # 皆无 → False
+        assert pr_update_triggers_subscription({}) is False
+        assert pr_update_triggers_subscription({
+            "object_attributes": {"target_branch": "a"}}) is False
+        assert pr_update_triggers_subscription({"changes": {
+            "target_branch": {"previous": "a", "current": "a"}}}) is False
+
+
+class TestEvaluateEventActionPRUpdate:
+    """event_rule.evaluate_event_action 直接单测（QA Spec 第 4 项）。
+
+    payload 形态假设来源：GitCode MR update webhook（PR #2053 形态）——
+    ``object_attributes.action="update"`` + ``object_attributes.oldrev`` 表示新
+    commit；``changes.target_branch`` 采用 ``previous/current`` 前后值形态。
+    未获得线上真实事件日志，键名以此假设为准。
+    """
+
+    def _evaluate(self, payload):
+        from src.api.event_rule import evaluate_event_action
+        return evaluate_event_action("pull_request_updated", payload)
+
+    def test_target_branch_change_not_skipped(self):
+        """目标分支变化（无新 commit）→ 不返回 no_commit_on_pr_update（放行）。"""
+        result = self._evaluate({
+            "object_attributes": {"action": "update", "iid": 4185,
+                                  "target_branch": _NEW_BRANCH},
+            "changes": {"target_branch": {"previous": _OLD_BRANCH,
+                                          "current": _NEW_BRANCH}},
+            "user": {"username": "human_user"},
+        })
+        assert result["decision"] != "skip" or result["reason"] != "no_commit_on_pr_update", result
+
+    def test_unchanged_without_commit_skips(self):
+        """分支未变且无 commit → 仍 skip（no_commit_on_pr_update）。"""
+        result = self._evaluate({
+            "object_attributes": {"action": "update", "iid": 4185,
+                                  "target_branch": _NEW_BRANCH},
+            "changes": {"target_branch": {"previous": _NEW_BRANCH,
+                                          "current": _NEW_BRANCH}},
+            "user": {"username": "human_user"},
+        })
+        assert result["decision"] == "skip", result
+        assert result["reason"] == "no_commit_on_pr_update", result

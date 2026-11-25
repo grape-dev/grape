@@ -136,6 +136,20 @@ def pr_target_branch_changed(payload: dict) -> bool:
     return True
 
 
+def pr_update_triggers_subscription(payload: dict) -> bool:
+    """PR update 是否触发 PR 订阅匹配（Issue #4185 单点判定，四处复用）。
+
+    触发条件：有新 commit（payload.commits 或 object_attributes.oldrev 非空）
+    或目标分支变化（pr_target_branch_changed）。两者皆无 → False（跳过）。
+    """
+    if not isinstance(payload, dict):
+        return False
+    _oa = payload.get("object_attributes", {}) or {}
+    return (bool(payload.get("commits"))
+            or bool(_oa.get("oldrev"))
+            or pr_target_branch_changed(payload))
+
+
 SKILL_RESOLVE_FAILED = "skill_resolve_failed"
 
 

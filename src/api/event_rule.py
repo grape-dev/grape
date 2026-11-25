@@ -13,7 +13,7 @@ import json
 import time as _time
 
 from src.kernel.config import log
-from src.domains.runtime.vcs.event_types import pr_target_branch_changed
+from src.domains.runtime.vcs.event_types import pr_update_triggers_subscription
 
 # 规则缓存（进程内 TTL，避免每次事件都查库）
 # 结构: {(vcs_source, event_type): {action: rule}}
@@ -142,10 +142,8 @@ def evaluate_event_action(event_type: str, payload: dict, vcs_source: str = "") 
     # GitCode payload 无 commits 字段，用 oldrev 判断是否有新 commit
     # Issue #4185：目标分支变化（即使无新 commit）需放行，按新目标分支重新匹配 PR 订阅。
     if action == "update" and event_type in ("pull_request_opened", "pull_request_updated"):
-        _oa = payload.get("object_attributes", {}) or {}
-        _has_new_commit = (bool(payload.get("commits")) or bool(_oa.get("oldrev"))
-                           or pr_target_branch_changed(payload))
-        if not _has_new_commit:
+        _update_triggers = pr_update_triggers_subscription(payload)
+        if not _update_triggers:
             return {"decision": "skip", "reason": "no_commit_on_pr_update",
                     "actor_type": _get_actor(payload), "side_effect": ""}
 
