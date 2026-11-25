@@ -920,20 +920,20 @@
     </AGModal>
 
     <!-- ═══ 转换（复制）确认弹窗 ═══ -->
-    <AGModal :open="convertCtx.open" :title="td('convert_title')" @close="convertCtx.open = false">
+    <AGModal :open="convertCtx.open" :title="tt2('convert_title')" @close="convertCtx.open = false">
       <div class="sk__conf">
         <div class="sk__conf-ic sk__conf-ic--blue">🔄</div>
         <h3>
-          {{ td('convert_name').replace('{name}', convertCtx.skill ? convertCtx.skill.name : '') }}
+          {{ tt2('convert_name').replace('{name}', convertCtx.skill ? convertCtx.skill.name : '') }}
         </h3>
         <div class="sk__conf-desc">{{ convertDesc }}</div>
       </div>
       <template #footer>
         <AGButton size="sm" variant="plain" @click="convertCtx.open = false">{{
-          td('cancel')
+          tt2('action.cancel')
         }}</AGButton>
         <AGButton size="sm" :disabled="convertCtx.busy" @click="confirmConvert">
-          {{ convertCtx.busy ? td('converting') : td('confirm_convert') }}
+          {{ convertCtx.busy ? tt2('converting') : tt2('confirm_convert') }}
         </AGButton>
       </template>
     </AGModal>
@@ -1139,11 +1139,6 @@ const D = {
   to_user: '转个人',
   scope_repo: '仓库技能',
   scope_user: '个人技能',
-  convert_title: '确认转换作用域',
-  convert_name: '确认转换「{name}」',
-  cancel: '取消',
-  converting: '转换中...',
-  confirm_convert: '确认转换',
 }
 function td(key) {
   return D[key]

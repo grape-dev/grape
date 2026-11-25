@@ -331,5 +331,7 @@
   "tab_resources": "资源",
   "tab_related": "相关技能",
   "tab_versions": "版本历史",
-  "login_required": "请先登录后再发表评论"
+  "login_required": "请先登录后再发表评论",
+  "convert_title": "确认转换作用域",
+  "convert_name": "确认转换「{name}」"
 }

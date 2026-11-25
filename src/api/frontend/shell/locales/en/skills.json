@@ -331,5 +331,7 @@
   "tab_resources": "Resources",
   "tab_related": "Related",
   "tab_versions": "Versions",
-  "login_required": "Please sign in to comment"
+  "login_required": "Please sign in to comment",
+  "convert_title": "Confirm Scope Conversion",
+  "convert_name": "Confirm conversion of \"{name}\""
 }
