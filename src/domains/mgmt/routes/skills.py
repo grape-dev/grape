@@ -2053,7 +2053,9 @@ class SkillContentRequest(BaseModel):
 #: AI 填写允许的概览槽位（与前端 metaCtx.intro 的五个键一致）
 _AI_INTRO_KEYS = ("scope", "steps", "products", "constraints", "review")
 #: 在线保存 SKILL.md 的正文大小上限（1MB，远小于 zip 的 10MB 上限）
-_SKILL_MD_MAX_BYTES = 1024 * 1024
+# 五源登记：_SKILL_MD_MAX_BYTES = <undecided: SKILL.md 正文字长分布实测>，
+# 暂用 1MB（相对 zip 10MB 上限的工程护栏），env 可配（QA Informational 2 登记形态对齐）。
+_SKILL_MD_MAX_BYTES = int(os.environ.get("GRAPE_SKILL_MD_MAX_BYTES", str(1024 * 1024)))
 
 
 def _user_repo_keys(user: dict) -> set[str]:

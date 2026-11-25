@@ -1053,7 +1053,7 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
     import asyncio
     import time
 
-    from src.kernel.llm import LLMConfigError, LLMRequestError, chat_completion
+    from src.kernel.llm import DEFAULT_MODEL, LLMConfigError, LLMRequestError, chat_completion
 
     polish_prompt = f"""请优化以下自动化任务指令，使其更清晰、更结构化。
 
@@ -1074,7 +1074,7 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
         try:
             # 润色用轻量模型，不走默认的 glm-5.2（响应慢）
             content = chat_completion(polish_prompt, max_tokens=1000, temperature=0.3,
-                                      timeout=30, force_model="deepseek-v4.1-flash-1017")
+                                      timeout=30, force_model=DEFAULT_MODEL)
         except LLMConfigError as e:  # 配置缺失/不完整 → 503
             raise HTTPException(status_code=503, detail={"code": 503, "message": str(e)})
         except LLMRequestError as e:  # 网络/上游失败 → 500（保留原有状态码）

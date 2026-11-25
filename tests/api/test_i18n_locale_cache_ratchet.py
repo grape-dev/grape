@@ -26,10 +26,10 @@ LOCALE_FINGERPRINT = 'd01bb044011597a3'
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
-    'index.html': ('93', '53'),
+    'index.html': ('94', '53'),
     'admin.html': ('20261124-2', '20261114-23'),
-    'register.html': ('71', '45'),
-    'forgot.html': ('71', '45'),
+    'register.html': ('72', '45'),
+    'forgot.html': ('72', '45'),
 }
 
 # 各页面 cacheVer 的取法（三份 auth 页是内联 IIFE，admin 走 I18N.init）
@@ -110,12 +110,14 @@ def test_locale_change_bumps_index_cachever():
         return r.stdout
 
     try:
-        prev = _git("rev-parse", "HEAD~1").decode().strip()
         head = _git("rev-parse", "HEAD").decode().strip()
+        parents = _git("rev-list", "--parents", "-n", "1", "HEAD").decode().split()[1:]
     except Exception as e:
         pytest.skip(f"浅克隆 / 无 git 环境跳过: {e}")
-    if not prev or prev == head:
+    if not parents:
         pytest.skip("无前一提交可对比")
+    # QA C-1（#2161 首轮）：merge 提交要对比全部 parent——base 侧 cacheVer 更高而
+    # 语言包指纹变化时，仅比 HEAD~1 会漏报（守卫盲区本体）
 
     def _fp_at(commit: str) -> str:
         h = hashlib.sha256()
@@ -127,18 +129,20 @@ def test_locale_change_bumps_index_cachever():
                 h.update(_git("show", f"{commit}:{name}"))
         return h.hexdigest()[:16]
 
-    if _fp_at(prev) == _fp_at(head):
-        pytest.skip("语言包在本提交未变化，无需抬档")
-
     def _ver_at(commit: str) -> str:
         html = _git("show", f"{commit}:src/api/frontend/shell/index.html").decode("utf-8")
         m = re.search(r"__I18N_CACHE_VER__\s*=\s*['\"]([^'\"]+)['\"]", html)
         return m.group(1) if m else ""
 
-    v_prev, v_head = _ver_at(prev), _ver_at(head)
-    assert v_head != v_prev and version_rank(v_head) > version_rank(v_prev), (
-        f"语言包内容在本提交发生变化但 index.html 的 i18n cacheVer 未抬升"
-        f"（{v_prev} -> {v_head}）——浏览器会继续吃旧缓存，新增 key 取不到（QA D1 盲区）")
+    v_head = _ver_at(head)
+    for parent in parents:
+        if _fp_at(parent) == _fp_at(head):
+            continue  # 该 parent 侧语言包没变，无需抬档
+        v_parent = _ver_at(parent)
+        assert version_rank(v_head) > version_rank(v_parent), (
+            f"语言包内容相对 {parent[:9]} 发生变化但 index.html 的 i18n cacheVer 未抬升"
+            f"（parent={v_parent} -> head={v_head}）——浏览器会继续吃旧缓存，"
+            "新增 key 取不到（QA D1 盲区，merge 场景对两侧 parent 均需抬档）")
 
 
 def test_page_cache_ver_is_current_and_monotonic():

@@ -592,7 +592,7 @@ def generate() -> int:
     """生成并覆写 src/api/frontend/shell/help.html；返回渲染的 markdown 文件数。"""
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = build_data()
-    OUT_PATH.write_text(build_help_html(data), encoding="utf-8")
+    OUT_PATH.write_text(build_help_html(data), encoding="utf-8", newline="\n")
     return len(data["usage"]) + len(data["api"]) + len(data.get("reference", [])) + len(data.get("developer", []))
 
 

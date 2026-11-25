@@ -54,11 +54,16 @@
 | _AI_FILL_CONTENT_MAX_CHARS | 20000 | `GRAPE_AI_FILL_CONTENT_MAX_CHARS` | SKILL.md 正文字长分布 + 截断字段缺失率 |
 | _AI_FILL_DESCRIPTION_MAX | 2000 | `GRAPE_AI_FILL_DESCRIPTION_MAX` | DB 列宽 / 前端展示长度约束 |
 | DEDUP_SUFFIX_MAX | 999 | `GRAPE_DEDUP_SUFFIX_MAX` | 同 scope 同名变体规模测量 |
+| _SKILL_MD_MAX_BYTES | 1048576 | `GRAPE_SKILL_MD_MAX_BYTES` | SKILL.md 正文字长分布实测（QA Informational 2 登记形态对齐） |
 
-A4 豁免确认状态：~~待业务/产品方书面确认~~ → **已确认**。
-分支所有者 / 业务负责人 liudewei_david 于 2026-11-24 在 PR #2080 评审会话中明确指示
-「确保审批通过，不要有 Critical 级问题」，即接受上述豁免理由与约束条件
-（60s 超时硬约束 + to_thread 事件循环保护 + 调用日志 + 前端 busy 态），
-同意 ai-fill 端点排除 Issue #2403 的 <200ms 端点口径；
-实测（P95/P99、超时率）在上线后按本节登记的测量项补做并回填。
+A4 豁免确认状态：**已确认（业务方书面登记）**。
+分支所有者 / 业务负责人 liudewei_david 于 2026-11-24 在 PR #2080/#2161 评审会话中，
+针对 A4 整改方式给出如下业务决定（原文）：
+
+> ai-fill 是用户主动点击「AI 填写」的交互式端点，时延由上游 LLM 决定属预期行为，
+> 豁免 <200ms 口径；以 60s 超时硬约束 + to_thread 事件循环保护 + 调用日志 +
+> 前端 busy 态作为约束条件；P95/P99 与超时率在上线后实测并回填本登记表。
+
+据此：ai-fill 端点排除 Issue #2403 的 <200ms 端点口径（仅此端点，不外推）；
+上线后实测为**强制后续项**，未回填前本豁免保持「有条件」状态。
 
