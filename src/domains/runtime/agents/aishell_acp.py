@@ -42,6 +42,8 @@ from src.domains.runtime.agents.hwcloud_acp import (  # noqa: E402
     _normalize_update_type,
     _tool_name_from_title,
 )
+# Issue #4346：session/new 失败文案统一带稳定分类标记（服务端据此分流）。
+from src.domains.runtime.engine.session_guard import format_session_error as _format_session_error
 
 # aishell 默认 trial 路由（无凭据必失败，见模块 docstring ①）
 _TRIAL_MODEL_VALUE = '["aishell","trial"]'
@@ -393,7 +395,7 @@ class AishellDshACPBackend:
                     "mcpServers": [],
                 }, timeout=100)
                 if err:
-                    error_events.append(f"session/new failed: {err}")
+                    error_events.append(_format_session_error("session/new", err))
                     yield ("done", _done_result(-1, "", session_id, error_events, ""))
                     return
                 new_session_id = _extract_session_id(result) or ""

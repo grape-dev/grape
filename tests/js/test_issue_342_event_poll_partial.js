@@ -12,6 +12,8 @@ const fs = require('fs');
 const path = require('path');
 
 const VIEW = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/EventView.vue'), 'utf8');
+// Issue #3812：轮询器封装（stop 的真实清表动作在这里）
+const GUARD = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/lib/pollGuard.js'), 'utf8');
 
 function fnBody(name) {
   const i = VIEW.indexOf('function ' + name + '(');
@@ -52,7 +54,16 @@ check('无 seq 不轮询', function () {
 check('定时器统一清理', function () {
   assert.ok(/function stopPoll\(/.test(VIEW), '应有 stopPoll');
   const b = fnBody('stopPoll');
-  assert.ok(/clearInterval|clearTimeout/.test(b), '应清理定时器');
+  // Issue #3812：清表动作下沉到会话感知轮询器（createSessionPoller.stop → clearTimer），
+  // 视图侧改为委托；这里同时校验委托点与封装内真实的 clearInterval，守卫生效面不下移。
+  assert.ok(
+    /clearInterval|clearTimeout|detailPoller\.stop\(\)/.test(b),
+    '应清理定时器（或委托轮询器 stop）'
+  );
+  assert.ok(
+    /function clearTimer\(\) \{[\s\S]{0,200}?clearInterval\(timer\)/.test(GUARD),
+    '轮询器 stop 必须真实 clearInterval（封装不得变成空转）'
+  );
   assert.ok(/onBeforeUnmount/.test(VIEW), '组件卸载应停轮询');
 });
 

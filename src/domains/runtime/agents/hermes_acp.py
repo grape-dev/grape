@@ -44,6 +44,9 @@ import shlex
 import select as _select_mod
 from typing import Generator, Protocol, Callable
 from src.kernel.config import log
+# Issue #4346：session/new 失败文案统一带稳定分类标记（服务端按标记分流
+# ENGINE_UNREACHABLE / SESSION_CREATE_BLOCKED / ENGINE_MISCONFIGURED）。
+from src.domains.runtime.engine.session_guard import format_session_error as _format_session_error
 
 _bwrap_fail_notified = False
 
@@ -252,19 +255,34 @@ class HermesACPBackend:
 
             # symlink 镜像共享 home 的内容（学习 multica mirrorSharedHermesHome）
             # 只覆写 state.db（task-local）和 config.yaml（tool_progress=new）
-            _build_overlay_home(iso_home, src_home)
+            _build_notes = _build_overlay_home(iso_home, src_home)
             # issue #439 worker 写前兜底：可写目录必须是真实目录（reparse point 会触发
             # Windows 提权引擎 hermes_dir_acl 拒绝授权）。覆盖存量 home 与构建后竞态。
             ensure_overlay_writable_dirs(iso_home)
-            if not _overlay_looks_usable(iso_home, src_home):
+            # issue #3904：自检与构建跳过清单同源（_overlay_unusable_reasons）——
+            # 构建不产出的条目不再被要求，杜绝「跳过却必需」的 100% 回退。
+            _unusable = _overlay_unusable_reasons(iso_home, src_home)
+            if _unusable:
                 # 三个梯次（symlink/junction/递归复制）都没拼出可用 home 时，
                 # 绝不能把残缺目录交给引擎（它会把这里当全新数据根重装自己）。
-                log.warning(f"{label}hermes ACP: overlay home unusable — falling back to "
-                            f"shared HERMES_HOME={src_home} (hermes tasks serialized)")
+                # 回退计数 + 梯次/原因进日志：回退本应是 0，任何非 0 都要可定位。
+                _fallback_total = _record_overlay_fallback()
+                _mark_shared_home_fallback(cwd)
+                log.warning(
+                    f"{label}ACP_OVERLAY_FALLBACK total={_fallback_total} "
+                    f"tier={_overlay_fallback_tier(_build_notes)} "
+                    f"reasons={';'.join(_unusable[:6])} "
+                    f"build_notes={';'.join(_build_notes[:6])} — "
+                    f"hermes ACP: overlay home unusable — falling back to "
+                    f"shared HERMES_HOME={src_home} (hermes tasks serialized)")
                 _remove_overlay_tree(iso_home)
                 iso_home = src_home
                 _use_overlay = False
                 _shared_home_mode = True
+            elif _build_notes:
+                # 可用但有降级（如 symlink 失败退 junction/复制）：留 INFO 备查，
+                # 不加 WARNING —— 复制出来的资产仍可用，不该逐任务告警。
+                log.info(f"{label}ACP_OVERLAY_DEGRADED notes={';'.join(_build_notes[:6])}")
         else:
             iso_home = src_home
             _shared_home_mode = True
@@ -586,7 +604,7 @@ class HermesACPBackend:
                         "cwd": cwd_arg, "mcpServers": [],
                     }, timeout=100)
                     if err:
-                        error_events.append(f"session/new failed: {err}")
+                        error_events.append(_format_session_error("session/new", err))
                         yield ("done", _done_result(-1, "", session_id, error_events, _stderr_text()))
                         return
                     new_session_id = _extract_session_id(result) or ""
@@ -597,7 +615,7 @@ class HermesACPBackend:
                     "cwd": cwd_arg, "mcpServers": [],
                 }, timeout=100)
                 if err:
-                    error_events.append(f"session/new failed: {err}")
+                    error_events.append(_format_session_error("session/new", err))
                     yield ("done", _done_result(-1, "", session_id, error_events, _stderr_text()))
                     return
                 new_session_id = _extract_session_id(result) or ""
@@ -1592,6 +1610,12 @@ _OVERLAY_READONLY_SYMLINK_ENTRIES = frozenset({
     # 且每个 home 各下各的，磁盘按 2G/home 炸。归入 symlink 后共享源 home 一份，
     # 启动恢复秒级。
     "installs", "tools", "bin", "lsp", "huaweicloud-plugins",
+    # profiles/：Hermes 多 profile 目录（每个 profile 的 skills/plugins/config）。
+    # issue #3904：历史上它被列进构建跳过清单，却又在自检必需清单里 →
+    # 共享 home 一有 profiles/ 就 100% 回退共享 home（任务串行 + state.db 1GB）。
+    # 归入只读共享资产：Linux symlink、Windows junction、都失败时有界复制，
+    # 三梯次任一产出都能让自检的「存在且非空」通过。
+    "profiles",
 })
 
 # 新归入 symlink 的 hermes 自管运行时目录（构建期遇到历史真实空目录/下载残骸时
@@ -1599,6 +1623,30 @@ _OVERLAY_READONLY_SYMLINK_ENTRIES = frozenset({
 _OVERLAY_RUNTIME_SYMLINK_DIRS = frozenset({
     "installs", "tools", "bin", "lsp", "huaweicloud-plugins",
 })
+
+# 历史真实目录必须删除重建 symlink 的只读共享资产。
+# #3904：profiles 若被旧兜底规则建成真实空目录，自检的「源非空而目标为空」会判
+# 不可用 → 又回退共享 home。保留在 symlink 分支的「真实目录 → continue」豁免之外。
+_OVERLAY_FORCE_SYMLINK_DIRS = _OVERLAY_RUNTIME_SYMLINK_DIRS | frozenset({"profiles"})
+
+# issue #3904：overlay 构建「跳过清单」与可用性自检「必需清单」必须同源。
+# 历史缺陷：构建把 profiles 跳过（不产出），自检把它列为必需 → 共享 HERMES_HOME
+# 一旦有 profiles/（Hermes 多 profile 目录），每条任务必然「构建不产出 → 自检
+# 不可用 → 整体回退共享 home」：_SHARED_HOME_LOCK 全局串行、共享 state.db 无界
+# 膨胀（生产实测 1.03GB，每任务 skipping resume）、usage_collect 读不到 overlay
+# state.db。两表分列于此，自检按「必需 − 跳过」求值，任一侧新增条目都不会再现互斥。
+_OVERLAY_NOT_MIRRORED = frozenset({
+    # 任务本地/覆写条目
+    "state.db", "state.db-wal", "state.db-shm",
+    "config.yaml", ".env", "active_profile",
+    # 网关控制文件（gateway-ctl-not-mirrored，2026-10-24）：镜像进任务 home 会让
+    # hermes 网关归属判定判 unsafe_control_path → ACP session/new 被拒（-32603）。
+    "gateway.sock", "gateway.sock.path", "gateway.lock",
+    "gateway.pid", "gateway_state.json", "gateway-starts.log",
+})
+
+# 引擎启动硬依赖：缺任何一个就不值得尝试 overlay（源 home 没有的条目跳过不判）。
+_OVERLAY_REQUIRED_ENTRIES = ("tools", "installs", "skills", "plugins", "auth", "profiles")
 
 def _overlay_entry_kind(entry: str, src_path: str | None = None) -> str:
     """分类 overlay 条目的构建类型："dir"（真实目录）/ "file"（真实空文件）/
@@ -1784,36 +1832,95 @@ def _junction_dir(target: str, link: str) -> bool:
 # 会抢 SQLite 写锁。worker 本来串行跑任务，这把锁只在回退共享 home 时生效。
 _SHARED_HOME_LOCK = __import__("threading").Lock()
 
+# issue #3904：overlay 回退计数（正常应为 0；>0 说明构建/自检仍有缺口）。
+# 不落 runtime_credentials 指标列：已盖章迁移 202611240006 再补列在存量库不生效
+# （只对新库生效），心跳 UPDATE 会以 Unknown column 整条失败，风险大于收益。
+# 这里维护进程内累计 + 单行结构化日志（Loki `|= "ACP_OVERLAY_FALLBACK"` 可直接计数）。
+_OVERLAY_FALLBACK_TOTAL = 0
+_OVERLAY_FALLBACK_LOCK = __import__("threading").Lock()
+
+# 回退共享 home 的 cwd 集合：usage_collect 据此决定账本要不要读共享 state.db。
+# 不能无条件回退读共享账本（overlay 缺失也可能只是「本任务没跑过 hermes」，
+# 无条件读会把共享库里别的历史累计整段当成本次用量），所以由真正发生回退的
+# `stream_execute` 打标，用量采集侧只认标记过的 cwd。
+# worker 进程长驻、cwd 会一直累积 → 上限 512 条，超出按插入顺序淘汰最早的。
+_SHARED_HOME_FALLBACK_CWDS: dict[str, None] = {}
+_FALLBACK_CWD_MAX = 512
+
+
+def _mark_shared_home_fallback(cwd: str) -> None:
+    with _OVERLAY_FALLBACK_LOCK:
+        _SHARED_HOME_FALLBACK_CWDS[cwd or "."] = None
+        while len(_SHARED_HOME_FALLBACK_CWDS) > _FALLBACK_CWD_MAX:
+            _SHARED_HOME_FALLBACK_CWDS.pop(next(iter(_SHARED_HOME_FALLBACK_CWDS)))
+
+
+def shared_home_fallback_cwds() -> set[str]:
+    with _OVERLAY_FALLBACK_LOCK:
+        return set(_SHARED_HOME_FALLBACK_CWDS)
+
+
+def _record_overlay_fallback() -> int:
+    """回退计数 +1，返回累计值（日志与用例共用）。"""
+    global _OVERLAY_FALLBACK_TOTAL
+    with _OVERLAY_FALLBACK_LOCK:
+        _OVERLAY_FALLBACK_TOTAL += 1
+        return _OVERLAY_FALLBACK_TOTAL
+
+
+def overlay_fallback_total() -> int:
+    with _OVERLAY_FALLBACK_LOCK:
+        return _OVERLAY_FALLBACK_TOTAL
+
+
+def _overlay_fallback_tier(notes: list[str]) -> str:
+    """回退诊断用的梯次（symlink < junction < mirror < build_failed）。"""
+    joined = " ".join(notes or [])
+    for tier in ("build_failed", "build_error", "mirror", "junction"):
+        if tier in joined:
+            return tier
+    return "-"
+
+
+def _overlay_unusable_reasons(iso_home: str, src_home: str) -> list[str]:
+    """overlay 自检：返回不可用原因（空列表 = 可用）。
+
+    检查口径：源 home 里存在且非空的条目，目标必须同样存在且非空（junction/
+    真实目录/复制的文件都算）。#3904：遍历必需清单时**先剔除构建跳过清单**
+    （_OVERLAY_NOT_MIRRORED）——构建不产出的条目永远不该被自检要求，两张表
+    各自硬编码正是本缺陷的来源。
+    """
+    reasons: list[str] = []
+    for entry in _OVERLAY_REQUIRED_ENTRIES:
+        if entry in _OVERLAY_NOT_MIRRORED:
+            continue
+        _src = os.path.join(src_home, entry)
+        if not os.path.exists(_src):
+            continue  # 源 home 本来没有（比如 auth 用 env 注入），不算缺陷
+        _dst = os.path.join(iso_home, entry)
+        if not os.path.exists(_dst):
+            reasons.append(f"{entry}:missing")
+            continue
+        try:
+            if os.path.isdir(_dst) and not os.listdir(_dst) and os.listdir(_src):
+                reasons.append(
+                    f"{entry}:empty(src={len(os.listdir(_src))})")
+        except Exception:  # noqa: BLE001 - 列目录失败按不可用处理
+            reasons.append(f"{entry}:listdir_failed")
+    return reasons
+
 
 def _overlay_looks_usable(iso_home: str, src_home: str) -> bool:
     """构建后自检：引擎启动必须的条目是否就位。
 
     缺运行时（tools/installs）或身份目录（skills/plugins/auth/profiles）时，
     hermes 会把该 home 当全新数据根重新 bootstrap —— 那正是 Windows 上任务
-    0.2s EOF 的根因。检查口径：源 home 里存在且非空的条目，目标必须同样存在
-    且非空（junction/真实目录/复制的文件都算）。
+    0.2s EOF 的根因。口径见 `_overlay_unusable_reasons`（与构建跳过清单同源）。
     """
-    # 引擎启动硬依赖：缺任何一个就不值得尝试 overlay
-    _required = ("tools", "installs", "skills", "plugins", "auth", "profiles")
-    for entry in _required:
-        _src = os.path.join(src_home, entry)
-        if not os.path.exists(_src):
-            continue  # 源 home 本来没有（比如 auth 用 env 注入），不算缺陷
-        _dst = os.path.join(iso_home, entry)
-        if not os.path.exists(_dst):
-            log.warning(f"hermes ACP overlay: '{entry}' missing in overlay home")
-            return False
-        try:
-            if os.path.isdir(_dst) and not os.listdir(_dst) and os.listdir(_src):
-                log.warning(f"hermes ACP overlay: '{entry}' empty in overlay home "
-                            f"(src has {len(os.listdir(_src))} entries)")
-                return False
-        except Exception:  # noqa: BLE001 - 列目录失败按不可用处理
-            return False
-    return True
+    return not _overlay_unusable_reasons(iso_home, src_home)
 
 
-def _build_overlay_home(iso_home: str, src_home: str):
+def _build_overlay_home(iso_home: str, src_home: str) -> list[str]:
     """构建 per-task HERMES_HOME overlay（学习 multica mirrorSharedHermesHome）。
 
     issue #439：不再对 src_home 全量 symlink。Windows 提权引擎下 symlink 是
@@ -1826,28 +1933,22 @@ def _build_overlay_home(iso_home: str, src_home: str):
     并在构建期清理历史遗留的同类旧链接（旧版本 `if os.path.exists(dst):
     continue` 会放过全量 symlink 时代的产物）。
 
+    issue #3904：跳过条件统一走 `_OVERLAY_NOT_MIRRORED`（与自检必需清单同源），
+    返回值是构建期备注（梯次/失败条目），供调用方区分「正常降级」与「确实构建
+    失败」——回退时日志带上它才能定位是哪一梯次出的问题。
+
     - 覆写 config.yaml（tool_progress=new）
     - 覆写 .env（pin HERMES_HOME + 保留凭据）
     - state.db 保持 task-local（不 symlink，每个 task 独立）
     """
+    _notes: list[str] = []
     try:
         # 镜像共享 home 的条目
         if os.path.isdir(src_home):
             for entry in os.listdir(src_home):
                 dst = os.path.join(iso_home, entry)
-                # 跳过覆写的条目
-                if entry in ("state.db", "state.db-wal", "state.db-shm",
-                             "config.yaml", ".env", "active_profile", "profiles"):
-                    continue
-                # gateway-ctl-not-mirrored（2026-10-24 修复）：
-                # 网关控制文件一律不镜像进任务 home——missing_owner_state(home) 的语义是
-                # "本 home 自己有没有在跑的网关"，把共享 home 的 gateway.lock 等符号链接
-                # 镜像进来，hermes 网关归属判定（lstat 不跟随符号链接）会判
-                # unsafe_control_path → inaccessible → ACP session/new 被拒（-32603）。
-                # 生产实测（内部 worker 事故，2026-10-23）：新建工作区任务
-                # 100% 失败；老工作区（lock 出现前建成的 home）不受影响。
-                if entry in ("gateway.sock", "gateway.sock.path", "gateway.lock",
-                             "gateway.pid", "gateway_state.json", "gateway-starts.log"):
+                # 跳过覆写的条目 / 网关控制文件（清单见 _OVERLAY_NOT_MIRRORED，与自检同源）
+                if entry in _OVERLAY_NOT_MIRRORED:
                     continue
                 src = os.path.join(src_home, entry)
                 kind = _overlay_entry_kind(entry, src)
@@ -1874,12 +1975,12 @@ def _build_overlay_home(iso_home: str, src_home: str):
                             # 空目录/下载残骸对引擎不可用（bootstrap 判"未装完"→联网重下），
                             # 必须删除换成指向源 home 的 symlink；只有 issue #416 降级复制的
                             # 完整资产（非运行时目录）才 continue 保留。
-                            if entry in _OVERLAY_RUNTIME_SYMLINK_DIRS:
+                            if entry in _OVERLAY_FORCE_SYMLINK_DIRS:
                                 _remove_path(dst)
                             else:
                                 continue  # issue #416 降级复制的真实目录，可用
                         if os.path.isfile(dst) and not os.path.islink(dst):
-                            if entry in _OVERLAY_RUNTIME_SYMLINK_DIRS:
+                            if entry in _OVERLAY_FORCE_SYMLINK_DIRS:
                                 _remove_path(dst)
                             else:
                                 continue  # issue #416 降级复制的真实文件，可用
@@ -1893,16 +1994,19 @@ def _build_overlay_home(iso_home: str, src_home: str):
                             if os.path.isdir(src) and _junction_dir(src, dst):
                                 log.info(f"hermes ACP overlay: dir '{entry}' linked via "
                                          f"junction (symlink failed: {_sl_e})")
+                                _notes.append(f"{entry}:tier=junction")
                                 continue
                             # issue #416（E7/T5）：Windows 非管理员/未开 Developer Mode 时
                             # os.symlink 抛 OSError（缺 SeCreateSymbolicLinkPrivilege），
                             # 旧逻辑 except:pass 静默吞掉 → overlay home 缺 skills/plugins/auth
                             # → hermes ACP 启动后加载资产失败即死（exit rc!=0、无诊断）。
-                            # 降级为复制（文件 copy2；目录浅层复制一层），并留 WARNING 供 worker
+                            # 降级为复制（文件 copy2；目录递归有界复制），并留 WARNING 供 worker
                             # 日志定位（随 13 台 worker 升级合入后可收敛根因）。
+                            _notes.append(f"{entry}:tier=mirror(symlink={_sl_e})")
                             _mirror_without_symlink(src, dst, entry, str(_sl_e))
                 except Exception as _e_e:
                     log.warning(f"hermes ACP overlay: build entry '{entry}' failed: {_e_e}")
+                    _notes.append(f"{entry}:build_failed({_e_e})")
 
         # issue #439：共享 home 中不存在的可写目录也补建为真实目录
         # （cron/memories/sessions 等是引擎运行时必然要写的状态目录）
@@ -1969,6 +2073,8 @@ def _build_overlay_home(iso_home: str, src_home: str):
 
     except Exception as e:
         log.warning(f"hermes ACP overlay build error: {e}")
+        _notes.append(f"build_error({e})")
+    return _notes
 
 # ── issue #416（E7/T5）：Windows overlay home 无符号链接权限时的降级镜像 ──
 # 单文件复制上限：防止把超大缓存（模型/向量库）整体拷进 overlay 拖死启动。
@@ -2308,7 +2414,7 @@ def _run_acp_session(
                 "cwd": cwd_arg, "mcpServers": [],
             }, timeout=100)
         if err:
-            error_events.append(f"session failed: {err}")
+            error_events.append(_format_session_error("session/new", err))
             yield ("done", _done_result(-1, "", session_id, error_events, ""))
             return
         new_session_id = _extract_session_id(result) or session_id

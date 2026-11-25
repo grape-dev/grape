@@ -187,11 +187,16 @@ def ensure_analysis_task(org_id: str, *, actor_id: str | int = 0) -> int:
             db.commit()
             return task_id
         c.execute(
+            # #3733 三列：MySQL strict 下 NOT NULL 且默认值未归一（1364
+            # `Field 'dispatch_state' doesn't have a default value`）时，不给值这条
+            # INSERT 会把「关联组织仓库 → 建每日分析任务」直接打成 500。
+            # 与 routes/autopilot.py 建单同口径显式写空串，状态由调度器回填。
             "INSERT INTO autopilot_tasks "
             "(name, repo_key, agent_type, instruction, skill_name, cron, max_retry, "
             "enabled, last_run_at, next_run_at, created_at, updated_at, created_by, "
-            "engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids) "
-            "VALUES (?, ?, 'issue', ?, ?, ?, 1, 1, '', ?, ?, ?, ?, ?, '', ?, '')",
+            "engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids, "
+            "dispatch_state, dispatch_state_reason, dispatch_state_at) "
+            "VALUES (?, ?, 'issue', ?, ?, ?, 1, 1, '', ?, ?, ?, ?, ?, '', ?, '', '', '', '')",
             (name, org_repo_key, instruction, ANALYSIS_SKILL, ANALYSIS_CRON,
              next_run, now, now, created_by, engine_ids_json, work_branch),
         )

@@ -1153,6 +1153,19 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     from src.domains.mgmt.user import db as user_db
     from src.domains.runtime.public import instance_name
     from src.kernel.session_manager import db, db_lock
+    # Issue #4349：engine_uid 比对结果（DB 行 uid vs 引擎上报 uid）的 stale 报告源
+    # ——v2 claim/heartbeat 解析失效时的进程内 TTL 注册表（runtime 域 stale_uid）。
+    from src.domains.runtime.engine import stale_uid as _stale_uid
+    _stale_reps_cache: dict = {}
+
+    def _stale_reps_for(cid: int) -> list:
+        """同凭据多引擎行共享一次快照（列表页 N 引擎 × 1 次注册表扫描）。"""
+        if cid not in _stale_reps_cache:
+            try:
+                _stale_reps_cache[cid] = _stale_uid.reports_for_credential(cid)
+            except Exception:
+                _stale_reps_cache[cid] = []
+        return _stale_reps_cache[cid]
 
     uid = str(user.get("id") or "")
     uname = user.get("username") or ""
@@ -1271,6 +1284,15 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             rt["repo_key"] = from_repo_key(cred.get("repo_key", ""))
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
         rt["spec"] = cred.get("spec") or ""
+        # Issue #4349：engine_uid 比对结果——DB 行 engine_uid vs 引擎上报 uid。
+        # stale 报告来自 v2 claim/heartbeat 解析失效时的进程内 TTL 注册表；
+        # 报告尽力关联的 runtime 行（claim/heartbeat 回退 id）标 stale，无报告
+        # 或未关联到本行 → matched。详情端点（get_agent_runtime_detail）复用
+        # 本函数，前端引擎详情弹窗据此展示 stale 标记（RuntimesView.vue）。
+        rt["engine_uid_stale_reports"] = _stale_reps_for(cid)
+        rt["engine_uid_status"] = ("stale" if any(
+            rt.get("id") in (rep.get("runtime_ids") or [])
+            for rep in rt["engine_uid_stale_reports"]) else "matched")
         # Issue #2133：spawn_failed 时间窗降级 / 场景解绑恢复入口（前端 degraded 高亮 + 一键加回）
         rt["spawn_fail_degraded"] = bool(rt.get("spawn_fail_degraded_at"))
         rt["detached_from_scenes"] = bool(rt.get("detached_from_scenes_at"))
@@ -2629,7 +2651,8 @@ def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depe
                 _csb_purge(_purged_rids, commit=False)
             db.commit()
             log.info(f"revoke {cid} via lib: engines={_purged.get('engines')} "
-                     f"sessions={_purged.get('sessions')} caps={_purged.get('caps')}")
+                     f"sessions={_purged.get('sessions')} chat_sessions={_purged.get('chat_sessions')} "
+                     f"caps={_purged.get('caps')}")
             return {"message": f"凭据 {cid} 已吊销并删除"}
         # 运行域半区（会话摘绑 + 能力 + 引擎行 + 凭据行）是 owner 域的组合原语，一次事务：
         # 单库拓扑回落进程库，三库拓扑走 owner 连接，与 lib 分支同一实现。
@@ -2639,7 +2662,8 @@ def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depe
             # mgmt 半区：清理场景 nodes_json 里对被删 runtime 的悬空引用（Issue #250）
             _cleanup_scene_engine_runtime_ids(_purged_rids)
         log.info(f"revoke {cid}: engines={_purged.get('engines')} "
-                 f"sessions={_purged.get('sessions')} caps={_purged.get('caps')}")
+                 f"sessions={_purged.get('sessions')} chat_sessions={_purged.get('chat_sessions')} "
+                 f"caps={_purged.get('caps')}")
     # 沙箱链级联（纯 DB：模板/绑定/Provider 删除 + 沙箱记录置 orphaned + 孤儿兜底）
     _sb_cleanup = _sb_revoke_cleanup(cid)
     return {"message": f"凭据 {cid} 已吊销并删除"}

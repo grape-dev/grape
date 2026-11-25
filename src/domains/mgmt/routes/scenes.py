@@ -12,6 +12,7 @@ from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.api.oauth_token import with_oauth_token
 
 from src.kernel.config import log
+from src.kernel.git_ref import validate_branch_name
 from src.kernel.tags import MAX_TAGS, encode_tags, prepare_tags, suggest_tags
 
 # 技能/引擎/任务表归运行域：查询走该域 public（三库独立后 mgmt 连接看不到这些表）
@@ -1825,6 +1826,18 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
     if not body.branch_name or not body.branch_name.strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "分支名不能为空"})
 
+    # Issue #3922：ref 规则前置校验——非法分支名在服务端短路（不取凭据、不触达上游），
+    # 返回 400 + 可操作原因；否则上游 400（输入非法）会被误映射成 502「服务不可用」。
+    _branch_name = body.branch_name.strip()
+    _invalid_ref = validate_branch_name(_branch_name)
+    if _invalid_ref:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "INVALID_BRANCH_NAME",
+            "message": _invalid_ref,
+            "field": "branch_name",
+        })
+
     _rk = to_repo_key(f"{owner}/{repo}", provider=provider)
     # R12.13: get_repo_token_with_refresh（路径 B 仓库返回用户 token，不会 403）
     token = get_repo_token_with_refresh(_rk) or ""
@@ -1834,28 +1847,31 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
     # 卡驱动（VcsApiClient.create_branch）：gitlab /projects 形态、refs_sha 形态、
     # form 形态全部由卡能力位（dialect / branch_create_form）决定。
     _client = VcsApiClient(provider, token, owner, repo)
-    # Issue #4169：上游错误统一分流——404/401/403 不再折叠成 502，409/422 仍 409
+    # Issue #4169/#3922：上游错误单点分流——404/401/403 不折叠成 502，409/422 仍 409，
+    # 其余 4xx 逐档透传（可读原因经脱敏），仅 5xx/传输异常映射 502
     _log_prefix = f"Create branch failed for {_pname} {owner}/{repo}"
     _map_kwargs = dict(conflict_on=(409, 422),
                        conflict_markers=("already exists", "已存在"),
                        stage="scenes_branch_create",
-                       message="创建分支失败，请稍后重试",
+                       message="创建分支被上游拒绝，请检查分支名与来源分支（refs）后重试",
                        permission_message="Token 权限不足或已过期：创建分支需要维护者权限，请更新后重试或改用 OAuth",
                        retry_hint="可稍后重试；若持续失败请确认仓库地址与 Token 权限",
                        log_prefix=_log_prefix)
     try:
-        result = _client.create_branch(body.branch_name.strip(), body.refs or "main")
+        result = _client.create_branch(_branch_name, body.refs or "main")
     except HTTPException:
         raise
     except Exception as e:
-        raise _vcs_error_map.map_vcs_error(e, **_map_kwargs)
+        raise _vcs_error_map.map_upstream_error(
+            _vcs_error_map.upstream_status_code(e), e, **_map_kwargs)
     if isinstance(result, dict) and result.get("error"):
-        raise _vcs_error_map.map_vcs_error(result, **_map_kwargs)
+        raise _vcs_error_map.map_upstream_error(
+            _vcs_error_map.upstream_status_code(result), result, **_map_kwargs)
 
     log.info(f"Branch created: {body.branch_name} in {_pname} {owner}/{repo}")
     # Issue #542：建分支成功后失效 branches 缓存（新分支立即可见）
     _branches_cache_invalidate(owner, repo)
-    return {"name": body.branch_name.strip(), "message": "分支已创建"}
+    return {"name": _branch_name, "message": "分支已创建"}
 
 
 class CreateMarketSceneRequest(BaseModel):

@@ -2743,7 +2743,73 @@ def list_managed_repos(user: dict = Depends(require_org_member)):
         "org_name": r.get("org_name", "") or "",
         # 组织自动仓库标识：前端仓库下拉需要把它单独置顶显示为「组织仓库」
         "is_org_repo": bool(r.get("is_org_repo")),
+        # Issue #3759：孤儿仓库卡（上游 VCS 已不存在）在列表侧可见并标红；
+        # 恢复入口见 POST /api/repos/{owner}/{repo}/vcs-health/reset。
+        "vcs_status": r.get("vcs_status", "") or "",
+        "vcs_missing": bool(r.get("vcs_missing")),
+        "vcs_missing_since": r.get("vcs_missing_since", "") or "",
+        "vcs_last_error_code": r.get("vcs_last_error_code", "") or "",
+        "vcs_next_probe_at": r.get("vcs_next_probe_at", "") or "",
     } for r in repos]}
+
+
+@router.post("/{owner}/{repo}/vcs-health/reset", operation_id="repos_vcs_health_reset",
+             summary="Reset repo VCS breaker", description="Issue #3759: clears the repo-level VCS missing breaker (`vcs_status`/`vcs_fail_count`/probe ledger). Use after rebinding the provider or confirming the upstream repository exists again; the next issue read re-probes upstream. Idempotent.")
+def reset_repo_vcs_health(owner: str, repo: str,
+                          user: dict = Depends(require_no_session_token)):
+    """运维入口：一键清除仓库级 VCS 熔断（禁用/重绑 provider 后调用）。
+
+    孤儿仓库卡（上游 404 `Project not found`）被熔断后，逐 issue 读会短路为
+    `missing`（≤1 次/小时探测），本接口清除台账，使下一次读重新探测上游——
+    上游已恢复则自动回到 `ok`，确实不存在则重新熔断。
+    """
+    from src.api.deps import check_repo_access
+    from src.domains.mgmt.public import get_repo_vcs_health, set_repo_vcs_health
+    from src.domains.mgmt.user.db import resolve_managed_repo_key
+    from src.kernel.repo_key import to_repo_key
+
+    repo_key = resolve_managed_repo_key(owner, repo) or to_repo_key(f"{owner}/{repo}")
+    check_repo_access(user, repo_key)
+    # QA 复审 Nit：写台账由**归属域**（mgmt）自己完成，不再让 mgmt 路由调 runtime 熔断
+    # 模块回写 mgmt 表（跨域成环）；runtime 侧只需清进程缓存，写语义单向。
+    before = get_repo_vcs_health(repo_key) or {}
+    cleared = {
+        "vcs_status": "ok",
+        "vcs_missing_since": "",
+        "vcs_last_error_code": "",
+        "vcs_last_error_at": "",
+        "vcs_probe_result": "",
+        "vcs_probe_at": "",
+        "vcs_next_probe_at": "",
+        "vcs_fail_count": 0,
+    }
+    set_repo_vcs_health(repo_key, cleared)
+    try:
+        from src.domains.runtime.vcs.issue_poll_breaker import drop_cache
+        drop_cache(repo_key)
+    except Exception as exc:  # noqa: BLE001 - 缓存清理失败只是延迟 30s 生效，不影响写结果
+        log.debug(f"vcs-health reset: runtime cache not dropped ({repo_key}): {exc}")
+    after = {**cleared, **dict(get_repo_vcs_health(repo_key) or {})}
+    # C3（PR #2157 架构守护）：运维写操作必须可追溯操作者与 before/after；
+    # detail 只放状态字段，不含任何 token/凭据。
+    try:
+        from src.domains.mgmt.auth.audit import log_audit
+        log_audit("repos_vcs_health_reset", user_id=user["id"], operator_id=user["id"],
+                  detail=(f"repo={repo_key} before_status={before.get('vcs_status') or '-'} "
+                          f"before_fail={int(before.get('vcs_fail_count') or 0)} "
+                          f"after_status={after.get('vcs_status') or '-'} "
+                          f"after_fail={int(after.get('vcs_fail_count') or 0)}"))
+    except Exception as exc:  # noqa: BLE001 - 审计失败不改变运维操作结果，但必须留痕
+        log.warning(f"vcs-health reset: audit write failed ({repo_key}): {exc}")
+    return {
+        "repo_key": repo_key,
+        "before": {"vcs_status": before.get("vcs_status") or "",
+                   "vcs_missing_since": before.get("vcs_missing_since") or "",
+                   "vcs_last_error_code": before.get("vcs_last_error_code") or ""},
+        "after": {"vcs_status": after.get("vcs_status") or "",
+                  "vcs_fail_count": int(after.get("vcs_fail_count") or 0)},
+        "message": "VCS 熔断台账已清除；下一次 issue 读取会重新探测上游仓库。",
+    }
 
 
 class RepoConnectionBody(BaseModel):

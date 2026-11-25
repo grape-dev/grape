@@ -274,6 +274,7 @@
     "skill_user": "个人技能",
     "stale_removed_prefix": "以下引擎因离线超过 8 小时被系统移除：",
     "stale_removed_suffix": "，如需使用请在下方列表重新勾选绑定。",
+    "stale_unavailable": "解绑信息暂不可用（引擎解绑记录查询失败），请稍后重试。",
     "st_recently_lost": "失联",
     "st_offline": "离线",
     "st_gc": "待回收",

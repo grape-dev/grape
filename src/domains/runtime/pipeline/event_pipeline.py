@@ -92,6 +92,7 @@ from src.kernel.issue_ident import (
     is_native_issue_ident, is_actionable_issue_number, native_issue_number,
     normalize_issue_ident,
     deliverable_comment_ident,  # Issue #4065：可回帖口径（数字平台只认数字）
+    is_autopilot_event_seq, is_autopilot_issue_ref,  # Issue #3908：autopilot 命名空间判据
 )
 # Issue #4065：结果评论投递指标（reason 限枚举 + 连续失败告警），kernel 可安装收集器
 from src.kernel import comment_metrics as _comment_metrics
@@ -204,14 +205,27 @@ def _scene_user_id(repo_key: str, issue_id: str, actor: str = ""):
 
 def _resolve_account_chain(candidates: list, repo_key: str, issue_number: str,
                            event_type: str = "", repository: str = "",
-                           fallback: str = "", extra: dict = None) -> str:
+                           fallback: str = "", extra: dict = None,
+                           allow_owner_fallback: bool = False,
+                           alert: bool = True) -> str:
     """Issue #1819: ACCOUNT 公共回退链（候选校形 → Issue creator → 结构化告警）。
 
     ``candidates`` 为 (来源标签, 原始值) 列表；非法候选（非空但含 ``/`` / ``\\`` /
     空白）被拒绝后继续回退，最终仍不可得则留空并输出 ``ACCOUNT_MISSING``。
     ``event_pipeline.resolve_actor_account`` 与 ``build_task_env`` 共用本实现，
     避免手写回退链与告警字段双实现漂移。
+
+    ``allow_owner_fallback``（Issue #3905）：仅无 actor 的 autopilot 路径显式放行
+    「回退仓库属主」——此时三级回退（actor → payload.account → issue_creator）全空
+    才会命中，命中输出 ``ACCOUNT_OWNER_FALLBACK``（info）留审计；人工/事件驱动路径
+    保持默认 False（Issue #1819 语义：禁止把仓库属主当成触发人）。
+
+    ``alert=False``（Issue #3905）：调用方已用带事件上下文的 ``resolve_actor_account``
+    做过权威解析与告警（直连/失败快照），这里只取值不再重复告警，避免同一任务两条
+    ``ACCOUNT_MISSING``。
     """
+    from src.domains.runtime.pipeline.account_env import owner_account_for_repo
+
     rejected = []
     account = ""
     for name, raw in candidates:
@@ -225,7 +239,14 @@ def _resolve_account_chain(candidates: list, repo_key: str, issue_number: str,
     if not account:
         account = _normalize_account(_get_issue_creator(repo_key, issue_number))
 
+    owner_fallback_used = False
+    if not account and allow_owner_fallback:
+        account = owner_account_for_repo(repo_key)
+        owner_fallback_used = bool(account)
+
     _extra = extra or {}
+    if not alert:
+        return account
     if rejected:
         _log_account_alert(
             "ACCOUNT_INVALID",
@@ -237,6 +258,18 @@ def _resolve_account_chain(candidates: list, repo_key: str, issue_number: str,
             resolved=bool(account),
             **_extra,
         )
+    if owner_fallback_used:
+        # 审计口径：owner 回退不是「正常认人」，必须可区分（Issue #1819 安全语义）
+        _log_account_alert(
+            "ACCOUNT_OWNER_FALLBACK",
+            level="info",
+            event_type=event_type or "unknown",
+            issue_number=issue_number,
+            repository=repository,
+            repo_key=repo_key,
+            account_source="repo_owner",
+            **_extra,
+        )
     if not account:
         _log_account_alert(
             "ACCOUNT_MISSING",
@@ -244,14 +277,15 @@ def _resolve_account_chain(candidates: list, repo_key: str, issue_number: str,
             issue_number=issue_number,
             repository=repository,
             repo_key=repo_key,
-            fallback=fallback,
-            owner_fallback=False,
+            fallback=(fallback + "->repo_owner") if allow_owner_fallback else fallback,
+            owner_fallback=allow_owner_fallback,
             **_extra,
         )
     return account
 
 
-def resolve_actor_account(evt: dict, repo_key: str = "") -> str:
+def resolve_actor_account(evt: dict, repo_key: str = "",
+                          allow_owner_fallback: bool | None = None) -> str:
     """Issue #1668/#1819: 统一解析 ACCOUNT/actor（a2a_event 兜底链）。
 
     优先级：a2a_event 为 payload.account → evt.actor → Issue creator；
@@ -259,12 +293,18 @@ def resolve_actor_account(evt: dict, repo_key: str = "") -> str:
     所有候选值均过账号形态校验（非空且不含 ``/``），非法值（如仓库全名）
     被拒绝后继续回退；仍为空时输出结构化告警（event_type/issue_number），
     **禁止回退仓库属主**。
+
+    Issue #3905：``allow_owner_fallback`` 显式控制「回退仓库属主」；
+    传 None 时按事件类型自动判定——仅 ``autopilot_event``（无 actor 的定时派发）
+    放行，其余事件默认禁止（保留 #1819 安全语义）。
     结果不写入 evt 缓存：Issue 建档前解析为空不应被永久缓存（下次调用会重新查库）。
     """
     if not isinstance(evt, dict):
         evt = {}
     payload = evt.get("payload") if isinstance(evt.get("payload"), dict) else {}
     event_type = str(evt.get("type") or evt.get("event_type") or "")
+    if allow_owner_fallback is None:
+        allow_owner_fallback = event_type.strip().lower().startswith("autopilot")
     issue_number = str(
         payload.get("issue_number")
         or evt.get("issue_id")
@@ -285,7 +325,7 @@ def resolve_actor_account(evt: dict, repo_key: str = "") -> str:
     return _resolve_account_chain(
         candidates, repo_key, issue_number,
         event_type=event_type, repository=evt.get("repository", ""),
-        fallback=fallback,
+        fallback=fallback, allow_owner_fallback=allow_owner_fallback,
     )
 
 
@@ -822,9 +862,30 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     # Issue #3770 审查 R2：写入侧收口——direct 快照行不再落明文 "{}"（命中验收口径
     # 「非空且非 enc:v1:」）；空对象也落 enc:v1 信封，加密失败降级空串 + 计数
     # write_refused，绝不回落明文。
+    #
+    # Issue #3905：快照内容不再为空——direct 快照是重派 / 接管 / 超时收口等读侧的唯一
+    # env 来源（worker 侧 decrypt_env_extra(task.env_extra) 直接吃这份快照），写空对象
+    # 等于让整条 issue 任务链在消费端「degraded env」（ACCOUNT / GRAPE_ISSUE_ID /
+    # GRAPE_WORK_BRANCH 全缺）。改为与 build_task_env 同源组装，再补事件级扩展与
+    # Issue/PR 编号（含内部卡片 id），杜绝第二套实现漂移。
+    _snapshot_env = {}
+    try:
+        _snapshot_env = build_task_env(
+            repo_key, agent_type, issue_id, runtime_id=engine_id or 0,
+            account=_dispatch_acct, suppress_account_alerts=True,
+        )
+        _ext_env = evt.get("_env_extra") or {}
+        if isinstance(_ext_env, dict):
+            _snapshot_env.update(_ext_env)
+        if repo_key:
+            _snapshot_env.setdefault("REPO_KEY", repo_key)
+        _inject_issue_pr_env(_snapshot_env, evt, repo_key)
+    except Exception as _env_e:  # noqa: BLE001 - 组装失败仍建任务（快照降级为空，不阻断派发）
+        log.warning(f"create_direct_task: env snapshot assemble failed task={task_id}: {_env_e}")
+        _snapshot_env = {}
     try:
         from src.domains.runtime.engine.service import _encrypt_env_extra_for_write
-        _env_sealed = _encrypt_env_extra_for_write({})
+        _env_sealed = _encrypt_env_extra_for_write(_snapshot_env)
     except Exception as _enc_e:
         _env_sealed = ""
         try:
@@ -923,11 +984,15 @@ def _repo_identity_env(repo_key, repository, where=""):
 
 
 def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
-                        skill_path, skill_id, evt, issue_id="", runtime_id=0):
+                        skill_path, skill_id, evt, issue_id="", runtime_id=0,
+                        pool_engine_source=""):
     """引擎不可用时创建 failed 状态的 task 快照（供重派复用参数）。
 
     重派逻辑查 agent_tasks WHERE event_seq=?，无记录则报"无关联任务"。
     此函数确保引擎不可用时也有一条 failed task 记录，重派可走"终态→复用快照重建"路径。
+
+    Issue #3790：`pool_engine_source` 由调用方（run_pipeline 门禁来源）透传——本列原先
+    硬编码空串，scene_missing 的失败快照行无法按来源筛选（运营只能看到「引擎离线」）。
     """
     from src.domains.runtime.engine.service import _TASK_COLUMNS_LIST
     from src.api.session_store import get_or_create_agent_session
@@ -966,19 +1031,39 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
         cwd = ""
 
     # env_extra
-    repository = evt.get("repository", "")
-    # Issue #1660：REPO_OWNER/REPO_NAME 一律由 REPO_FULL_NAME 派生（缺失回退 repo_key），
-    # 禁止以触发人账号充当 REPO_OWNER；REPO_FULL_NAME 归一（剥 provider 前缀）供 runbook 拼 URL。
-    # Issue #3397：注入前按仓登记回填权威大小写，保证 REPO_FULL_NAME == $REPO_OWNER/$REPO_NAME。
-    _, _ident_env = _repo_identity_env(repo_key, repository, where="")
+    # Issue #3905：失败快照是重派/接管的唯一 env 来源，此前只含 REPO_* + ACCOUNT，
+    # 缺 ISSUE_NUMBER / PR_NUMBER / GRAPE_ISSUE_ID / GRAPE_WORK_BRANCH，重派后
+    # 契约三变量必然回落为空。改为与 build_task_env（重派/对话入队同源）组装，
+    # 再按事件补 Issue/PR 编号与内部卡片 id，快照字段只增不减。
     _resolved_account = resolve_actor_account(evt, repo_key)
-    env_extra = {
-        # 沙箱 clone 必须知道平台：REPO_FULL_NAME 是剥前缀的裸名（runbook 拼 URL 用），
-        # 只有 REPO_KEY 带 provider 前缀；缺它时 sandbox 会按 parse_repo_key 默认 gitcode。
-        "REPO_KEY": repo_key,
-        **_ident_env,
-        "ACCOUNT": _resolved_account,
-    }
+    # Issue #3905（PR #2170 复审 Optional）：装配异常必须兜底——失败快照是重派/接管的
+    # 唯一 env 来源，装配抛异常会让整行失败快照丢失，重派随后命中「无关联任务」。
+    # 与 _create_direct_task 同口径：装配失败降级不阻断落库，先退到最小可解析子集
+    # （repo 标识 + 已解析账号 + Issue/PR 编号），保住重派侧的契约前置。
+    env_extra = {}
+    try:
+        env_extra = build_task_env(repo_key, agent_type, issue_id,
+                                   runtime_id=runtime_id or 0,
+                                   account=_resolved_account,
+                                   suppress_account_alerts=True)
+        if repo_key:
+            env_extra.setdefault("REPO_KEY", repo_key)
+        _inject_issue_pr_env(env_extra, evt, repo_key)
+    except Exception as _env_e:  # noqa: BLE001 - 装配失败不得丢失败快照
+        log.warning(f"create_failed_task: env snapshot assemble failed seq={seq}: {_env_e}")
+        env_extra = {}
+        try:
+            from src.kernel.repo_key import derive_repo_identity
+            _full_name, _repo_owner, _repo_name = derive_repo_identity(repo_key, repo_key)
+            env_extra = {"REPO_FULL_NAME": _full_name or repo_key,
+                         "REPO_OWNER": _repo_owner, "REPO_NAME": _repo_name}
+            if repo_key:
+                env_extra["REPO_KEY"] = repo_key
+            if _resolved_account:
+                env_extra["ACCOUNT"] = _resolved_account
+            _inject_issue_pr_env(env_extra, evt, repo_key)
+        except Exception as _min_e:  # noqa: BLE001 - 降级再失败只丢扩展项
+            log.warning(f"create_failed_task: degraded env snapshot failed seq={seq}: {_min_e}")
 
     # repo_gitcode_token（按 provider 分流，用户 token 写空由运行时实时获取）
 
@@ -1018,7 +1103,9 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
             pool_engine_uids="", engine_uid=None, engine_name_snapshot="",
             # Issue #1208：direct/failed 快照行无 selector 语义（列覆盖契约，值为空）
             pool_selector="",
-            pool_engine_source="", engine_priorities="",
+            # Issue #3790：来源随失败快照落库（scene_missing 可筛；未传保持历史空串语义）
+            # Issue #3564：engine_priorities 由失败快照列清单覆盖（引擎优先级与失败无关，值空）
+            pool_engine_source=pool_engine_source or "", engine_priorities="",
             status="failed", stream_ended=1, self_reported=0,
             exit_code=1, result_text="", errors=_reason, stderr="",
             usage_json="{}", started_at=now, completed_at=now, created_at=now,
@@ -2018,6 +2105,11 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             _fail_scene_all_offline(seq, scene_id, "qa", "PR 订阅派发", repo_key=repo_key)
             return
         _pool_sel = _gp["pool_selector"] if _gm == "selector" else ""
+        # Issue #3790：门禁上抛来源（scene_missing）显式透传 + 回填事件 payload
+        from src.domains.runtime.engine.engine_select import POOL_SOURCE_SCENE_MISSING as _PSM
+        _pool_src = _gp.get("pool_engine_source", "")
+        if _pool_src == _PSM:
+            _land_scene_missing_payload(seq, repo_key, scene_id, "qa")
         # Issue #3914 A：传场景节点权威 skill_id（此前硬编码 0 → 仓级/用户级自定义 QA
         # 技能在 direct 链路丢失绑定 → #617 官方检查器兜底 → #887 门禁误拒）。
         _qa_sid = resolve_scene_node_skill_id(repo_key, "qa", scene_id=scene_id,
@@ -2033,7 +2125,7 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
         _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                _qa_sid, _qa_skill_path, _engine_id, _pseudo_id,
                                pool_engine_ids=_pool_ids or "", user_id=_sub_uid,
-                               pool_selector=_pool_sel)
+                               pool_selector=_pool_sel, pool_engine_source=_pool_src)
     except Exception as e:
         log.warning(f"Pipeline: PR subscription extra dispatch failed: {e}")
 
@@ -2116,6 +2208,11 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
             _fail_scene_all_offline(seq, scene_id, "qa", "PR 订阅派发", repo_key=repo_key)
             return
         _pool_sel = _gp["pool_selector"] if _gm == "selector" else ""
+        # Issue #3790：门禁上抛来源（scene_missing）显式透传 + 回填事件 payload
+        from src.domains.runtime.engine.engine_select import POOL_SOURCE_SCENE_MISSING as _PSM
+        _pool_src = _gp.get("pool_engine_source", "")
+        if _pool_src == _PSM:
+            _land_scene_missing_payload(seq, repo_key, scene_id, "qa")
         # Issue #3914 A：重派同样传场景节点权威 skill_id（与补派路径同源）
         _qa_sid = resolve_scene_node_skill_id(repo_key, "qa", scene_id=scene_id,
                                               user_id=_sub_uid)
@@ -2130,7 +2227,7 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
         _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                _qa_sid, _qa_skill_path, _engine_id, _pseudo_id,
                                pool_engine_ids=_pool_ids or "", user_id=_sub_uid,
-                               pool_selector=_pool_sel)
+                               pool_selector=_pool_sel, pool_engine_source=_pool_src)
 
         # 重派成功：把事件状态改回 running（重派前可能是 failed）
         from src.api.event_store import update_event_status
@@ -3381,7 +3478,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         #   "同 (repo,issue,agent) 无 running 事件" SELECT）；
         # - C：近 60s 同类事件（含已终态）也视为重复，处理 webhook 重发/终态后二次投递。
         # 解决 GitCode/GitHub 双 webhook 或 create_task 同步补发 + 真实 webhook 并发双投。
-        from src.api.event_store import append_skipped_event, _utc_now_str
+        from src.api.event_store import append_skipped_event, _utc_now_str, payload_size_guard
         try:
             with db_lock:
                 _dc = _rt_db.cursor()
@@ -3422,10 +3519,30 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     result["skipped"] = "duplicate_recent_window"
                     return result
                 # ⑧ 去重通过 → 直接 INSERT（不再调 append_event 函数，避免重复加锁开销）
+                # Issue #4339 R1：裸 INSERT 必须先过与 append_event 同一份字节守卫。
+                # issue_opened/issue_updated/pull_request_* 带 issue_id+agent_type 时正是
+                # 走这条路径，守卫若只挂在 event_store 上，超 MEDIUMTEXT 的 payload 仍会被
+                # MySQL 非严格 sql_mode 静默截断成半截 JSON。
+                _payload_json = json.dumps(payload or {})
+                _payload_bytes = len(_payload_json.encode("utf-8"))
+                if not payload_size_guard(_payload_bytes, event_type, repo_key,
+                                          issue_id or "#0"):
+                    # fail-closed：不写截断行、释放本次抢占的守卫行（否则同 (issue,agent)
+                    # 的后续事件会被残留守卫永久挡掉），落 event_skipped 审计后直接返回。
+                    _dc.execute(
+                        "DELETE FROM event_active_guard WHERE repo_key=? AND issue_id=? "
+                        "AND agent_type=? AND seq=0",
+                        (repo_key, issue_id or "#0", agent_type))
+                    _rt_db.commit()
+                    append_skipped_event(
+                        repo_key, event_type, "event_payload_rejected",
+                        detail=f"bytes={_payload_bytes}", issue_id=issue_id or "#0")
+                    result["skipped"] = "event_payload_rejected"
+                    return result
                 _dc.execute(
                     "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (repo_key, issue_id or "#0", event_type, source, agent_type, title, actor, summary,
-                     json.dumps(payload or {}), "pending", "", _scene_id_for_event, _entity_type)
+                     _payload_json, "pending", "", _scene_id_for_event, _entity_type)
                 )
                 _rt_db.commit()
                 _seq = _dc.lastrowid or 0
@@ -3574,6 +3691,28 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             result["idempotent_hit_seq"] = _hit_seq
             return result
     seq = _seq
+    # Issue #4339 R2：seq==0 = 事件行不存在（payload 超限被拒 / 写失败），旧实现只对
+    # _seq<0 分流，seq==0 仍置 result.ok=True 并继续 pick_engine / 入队（event_seq=0），
+    # 形成「事件行不存在但任务照常入队」的孤儿任务，用户侧无感 —— 等于把静默丢失搬到
+    # 任务层。此处 fail-closed：不派发，落 event_skipped 审计并显式回 skipped。
+    if not seq:
+        from src.api.event_store import append_skipped_event as _append_skipped
+        from src.api.event_store import payload_size_exceeded as _payload_size_exceeded
+        _payload_bytes = len(json.dumps(payload or {}).encode("utf-8"))
+        _reason = ("event_payload_rejected" if _payload_size_exceeded(_payload_bytes)
+                   else "event_insert_failed")
+        _append_skipped(repo_key, event_type, _reason,
+                        detail=f"bytes={_payload_bytes}", issue_id=issue_id or "#0")
+        from src.kernel.repo_key import from_repo_key as _from_repo_key
+        result.update({"seq": 0, "event_type": event_type, "skill": agent_type,
+                       "backend": backend, "skill_name": skill_name,
+                       "repo_key": _from_repo_key(repo_key), "ok": False,
+                       "issue_id": issue_id, "repository": evt["repository"],
+                       "skipped": _reason})
+        log.error(f"Pipeline: event not stored (seq=0, {_reason}), dispatch aborted: "
+                  f"repo={repo_key}, type={event_type}, agent={agent_type}, "
+                  f"issue={issue_id or '#0'}, payload_bytes={_payload_bytes}")
+        return result
     # WAL checkpoint 在 db_lock 释放后执行（避免阻塞其他需要 db_lock 的操作）
     if seq and issue_id and agent_type and event_type != "a2a_event":
         try:
@@ -3644,26 +3783,36 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     # 执行分派：从引擎集合选引擎（专属→全局→本机，engine-selection-design.md v2）；
     # Phase 3 (#699)：所有路径统一入队（queue_remote/direct 均经 enqueue_task）。
-    from src.domains.runtime.engine.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
+    from src.domains.runtime.engine.engine_select import (
+        pick_engine, engine_name, get_scene_pool_engine_ids, POOL_SOURCE_SCENE_MISSING)
     from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT
     # Issue #1208：入队三分叉（selector / uid 池 / legacy id）——selector 非空走 selector
     # 路径（fail-closed 零命中不入队 + 文案分流），否则回落既有池路径（行为零变化）
     _gate_mode, _gate_payload, _gate_fail = _scene_pool_gate(
         _issue_scene, agent_type, repo_key=repo_key, user_id=_issue_scene_uid)
+    _pool_source = ""     # Issue #3790：门禁上抛的来源（scene_missing 等），入队显式透传
     if _gate_mode == "selector":
         _pool_engine_ids = _gate_payload["pool_engine_ids"]      # 恒空串（selector 任务两池列均空）
         _pool_selector = _gate_payload["pool_selector"]
+        _pool_source = _gate_payload.get("pool_engine_source", "")
     elif _gate_fail:
         # selector 零命中 fail-closed：不入队 + event failed（配置死/瞬时死文案分流）
         log.warning(f"Pipeline: scene={_issue_scene} agent={agent_type} selector zero-hit, "
                     f"skip enqueue (Issue #1208): {_gate_fail}")
         _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                            skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                            skill_path, skill_id, evt, issue_id, runtime_id or 0,
+                            pool_engine_source=_pool_source)
         _fail_event(seq, _gate_fail)
         return result
     else:
         _pool_engine_ids = _gate_payload["pool_engine_ids"]
         _pool_selector = ""
+        _pool_source = _gate_payload.get("pool_engine_source", "")
+    # Issue #3790：场景未在仓内 scene pool 登记 → 立即回填事件 payload，后续失败文案
+    # 也带原因码（运营可区分「场景未注册」与「引擎离线」）
+    _scene_missing = _pool_source == POOL_SOURCE_SCENE_MISSING
+    if _scene_missing:
+        _land_scene_missing_payload(seq, repo_key, _issue_scene, agent_type)
     try:
         engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0,
                                 scene_id=_issue_scene, user_id=_issue_scene_uid)
@@ -3675,8 +3824,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.info(f"Pipeline: no available engine for repo={repo_key} agent={agent_type}, seq={seq}, skip")
         # 创建 failed 状态的 task 快照（供重派复用参数，否则重派报"无关联任务"）
         _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                            skill_path, skill_id, evt, issue_id, runtime_id or 0)
-        _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
+                            skill_path, skill_id, evt, issue_id, runtime_id or 0,
+                            pool_engine_source=_pool_source)
+        # Issue #3790：场景未登记必须先报「仓内不存在（scene_missing）」，不能笼统报
+        # 「无可用引擎」——否则运营只能看到「引擎离线」，丢失真实原因
+        if _scene_missing:
+            _fail_event(seq, _scene_missing_failure_reason(_issue_scene, agent_type, repo_key))
+        else:
+            _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
         return result
     # Plugin 模式 + engine_id=0：无主池任务（广播），多个引擎通过 claim_by_tag 竞争认领。
     # 非 direct 模式均走广播（queue_remote + auto）；仅 direct 模式走本机 direct（自动选引擎）。
@@ -3689,8 +3844,12 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         # 方案A：场景绑定的引擎全部离线/失联 → 不入队，事件置 failed 并明确提示
         log.warning(f"Pipeline: scene={_issue_scene} agent={agent_type} engines all offline, skip (Issue #259)")
         _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                            skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                            skill_path, skill_id, evt, issue_id, runtime_id or 0,
+                            pool_engine_source=_pool_source)
         _reason_offline = f"场景绑定的引擎全部离线（scene={_issue_scene}, agent={agent_type}），请检查引擎在线状态"
+        # Issue #3790：场景未登记时不得归档成「引擎全部离线」，先报仓内不存在（原因码 scene_missing）
+        if _scene_missing:
+            _reason_offline = _scene_missing_failure_reason(_issue_scene, agent_type, repo_key)
         # Issue #496：PR merged → sre 收尾链路（merge webhook 一次性投递，无二次触发机会）
         # 保留 #259 即时终态语义的同时追加派发级自动重试（引擎恢复后自动重派）。
         if event_type == "pull_request_merged" and agent_type == "sre":
@@ -3736,7 +3895,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         if _be and seq > 0 and (skill_name or _is_scene_recommend):
             # local-claimer 设计：场景绑定 → 'scene'（#253 硬约束，全灭不降级）；
             # 智能推荐的 opencode 限定是系统自动选择 → 'auto'（全灭可降级放行）
-            _pes = "auto" if _is_scene_recommend else "scene"
+            # Issue #3790：门禁上抛的来源优先（scene_missing 不得被改写为 scene）
+            _pes = _pool_source or ("auto" if _is_scene_recommend else "scene")
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
                                    skill_id, skill_path, engine_id, issue_id,
                                    pool_engine_ids=_pool_engine_ids, user_id=_issue_scene_uid,
@@ -3797,7 +3957,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 log.info(f"Pipeline: scene binding {list(set(_bind_names_253))} all offline for direct "
                          f"auto-select, seq={seq}, skip (Issue #253)")
                 _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                                    skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                                    skill_path, skill_id, evt, issue_id, runtime_id or 0,
+                                    pool_engine_source=_pool_source)
                 _fail_event(seq, f"场景绑定的引擎（{', '.join(sorted(set(_bind_names_253)))}）"
                                  f"全部不可用，direct 模式无法选机（Issue #253）")
                 return result
@@ -3835,13 +3996,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 else:
                     log.info(f"Pipeline: engine_id=0 no online engine, seq={seq}, skip")
                     _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                                        skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                                        skill_path, skill_id, evt, issue_id, runtime_id or 0,
+                                        pool_engine_source=_pool_source)
                     _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
                     return result
             except Exception as _e:
                 log.warning(f"Pipeline: auto-select engine failed: {_e}")
                 _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                                    skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                                    skill_path, skill_id, evt, issue_id, runtime_id or 0,
+                                    pool_engine_source=_pool_source)
                 _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
                 return result
     try:
@@ -3853,7 +4016,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
                                    skill_id, skill_path, engine_id, issue_id,
                                    pool_engine_ids=_pool_engine_ids, user_id=_issue_scene_uid,
-                                   is_scene_recommend=_is_scene_recommend)
+                                   is_scene_recommend=_is_scene_recommend,
+                                   pool_engine_source=_pool_source)
             log.info(f"Pipeline: enqueued agent execution, seq={seq}, repo={repo_key}, agent={agent_type}, engine={engine_id}")
     except Exception as _de:
         log.warning(f"Pipeline: dispatch exception for seq={seq}: {_de}")
@@ -4794,7 +4958,7 @@ def reconcile_queued_a2a(repo_key: str = "") -> list:
 
 
 def _scene_pool_gate(scene_id: str, agent_type: str, repo_key: str = "",
-                     user_id: int = 0) -> tuple:
+                     user_id: int = 0, issue_creator: str = "") -> tuple:
     """Issue #1208：入队三分叉单点收口（selector / uid 池 / legacy id）。
 
     分叉判据（§2.1）：engine_selector 非空 → selector 路径（fail-closed 即时校验，
@@ -4804,8 +4968,13 @@ def _scene_pool_gate(scene_id: str, agent_type: str, repo_key: str = "",
     返回 (mode, payload, fail_reason)：
     - ("selector", {"pool_selector": <json>, "pool_engine_ids": ""}, None)：入队，
       任务行落 pool_selector、两池列置空；
-    - ("pool", {"pool_engine_ids": <既有三方语义>}, None)：uid/id 池路径原语义；
+    - ("pool", {"pool_engine_ids": <既有三方语义>, "pool_engine_source": <来源或"">}, None)：
+      uid/id 池路径原语义；
     - (None, None, <reason>)：selector 零命中 fail-closed，调用方不入队 + event failed。
+
+    Issue #3790：pool 路径把 get_scene_pool_engine_ids 的上抛来源（scene_missing）一并
+    返回，调用方必须显式传给 _enqueue_pipeline_task —— 否则「带 scene 上下文 → 推导为
+    scene」会覆盖缺失来源，运营仍无法区分「场景未注册」与「引擎离线」。
     """
     import json as _sj
     from src.domains.runtime.engine.engine_select import (get_scene_engine_selector,
@@ -4821,10 +4990,72 @@ def _scene_pool_gate(scene_id: str, agent_type: str, repo_key: str = "",
         if reason:
             return None, None, reason
         return ("selector",
-                {"pool_selector": _sj.dumps(sel, ensure_ascii=False), "pool_engine_ids": ""},
+                {"pool_selector": _sj.dumps(sel, ensure_ascii=False), "pool_engine_ids": "",
+                 "pool_engine_source": ""},
                 None)
-    pool = get_scene_pool_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
-    return "pool", {"pool_engine_ids": pool}, None
+    _src: dict = {}
+    # Issue #3790 审查 R1：`issue_creator` 与既有直调口径一致（user_id=0 时按创建人
+    # 反查场景 user scope），使门禁取代各入口的重复池解析后语义逐字不变。
+    pool = get_scene_pool_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=user_id,
+                                     issue_creator=issue_creator or "", source_out=_src)
+    return "pool", {"pool_engine_ids": pool,
+                    "pool_engine_source": _src.get("pool_engine_source", "")}, None
+
+
+def _land_scene_missing_payload(seq, repo_key: str, scene_id: str, agent_type: str) -> bool:
+    """Issue #3790：把 scene_missing 结构化来源回填到派发事件 payload。
+
+    事件在门禁之前已 INSERT，来源解析后只能回填；事件中心按 payload 字段筛选
+    （pool_engine_source / scene_id / repo_key / agent_type）即可区分「场景未注册」
+    与「引擎真离线」。回填失败只留痕，不影响派发。
+    """
+    from src.domains.runtime.engine.engine_select import POOL_SOURCE_SCENE_MISSING
+    try:
+        from src.domains.runtime.event_store import merge_event_payload
+        ok = merge_event_payload(seq, {
+            "pool_engine_source": POOL_SOURCE_SCENE_MISSING,
+            "scene_id": scene_id or "",
+            "repo_key": repo_key or "",
+            "agent_type": agent_type or "",
+        })
+        if not ok:
+            log.warning(f"Pipeline: land scene_missing payload skipped seq={seq}")
+        return bool(ok)
+    except Exception as _e:
+        log.warning(f"Pipeline: land scene_missing payload failed seq={seq}: {_e}")
+        return False
+
+
+def _scene_missing_failure_reason(scene_id: str, agent_type: str, repo_key: str) -> str:
+    """Issue #3790：场景未登记时的派发失败文案（带原因码，可区分「未注册 / 离线」）。"""
+    from src.domains.runtime.engine.engine_select import (POOL_SOURCE_SCENE_MISSING,
+                                                          scene_dispatch_failure_reason)
+    _reason = ""
+    try:
+        _reason = scene_dispatch_failure_reason(scene_id, agent_type, repo_key=repo_key) or ""
+    except Exception as _e:
+        log.warning(f"Pipeline: scene_missing failure reason resolve failed: {_e}")
+    if not _reason:
+        _reason = (f"场景 {scene_id} 未在仓库 {repo_key} 的 scene pool 登记，"
+                   f"派发已跳过全局模板回退（Issue #541）")
+    return f"{_reason}（原因码：{POOL_SOURCE_SCENE_MISSING}）"
+
+
+def _resolve_pool_engine_source(pool_engine_ids, pool_engine_source: str, evt: dict) -> str:
+    """pool_engine_source 单点推导（local-claimer 设计 + Issue #3790）。
+
+    - 显式来源（scene / auto / directed / scene_missing）原样保留：上游门禁上抛的
+      scene_missing 绝不能被「带 scene 上下文 → 推导为 scene」覆盖；
+    - 未显式传且带 pool_engine_ids 时按 evt 场景上下文推导：有 scene → scene，否则 auto；
+    - 无 pool_engine_ids 且无来源 → ""（历史未标记语义）。
+    """
+    from src.domains.runtime.engine.engine_select import POOL_SOURCE_AUTO, POOL_SOURCE_SCENE
+    if pool_engine_source:
+        return pool_engine_source
+    if not pool_engine_ids:
+        return ""
+    _scene_ctx = (evt or {}).get("scene_id") or (evt or {}).get("_scene_id") or ""
+    return POOL_SOURCE_SCENE if _scene_ctx else POOL_SOURCE_AUTO
 
 
 def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
@@ -4837,11 +5068,16 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     so workers with matching engine tags can claim via claim_by_tag.
 
     pool_engine_source（local-claimer 设计）：pool_engine_ids 来源标记。
-    取值三态 —— 'scene'（场景绑定）/ 'auto'（引擎自动选择）/ 'directed'
-    （Issue #2791：`engine_config.runtime_id` 定向锁定，pool 收敛为单元素）；
+    取值四态 —— 'scene'（场景绑定）/ 'auto'（引擎自动选择）/ 'directed'
+    （Issue #2791：`engine_config.runtime_id` 定向锁定，pool 收敛为单元素）/
+    'scene_missing'（Issue #3790：场景未在仓内 scene pool 登记，#541 同源）；
     空=未标记（历史语义，降级判定按 scene 保守处理）。调用方未显式传时：
     带 pool_engine_ids 且 evt 带 scene 上下文 → 'scene'，否则 'auto'。
     词汇常量在 engine_select.POOL_SOURCE_*，与 db schema 注释同步。
+
+    Issue #3790：显式传入的来源（尤其 scene_missing）优先于上下文推导，并随
+    enqueue_task 落到 agent_tasks.pool_engine_source；scene_missing 同时回填事件
+    payload，供事件中心按字段筛选。
     """
     # Issue #657/#1758：派发前统一 scope 门禁（单一判官）。
     # 所有派发路径（issue / PR 订阅 / fallback / vod / 订阅）都经由本函数入队，
@@ -4849,10 +5085,21 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     # 两个 helper，没有接调用点 → user 档技能会被当成"显式授权"放行（979 用例）。
     if skill_name:
         try:
-            _gate_scene = evt.get("scene_id") or evt.get("_scene_id") or ""
+            # Issue #3788：门禁场景从「只看 evt」改成三态解析（evt → Issue 真实绑定
+            # → 仓库默认场景），确认无场景时显式传 scene_scope=None 放行。
+            _gate_scene, _gate_scope = _gate_scene_context(
+                repo_key, evt, issue_id or "")
             _ev_gate = _evaluate_skill_scope(
                 skill_name, repo_key, skill_id=int(skill_id or 0),
-                node_tag=agent_type or "", scene_id=_gate_scene)
+                node_tag=agent_type or "", scene_id=_gate_scene or "",
+                scene_scope=_gate_scope)
+            if _ev_gate.get("source") == "no_scene":
+                # 决策可观测（事件中心/日志可按 decision=no_scene 与 skill_resolve_failed 区分）
+                log.info(
+                    f"Pipeline: skill scope gate decision=no_scene, "
+                    f"skill={skill_name} actual_scope="
+                    f"{_ev_gate.get('actual_scope') or '-'} scene_id='' "
+                    f"agent={agent_type or '-'} seq={seq} (Issue #3788)")
             if not _ev_gate["ok"]:
                 return _fail_skill_resolve_event(
                     repo_key, skill_name, _gate_scene, agent_type or "",
@@ -4872,7 +5119,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     # 未命中：保持既有路由/池选择，但留结构化 WARN（runtime_id / 回落原因 / 最终选中引擎），
     # 不静默换引擎。解析/打点/收敛实现单点在 engine_select（各派发入口共用，不复制格式）。
     from src.domains.runtime.engine.engine_select import (
-        POOL_SOURCE_AUTO, POOL_SOURCE_DIRECTED, POOL_SOURCE_SCENE,
+        POOL_SOURCE_DIRECTED, POOL_SOURCE_SCENE_MISSING,
         directed_pool_engine_ids, log_directed_fallback, resolve_directive_engine,
     )
     _directive = None
@@ -4900,9 +5147,14 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             log.warning(f"dispatch_directed: warn log failed: {_warn_err}")
 
     # local-claimer 设计：未显式指定时按上下文推导来源（带场景上下文的绑定 = scene）
-    if pool_engine_ids and not pool_engine_source:
-        _scene_ctx = evt.get("scene_id") or evt.get("_scene_id") or ""
-        pool_engine_source = POOL_SOURCE_SCENE if _scene_ctx else POOL_SOURCE_AUTO
+    pool_engine_source = _resolve_pool_engine_source(pool_engine_ids, pool_engine_source, evt)
+
+    # Issue #3790：场景未登记来源已显式传入 → 回填事件 payload（事件中心可筛）
+    if pool_engine_source == POOL_SOURCE_SCENE_MISSING:
+        _land_scene_missing_payload(
+            seq, repo_key,
+            evt.get("scene_id") or evt.get("_scene_id") or "",
+            agent_type or "")
 
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
     # Issue #3201：webhook / 订阅 / 排队补派等所有入队路径统一守门；
@@ -5121,6 +5373,10 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             pool_agent_type=_pool_agent_type,
             pool_engine_ids=pool_engine_ids,
             pool_selector=pool_selector,
+            # Issue #3790：来源必须随入队落 agent_tasks.pool_engine_source——
+            # 此前此处漏传，scene/auto/directed/scene_missing 全部落成空串（降级判定
+            # 只能按 scene 保守处理，运营无法按来源筛选）。
+            pool_engine_source=pool_engine_source or "",
         )
     except Exception as e:
         log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
@@ -5287,7 +5543,7 @@ def _read_scene_linked_repos(repo_key: str, issue_id: str = "") -> list:
 
 def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: int = 0,
                    account: str = "", issue_number: str = "", pr_number: str = "",
-                   scene_id_override: str = "") -> dict:
+                   scene_id_override: str = "", suppress_account_alerts: bool = False) -> dict:
     """构建任务完整 env_extra（正常入队/重派/对话入队共用，防重派丢变量）。
 
     2026-10-10 事故：events.py 重派路径 enqueue_task(env_extra={}) 丢了
@@ -5301,7 +5557,10 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
     - BOT_USERNAME/AGENT_NAME（Issue #573）：与正常入队同逻辑（全部 devops agent）
     - evt._env_extra 事件级扩展：重派无 evt，无法还原（快照已在 prompt 里），不注入
     - scene_id_override（Issue #427）：重派 PR 订阅任务时传旧任务/事件的订阅场景，
-      防止 env 被重新解析回 Issue 场景；空串回退 issue_id 解析（普通任务零破坏）。
+      防止 env 被重新解析回 Issue 场景；空串回退 issue_id 解析（普通任务零破坏）
+    - suppress_account_alerts（Issue #3905）：直连/失败快照的调用方已用
+      resolve_actor_account（带事件上下文）做过权威解析与告警，这里不再重复告警，
+      避免每个 direct 任务多两条 ACCOUNT_MISSING 噪声。
     """
     import json as _json
     env = {}
@@ -5328,6 +5587,7 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
         [("account", account)], repo_key, issue_number or issue_id,
         event_type="build_task_env", fallback="account->issue_creator",
         extra={"issue_id": issue_id},
+        alert=not suppress_account_alerts,
     )
     from src.kernel.prompt_builder import resolve_task_server_env
     # Issue #1577：GRAPE_SERVER_URL=业务 API 基址，RUNTIME_SERVER_URL=worker runtime 基址。
@@ -6699,6 +6959,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
     # 入队（status=queued），由本机引擎 local_claimer / 远端 worker 认领执行。
     _pool_eids = ""
     _pool_sel_vod = ""
+    _pool_src_vod = ""
     if is_plugin_mode():
         # Issue #1208：智能推荐重派同走三分叉 gate（selector 场景落 pool_selector）
         _gm3, _gp3, _gf3 = _scene_pool_gate(_scene_id, "vod", repo_key=repo_key, user_id=_scene_uid)
@@ -6707,6 +6968,11 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
             return False
         _pool_eids = _gp3["pool_engine_ids"]
         _pool_sel_vod = _gp3["pool_selector"] if _gm3 == "selector" else ""
+        # Issue #3790：门禁上抛来源显式透传（避免被推导覆盖）+ 回填事件 payload
+        from src.domains.runtime.engine.engine_select import POOL_SOURCE_SCENE_MISSING as _PSM_VOD
+        _pool_src_vod = _gp3.get("pool_engine_source", "")
+        if _pool_src_vod == _PSM_VOD:
+            _land_scene_missing_payload(seq, repo_key, _scene_id, "vod")
         # Issue #259：None = 场景引擎全灭（方案A，不入队）
         if _pool_eids is None:
             _fail_scene_all_offline(seq, _scene_id, "vod", "智能推荐重派", repo_key=repo_key)
@@ -6714,7 +6980,8 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
     _enqueue_pipeline_task(repo_key, seq, "vod", _be, vod_skill, evt_copy,
                            skill_id, skill_path, engine_id, issue_id,
                            pool_engine_ids=_pool_eids, user_id=_scene_uid,
-                           is_scene_recommend=False, pool_selector=_pool_sel_vod)
+                           is_scene_recommend=False, pool_selector=_pool_sel_vod,
+                           pool_engine_source=_pool_src_vod)
     log.info(f"智能推荐重派: enqueued VOD task, seq={seq}, skill={vod_skill}")
 
 
@@ -6947,13 +7214,58 @@ def _resolve_event_issue_id(evt: dict, repo_key: str, api_token: str = "") -> st
     evt["_resolved_issue_id"] = issue_id or ""
     return evt["_resolved_issue_id"]
 
+def _gate_scene_context(repo_key: str, evt: dict,
+                        issue_id: str = "") -> tuple:
+    """派发门禁的场景三态解析（Issue #3788），返回 ``(scene_id, scene_scope)``。
+
+    修复背景：`normalize_event()` 不写 `scene_id`，门禁原先只看 `evt` → 恒为空串；
+    再叠上判官 `expected_scope = scene_scope or "repo"` 的回落，无场景 issue 的
+    session 级 user 档技能必然 mismatch（1 小时 11 条 `skill_resolve_failed`）。
+    因此「有没有场景」必须在门禁内可靠判定——否则「无场景放行」等于把
+    #1722/#1758 的派发期保护整体关掉。
+
+    三态口径（只有**确认未绑定**才表达「无场景」，即 `scene_scope=None`）：
+    - `evt` 已带场景（`scene_id` / `_scene_id`）→ 原样返回 + repo 口径；
+    - `evt` 缺失 → 回读 Issue 真实绑定（`_issue_authoritative_scene`）；非空 → repo 口径；
+    - 仍未绑定 → 再看仓库默认场景（`_repo_dev_scene`，与 `resolve_scene_id` 同源）；
+    - 两级都**确认**为空 → `("", None)`，由判官走 `source="no_scene"` 放行；
+    - 任一查询异常（未判定，helper 返回 `None`）→ `("", "repo")`，不放行（fail-closed）。
+    """
+    from src.api.scene_skill_scope import SCENE_SCOPE_REPO
+    _evt = evt if isinstance(evt, dict) else {}
+    _scene = _evt.get("scene_id") or _evt.get("_scene_id") or ""
+    if _scene:
+        return _scene, SCENE_SCOPE_REPO
+    _bound = _issue_authoritative_scene(repo_key, issue_id or "")
+    if _bound is None:
+        log.info(f"Pipeline: gate scene undetermined (issue binding lookup failed), "
+                 f"keep repo policy: repo={repo_key} issue={issue_id or '-'}")
+        return "", SCENE_SCOPE_REPO
+    if _bound:
+        return _bound, SCENE_SCOPE_REPO
+    _dev = _repo_dev_scene(repo_key)
+    if _dev is None:
+        log.info(f"Pipeline: gate scene undetermined (dev_scene lookup failed), "
+                 f"keep repo policy: repo={repo_key} issue={issue_id or '-'}")
+        return "", SCENE_SCOPE_REPO
+    if _dev:
+        return _dev, SCENE_SCOPE_REPO
+    return "", None
+
+
 def _evaluate_skill_scope(skill_name: str, repo_key: str, skill_id: int = 0,
-                          node_tag: str = "", scene_id: str = "") -> dict:
-    """派发门禁统一 scope 判定（Issue #1758）：直接调用单一判官。"""
+                          node_tag: str = "", scene_id: str = "",
+                          scene_scope: str | None = "repo") -> dict:
+    """派发门禁统一 scope 判定（Issue #1758）：直接调用单一判官。
+
+    ``scene_scope`` 默认 ``"repo"``（既有调用口径不变）；**仅**派发侧确认 Issue
+    无任何场景绑定时传 ``None``（Issue #3788「无场景」显式语义，判官返回
+    ``source="no_scene"``）。其余入口（保存/体检/详情/预检）不得传该入参。
+    """
     from src.api.scene_skill_scope import evaluate
     return evaluate({"skill": skill_name, "skill_id": skill_id,
                      "tag": node_tag or "", "id": node_tag or ""},
-                    repo_key, "repo", scene_id=scene_id)
+                    repo_key, scene_scope, scene_id=scene_id)
 
 def _fail_skill_resolve_event(repo_key: str, skill_name: str, scene_id: str,
                               agent_type: str, reason: str,
@@ -7123,26 +7435,18 @@ def _is_autopilot_task(issue_id: str = "", event_seq: int = 0) -> bool:
     （`skip_event_config=True`）。因此场景校正必须在入口按来源短路，不得查询 events
     （否则每次必然查空并产生 WARNING）。
 
-    识别口径（常量单一来源 = scheduler，禁止硬编码观测值）：
-    - 主判据：`agent_tasks.issue_id` 前缀 `autopilot-`（任务级权威标记）；
-    - 辅助判据：`event_seq >= _AUTOPILOT_EVENT_SEQ_BASE`（高位命名空间兜底，
-      兼容历史/无 issue_id 的 autopilot 任务）。
+    识别口径（常量单一来源 = kernel.issue_ident，禁止硬编码观测值）：
+    - 主判据：`agent_tasks.issue_id` 为合成键 `autopilot-<字母>`（任务级权威标记）；
+    - 辅助判据：`event_seq >= AUTOPILOT_EVENT_SEQ_BASE`（高位命名空间兜底），
+      仅当 issue_id 不是真实 Issue 编号时成立——Issue #3908：autopilot 命名空间 +
+      真实 Issue 绑定的任务必须继续走正常场景校正。
     """
     _issue = str(issue_id or "")
-    try:
-        from src.domains.runtime.engine.scheduler import (
-            _AUTOPILOT_EVENT_SEQ_BASE, _AUTOPILOT_ISSUE_ID_PREFIX)
-    except Exception as e:
-        # 常量不可用时不误杀真实任务，保守按非 autopilot 处理
-        log.debug(f"[scene-env] autopilot source constants unavailable: {e}")
-        return False
-    if (_issue.startswith(_AUTOPILOT_ISSUE_ID_PREFIX)
-            and len(_issue) > len(_AUTOPILOT_ISSUE_ID_PREFIX)):
+    if is_autopilot_issue_ref(_issue):
         return True
-    try:
-        return bool(event_seq) and int(event_seq) >= int(_AUTOPILOT_EVENT_SEQ_BASE)
-    except (TypeError, ValueError):
+    if is_native_issue_ident(_issue):
         return False
+    return is_autopilot_event_seq(event_seq)
 
 def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
                            event_type: str = "", title: str = "",
@@ -7161,6 +7465,9 @@ def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
     4. 关联 events 行的 event_type / title 命中 2/3；
     5. 事件行不可用（event_seq=0/缺失）时，回退任务 prompt 快照中的订阅标记。
 
+    Issue #3908：autopilot 合成 seq（`>= AUTOPILOT_EVENT_SEQ_BASE`）在 events 表必然
+    不存在，进入查询前直接判 False（明确「非 PR 订阅」），不查表、不打 missing WARNING。
+
     `task_id` / `repo_key` 仅用于缺行告警的可定位字段（Issue #3744），不参与判定。
     """
     if _PR_SUB_ISSUE_ID_RE.match(str(issue_id or "")):
@@ -7175,6 +7482,8 @@ def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
         return True
     if any(_m in str(prompt or "") for _m in _PR_SUB_PROMPT_MARKERS):
         return True
+    if is_autopilot_event_seq(event_seq):
+        return False
     if event_seq:
         try:
             from src.kernel.session_manager import db, db_lock
@@ -7223,8 +7532,9 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     `agent_tasks → issue 当前归属场景`（`get_issue_bound_scene`，与
     `issues detail.scene_id` 同源且不回退 dev_scene）重算并覆盖陈旧快照；
     PR 订阅任务保持订阅场景语义不校正；Issue 未绑定场景时按「未选定=空串」口径处理；
-    autopilot 任务（合成 issue_id / 高位合成 seq，设计上不写 events 表）在入口按来源
-    短路并保留快照（Issue #3744）；
+    autopilot 任务（合成回链键 `autopilot-<字母>`，设计上不写 events 表）按来源短路并
+    保留快照（Issue #3744 / #3908）；autopilot 高位合成 seq + 真实 Issue 编号的任务仍走
+    正常校正（Issue #3908，`_pr_subscription_state` 已按命名空间判 False，不查 events）；
     PR 订阅判定未定（events 查询异常/事件行缺失）或 Issue 归属查询异常时一律跳过，
     不覆盖快照，避免误清空正确的 GRAPE_SCENE_ID。
 
@@ -7249,14 +7559,20 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     _event_seq = _row[2] or 0
     _event_type = _row[3] or ""
     _prompt = _row[4] or ""
-    if _is_autopilot_task(_issue_id, _event_seq):
-        # autopilot 不写 events 表：入口短路，避免必然查空的 events 查询与 WARNING
+    if is_autopilot_issue_ref(_issue_id):
+        # Issue #3908：合成回链键不对应真实 Issue，静默跳过（设计内常态，debug 级）
         log.debug(f"[scene-env] skip scene reconcile: autopilot task={task_id} "
                   f"issue={_issue_id or '-'} event_seq={_event_seq} "
                   f"scene_reconciled=false reason=autopilot_source "
                   f"snapshot_scene={_snapshot or '-'}")
         return _snapshot
     if not _repo_key or not _issue_id:
+        if is_autopilot_event_seq(_event_seq):
+            # 高位命名空间但无 Issue 绑定：同样按 autopilot 来源短路，不查 events
+            log.debug(f"[scene-env] skip scene reconcile: autopilot task={task_id} "
+                      f"issue={_issue_id or '-'} event_seq={_event_seq} "
+                      f"scene_reconciled=false reason=autopilot_event_seq "
+                      f"snapshot_scene={_snapshot or '-'}")
         return _snapshot
     if _pr_subscription_state(_issue_id, _event_seq, _event_type,
                               prompt=_prompt, task_id=task_id,
@@ -7428,17 +7744,51 @@ def _vcs_get_issue(repo_key: str, num: str, client=None, timeout: float = 30.0) 
     owner, rname = split_owner_repo(_rk)
     if not owner or not rname or not num:
         return ("unknown", {})
+    # Issue #3759：仓库级熔断——上游已确认该仓库不存在时，逐 issue 读直接短路为
+    # missing（0 上游请求），避免孤儿仓库卡的 404 轮询无限放大；退避到点由
+    # `allow_read` 原子占位，只放行一个调用方去探测（8 并发批量复核不会整批打上游）。
+    # 该链路读与探测用同一平台仓储凭据，因此「读不到 issue」与「看不到仓库」同源，
+    # 结论写仓库级台账才成立（QA 复审 Required 1/2）。
+    #
+    # ⚠️ 顺序：先解析凭据再判熔断。无 token 是「无法核实」（unknown，调用方 fail-open），
+    # 不能被熔断改写成 missing——熔断只替代**真的会打上游**的那次读。
+    if client is None:
+        tok = _resolve_issue_read_token(_rk)
+        if not tok:
+            return ("unknown", {})
+        client = _build_issue_read_client(_rk, tok)
+    from src.domains.runtime.vcs import issue_poll_breaker as _breaker
     try:
-        if client is None:
-            tok = _resolve_issue_read_token(_rk)
-            if not tok:
-                return ("unknown", {})
-            client = _build_issue_read_client(_rk, tok)
+        _allowed, _st = _breaker.allow_read(_rk)
+    except Exception:  # noqa: BLE001 - 熔断层读失败一律 fail-open（不短路）
+        _allowed, _st = True, {}
+    if not _allowed:
+        log.debug(f"_vcs_get_issue: {_rk}#{num} short-circuited "
+                  f"(vcs_missing since {_st.get('vcs_missing_since') or '?'})")
+        return ("missing", {})
+    try:
         d = client.get_issue(_native_issue_number(num), timeout=timeout)
         if isinstance(d, dict) and "error" not in d:
+            try:
+                _breaker.note_recovery(_rk, operation="issue_read")
+            except Exception:  # noqa: BLE001
+                pass
             return ("exists", d)
         if isinstance(d, dict) and str(d.get("status_code", "")) == "404":
+            try:
+                _breaker.note_permanent_failure(_rk, 404, operation="issue_read")
+            except Exception:  # noqa: BLE001
+                pass
             return ("missing", {})
+        # 401/403 等同为不可自愈的归属/权限错配，仍按「未知」返回（调用方 fail-open）；
+        # 台账只记「最近错误码/时间」供运维定位，不探测、不置仓库级 vcs_missing
+        # （403 只说明这一方凭据没有权限，不构成仓库不存在的事实）。
+        _code = d.get("status_code") if isinstance(d, dict) else None
+        try:
+            if _breaker.is_permanent_status(_code):
+                _breaker.note_permanent_failure(_rk, _code, operation="issue_read")
+        except Exception:  # noqa: BLE001
+            pass
         return ("unknown", {})
     except Exception:
         return ("unknown", {})

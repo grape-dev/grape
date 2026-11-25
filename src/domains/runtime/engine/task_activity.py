@@ -40,6 +40,11 @@ RECOVER_ORPHANS_ACTIVITY_WINDOW_SECONDS = 1200
 # 足够；行数上限防极端历史任务（万行消息）在 claim 循环内拖慢回收判定。
 _MAX_ROWS_PER_TASK = 50
 
+# Issue #3741：连续相同 tool+input 指纹的判据至少需要 2 步才有意义；上限用于防御
+# 异常配置（如 10^9）把扫描拖慢——只读取封顶行数，超过上限的阈值永远不可能命中。
+_MIN_REPEAT_STEPS = 2
+_MAX_REPEAT_STEPS = 200
+
 
 def _epoch_of(value) -> float | None:
     """库中时间串 → epoch 秒；不可解析返回 None。
@@ -97,3 +102,110 @@ def has_no_recent_activity(cursor, task_id, window_seconds: int,
     单独具名以固定「无进展」测试 seam，避免调用方各写一套取反逻辑。
     """
     return not has_recent_activity(cursor, task_id, window_seconds, now_epoch=now_epoch)
+
+
+def _tool_input_fingerprint(tool, input_json) -> str:
+    """tool+input → 稳定指纹。
+
+    input_json 是服务端已脱敏的 JSON 串；同一工具同一入参可能因键序/空白差异得到不同
+    字符串，故先尝试解析为对象并按 key 排序重新序列化（失败则原样 strip 兜底）。
+    tool 名大小写不敏感（acp 后端存在 `Bash`/`bash` 混写）。
+    返回 sha1 前 16 位十六进制；空指纹（tool 与 input 都为空）返回空串，调用方跳过。
+    """
+    import hashlib
+    import json as _json
+    _tool = str(tool or "").strip().lower()
+    _raw = input_json if isinstance(input_json, str) else ""
+    _norm = _raw.strip()
+    if _norm:
+        try:
+            _obj = _json.loads(_norm)
+            _norm = _json.dumps(_obj, sort_keys=True, separators=(",", ":"),
+                                ensure_ascii=False)
+        except Exception:
+            pass
+    if not _tool and not _norm:
+        return ""
+    return hashlib.sha1(f"{_tool}\n{_norm}".encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def repeated_tool_steps(cursor, task_id, window_seconds: int, min_repeats: int,
+                        now_epoch: float | None = None) -> dict | None:
+    """Issue #3741：检测「连续 N 步 tool+input 指纹相同」的无进展空转。
+
+    与 #2793 的活跃度判据互补：空转任务每 ~115s 仍写一条 tool_use，活跃度恒为 true，
+    只有指纹重复能识别。取最近至多 `max(min_repeats, _MAX_ROWS_PER_TASK)` 条 tool_use
+    （索引列 task_id 过滤，SQL 内不对时间列做函数运算），从最新一条往回统计连续相同
+    指纹；**最新一条必须在窗口内**，窗口外的行不参与——避免旧任务的历史重复被当成本轮空转。
+
+    判据只依赖「指纹重复」，不含「静默时长」，因此不会重演 #1495 长命令静默误杀。
+
+    Args:
+        cursor: 调用方在 db_lock 内持有的 DB 游标（不另开连接、不提交）。
+        task_id: 任务 id。
+        window_seconds: 参与统计的窗口（秒）。调用方取 `_no_progress_repeat_window` 推导值：
+            与 `no_progress_timeout_sec` **解耦**——115s/步的节奏下 600s 阈值窗口只装得下
+            约 5 步，8 步阈值会永远 miss（PR #2160 审查 ①）。
+        min_repeats: 连续相同指纹的最小步数；< 2 视为关闭（返回 None）。
+        now_epoch: 可注入当前 epoch（测试确定性用）。
+
+    Returns:
+        命中返回 `{tool, fingerprint, repeats, first_seq, last_seq, window_seconds}`；
+        未命中/数据不足/查询异常返回 None。
+    """
+    try:
+        _min = int(min_repeats)
+    except (TypeError, ValueError):
+        return None
+    if _min < _MIN_REPEAT_STEPS:
+        return None
+    if _min > _MAX_REPEAT_STEPS:
+        return None
+    _limit = min(max(_min, _MAX_ROWS_PER_TASK), _MAX_REPEAT_STEPS)
+    try:
+        cursor.execute(
+            "SELECT seq, tool, input_json, created_at FROM task_messages "
+            "WHERE task_id=? AND type='tool_use' ORDER BY id DESC LIMIT ?",
+            (task_id, _limit))
+        rows = cursor.fetchall()
+    except Exception:
+        return None
+    if not rows:
+        return None
+    _cutoff = (now_epoch if now_epoch is not None else time.time()) - float(window_seconds)
+    _latest_epoch = _epoch_of(rows[0][3])
+    if _latest_epoch is None or _latest_epoch < _cutoff:
+        return None
+
+    _base_fp = ""
+    _base_tool = ""
+    _repeats = 0
+    _first_seq = None
+    _last_seq = None
+    for _seq, _tool, _input_json, _created in rows:
+        _fp = _tool_input_fingerprint(_tool, _input_json)
+        if not _fp:
+            break
+        _epoch = _epoch_of(_created)
+        if _epoch is not None and _epoch < _cutoff:
+            break
+        if not _base_fp:
+            _base_fp = _fp
+            _base_tool = str(_tool or "").strip()
+            _repeats = 1
+            _first_seq = _last_seq = _seq
+            continue
+        if _fp != _base_fp:
+            break
+        _repeats += 1
+        _first_seq = _seq
+    if _repeats < _min:
+        return None
+    return {
+        "tool": _base_tool,
+        "fingerprint": _base_fp,
+        "repeats": _repeats,
+        "first_seq": _first_seq,
+        "last_seq": _last_seq,
+        "window_seconds": float(window_seconds),
+    }

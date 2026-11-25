@@ -1972,6 +1972,20 @@ def _discover_local_runtimes() -> list[dict]:
         if healthy and (r["name"] or "").lower().startswith("opencode"):
             if _validate_opencode_registration():
                 healthy = False
+        # Issue #4346：LLM provider 前置校验——本地配置明确缺 provider 时拒绝健康
+        # 注册（派发期不会再收到 `No LLM provider configured` 500）；结果随注册上报，
+        # 服务端落 llm_provider_ok=0 并把存量引擎摘出调度池。
+        _llm_state = None
+        try:
+            from src.domains.runtime.engine.provider_check import validate_engine_llm_provider
+            _llm_state = validate_engine_llm_provider(r["name"])
+            if not _llm_state.get("ok"):
+                healthy = False
+                log.error(f"[provider-check] {r['name']} rejected healthy registration: "
+                          f"{str(_llm_state.get('reason') or '')[:240]}")
+        except Exception as _pe:
+            log.warning(f"[provider-check] {r.get('name')} validation skipped: {_pe}")
+            _llm_state = None
         # display_name：展示名映射（hwcloud → AIShell；register 接口落 DB display_name 列）
         from src.domains.runtime.engine.instances import engine_display_name, ENGINE_DISPLAY_NAMES
         _et = (r["name"] or "").strip().lower()
@@ -1984,7 +1998,8 @@ def _discover_local_runtimes() -> list[dict]:
                     "engine": r["name"], "command": "", "executable": ""}
         out.append({"name": r["name"], "display_name": (_dn.capitalize() if _dn else r["name"]),
                     "version": version, "healthy": healthy, "cli_path": cli,
-                    "installed": r.get("installed", False), "backend_capability": _cap})
+                    "installed": r.get("installed", False), "backend_capability": _cap,
+                    "llm_provider": _llm_state})
     return out
 
 

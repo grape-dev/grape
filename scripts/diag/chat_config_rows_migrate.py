@@ -86,7 +86,7 @@ def classify(c, user_id):
     复用主服务真实逻辑：候选序 = canonical 优先 + 遗留行按 last_active DESC。
     """
     from src.kernel.session_manager import _pick_chat_config_row
-    picked_id, row, backend = _pick_chat_config_row(c, user_id)
+    picked_id, row, backend, _reason = _pick_chat_config_row(user_id)
     c.execute("SELECT COUNT(*) FROM chat_agent_session WHERE id=? AND (repo_key='' OR repo_key IS NULL)",
               (CANON + str(user_id),))
     canon_exists = (c.fetchone() or [0])[0] > 0
@@ -133,7 +133,7 @@ def plan(c, users):
                 c.execute("SELECT user_id FROM chat_agent_session WHERE id=?", (canon_id,))
                 _owner = (c.fetchone() or [None])[0]
                 _rt = dead[0][1]
-                _, usable = _chat_config_row_engine(c, _rt)
+                _, usable, _reason, _ = _chat_config_row_engine(_rt, "", row_id="")
                 if _owner == uid and not usable and picked_id == good[0][0]:
                     actions.append(dict(kind="D", uid=uid, canon_id=canon_id, keep=good[0][0],
                                         rename=(good[0][0], canon_id), delete=[canon_id], rows=rows,
@@ -264,6 +264,8 @@ def main():
     ap.add_argument("--db", default=os.environ.get("GRAPE_DB_NAME", "grape_test_db"))
     ap.add_argument("--apply", action="store_true", help="执行（默认只预演）")
     ap.add_argument("--yes", action="store_true", help="确认执行")
+    ap.add_argument("--allow-cross-db", action="store_true",
+                    help="允许 --db 与主服务库不一致（默认拒绝，避免 classify 跨库判定）")
     args = ap.parse_args()
     if not args.password:
         print("缺少密码：设置 GRAPE_DB_PASSWORD 或 --password", file=sys.stderr)
@@ -272,6 +274,28 @@ def main():
     conn = pymysql.connect(host=args.host, port=args.port, user=args.user, password=args.password,
                            database=args.db, charset="utf8mb4")
     c = CompatCursor(conn.cursor())
+    # `classify()` 复用主服务 session_manager 的读取逻辑，读的是主服务配置指向的库；
+    # 若 --db 指向另一个库，判定（classify）与实际写入（本连接）来自两个库，必须先拦。
+    try:
+        from src.kernel import session_manager as _sm
+        _main_n = _sm.db.execute(
+            "SELECT COUNT(*) FROM chat_agent_session").fetchone()[0]
+    except Exception as e:  # noqa: BLE001 - 主服务库不可读则无法校验一致性
+        print(f"[guard] 无法读取主服务库用于一致性校验：{e}", file=sys.stderr)
+        conn.close()
+        return 2
+    c.execute("SELECT COUNT(*) FROM chat_agent_session")
+    _target_n = (c.fetchone() or [0])[0]
+    # 恢复游标（上面 c.fetchone 已消费，后面 load_users 会重新 execute，无影响）
+    if int(_target_n) != int(_main_n) and not args.allow_cross_db:
+        print(f"[guard] --db 目标库 {args.db} 的 chat_agent_session 行数 ({_target_n}) "
+              f"与主服务库 ({_main_n}) 不一致：classify 会跨库判定。"
+              f"请让两者指向同一库，或确认后用 --allow-cross-db 继续。", file=sys.stderr)
+        conn.close()
+        return 2
+    if int(_target_n) != int(_main_n):
+        print(f"[guard] 已按 --allow-cross-db 继续（主服务库 {_main_n} 行 vs 目标 {_target_n} 行）",
+              file=sys.stderr)
     if not args.apply:
         # 预演模式：把会话设成只读，物理上杜绝任何写入（写模式当然不能设，否则 CREATE 备份表都会失败）
         try:

@@ -571,6 +571,16 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     is_org_repo INTEGER DEFAULT 0,         -- 组织自动 provisioning 的仓库；禁止解绑/迁移
     linked_by TEXT DEFAULT '',             -- 关联到组织的操作用户（D105 后 user id 恒 TEXT）
     linked_at TEXT DEFAULT '',             -- 关联时间
+    -- Issue #3759：仓库级 VCS 存在性熔断台账（孤儿仓库卡的上游 4xx 熔断）。
+    -- 事实源在仓库卡（多副本一致/重启不丢），runtime 进程经 mgmt.public 读写。
+    vcs_status VARCHAR(255) NOT NULL DEFAULT '',         -- ''=未判定 / ok / vcs_missing
+    vcs_missing_since VARCHAR(255) NOT NULL DEFAULT '',  -- 首次判定 vcs_missing 时间
+    vcs_last_error_code VARCHAR(255) NOT NULL DEFAULT '',-- 最近一次永久失败状态码
+    vcs_last_error_at VARCHAR(255) NOT NULL DEFAULT '',  -- 最近一次永久失败时间
+    vcs_probe_result VARCHAR(255) NOT NULL DEFAULT '',   -- exists / missing / unknown
+    vcs_probe_at VARCHAR(255) NOT NULL DEFAULT '',       -- 最近一次仓库级探测时间
+    vcs_next_probe_at VARCHAR(255) NOT NULL DEFAULT '',  -- 退避后的下一次探测放行时间
+    vcs_fail_count INTEGER NOT NULL DEFAULT 0,           -- 连续永久失败计数（退避档位）
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -1696,13 +1706,26 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
         log.warning(f"Add managed repo failed: {e}")
         raise
 
-def set_repo_scene(repo_key: str, scene_id: str):
+def set_repo_scene(repo_key: str, scene_id: str) -> str:
     """写入仓库开发场景（managed_repos.dev_scene），幂等。
 
     issue-39 方案 B：无「default」场景，scene_id 为空即清空（仓库未配置场景）。
+
+    Issue #3790：写前校验 scene pool 登记（`scene_pool_binding_warning`）——仓内不存在
+    的 scene_id（典型为模板场景名）只告警并返回提示文案，**不阻断写入**（历史直写路径
+    仍需落库，派发侧按 scene_missing 降级并留痕）。返回空串 = 无需提示。
     """
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
+    _warning = ""
+    if scene_id:
+        try:
+            from src.domains.mgmt.pipeline_config import scene_pool_binding_warning
+            _warning = scene_pool_binding_warning(scene_id, repo_key) or ""
+        except Exception as e:
+            log.warning(f"Set repo scene: scene pool validation failed: {e}")
+        if _warning:
+            log.warning(f"Set repo scene: {_warning} (repo={repo_key}, pool_engine_source=scene_missing)")
     try:
         with db_lock:
             c = _mg_db.cursor()
@@ -1710,6 +1733,7 @@ def set_repo_scene(repo_key: str, scene_id: str):
             _mg_db.commit()
     except Exception as e:
         log.warning(f"Set repo scene failed: {e}")
+    return _warning
 
 def get_repo_scene(repo_key: str) -> str:
     """读取仓库开发场景（managed_repos.dev_scene），无记录或未设置返回空字符串。
@@ -1944,7 +1968,10 @@ def get_managed_repos(user_id: int, org_id: str = "", personal_org: bool = False
             "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
             "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
             "COALESCE(u.is_join,0), COALESCE(u.is_admin,0), COALESCE(m.host_status,''), "
-            "COALESCE(m.org_id,''), COALESCE(o.name,''), COALESCE(m.is_org_repo,0) "
+            "COALESCE(m.org_id,''), COALESCE(o.name,''), COALESCE(m.is_org_repo,0), "
+            # Issue #3759：仓库级 VCS 熔断台账，供列表标红（vcs_missing）
+            "COALESCE(m.vcs_status,''), COALESCE(m.vcs_missing_since,''), "
+            "COALESCE(m.vcs_last_error_code,''), COALESCE(m.vcs_next_probe_at,'') "
             "FROM managed_repos m "
             "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
             "LEFT JOIN organization o ON o.id=m.org_id "
@@ -1962,7 +1989,9 @@ def get_managed_repos(user_id: int, org_id: str = "", personal_org: bool = False
             c.execute(
                 "SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, "
                 "bot_gitcode_token, gitcode_webhook_token, bot_username, created_at, 0, 0, "
-                "COALESCE(host_status,''), COALESCE(org_id,''), '', COALESCE(is_org_repo,0) "
+                "COALESCE(host_status,''), COALESCE(org_id,''), '', COALESCE(is_org_repo,0), "
+                "COALESCE(vcs_status,''), COALESCE(vcs_missing_since,''), "
+                "COALESCE(vcs_last_error_code,''), COALESCE(vcs_next_probe_at,'') "
                 "FROM managed_repos ORDER BY full_name")
         rows = c.fetchall()
         # autocommit=False 下 SELECT 会打开事务，同线程连接后续 SELECT 看到旧快照。
@@ -1978,6 +2007,12 @@ def get_managed_repos(user_id: int, org_id: str = "", personal_org: bool = False
             "org_id": (r[12] or "") if len(r) > 12 else "",
             "org_name": (r[13] or "") if len(r) > 13 else "",
             "is_org_repo": bool(r[14]) if len(r) > 14 else False,
+            # Issue #3759：VCS 存在性熔断（前端据此把孤儿仓库卡标红 + 展示处置提示）
+            "vcs_status": (r[15] or "") if len(r) > 15 else "",
+            "vcs_missing": ((r[15] or "") == "vcs_missing") if len(r) > 15 else False,
+            "vcs_missing_since": (r[16] or "") if len(r) > 16 else "",
+            "vcs_last_error_code": (r[17] or "") if len(r) > 17 else "",
+            "vcs_next_probe_at": (r[18] or "") if len(r) > 18 else "",
         } for r in rows]
 
 

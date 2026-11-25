@@ -86,6 +86,18 @@
 
 ---
 
+## POST /api/repos/{owner}/{repo}/vcs-health/reset — 清除仓库 VCS 熔断（Issue #3759）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+上游 VCS 已不存在的孤儿仓库卡被熔断（`vcs_missing`）后，仓库内逐 issue 读不再打上游。
+重绑 provider 或确认上游已恢复后调用本端点清除台账，下一次读自动重新探测。
+
+| Path | `{owner}` `{repo}` |
+| 出参 | `{"repo_key", "before": {"vcs_status", "vcs_missing_since", "vcs_last_error_code"}, "after": {"vcs_status", "vcs_fail_count"}, "message"}` |
+| 返回 | 200（幂等）；403 无仓库权限 |
+
+---
+
 ## GET /api/repos/bot-token/{owner}/{repo} — 获取仓库 bot token
 
 > scope（x-token-scope）：**user_only**

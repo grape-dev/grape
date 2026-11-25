@@ -27,6 +27,16 @@ SELECT_MANAGED_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG = "SELECT org_id FROM managed
 # ── 自 db_setup._create_tables() 下沉 ────────────────────────────────
 ALTER_GRAPE_ACCOUNTS = "ALTER TABLE grape_accounts MODIFY COLUMN email VARCHAR(255) DEFAULT NULL"
 
+# ── Issue #4339 同批审计：grape_t_channel_outbound_card.payload TEXT → MEDIUMTEXT ──
+# IM 外发卡片体（markdown 卡片）超 65,535 字节时 MySQL 非严格 sql_mode 会静默截断，
+# 而该表是外发重试的唯一事实源 → 重试发出的是坏卡片。带 COLUMN 关键字以走
+# `_destructive_ddl` 收口（门槛 + 失败抛出），DEFAULT/NOT NULL 与建表口径一致；
+# TEXT 族的 DEFAULT '{}' 由 mysql_compat 翻成表达式默认值。
+ALTER_GRAPE_T_CHANNEL_OUTBOUND_CARD__PAYLOAD_MEDIUMTEXT = (
+    "ALTER TABLE grape_t_channel_outbound_card "
+    "MODIFY COLUMN payload MEDIUMTEXT NOT NULL DEFAULT '{}'"
+)
+
 # ── 自 db_setup._seed_event_action_filter() 下沉 ─────────────────────
 INSERT_IGNORE_EVENT_ACTION_FILTER = (
     "INSERT OR IGNORE INTO event_action_filter "

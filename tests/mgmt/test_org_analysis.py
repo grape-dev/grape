@@ -126,6 +126,44 @@ def test_ensure_daily_task_is_idempotent():
     assert task["enabled"] is True
 
 
+def test_ensure_daily_task_writes_state_columns_as_empty():
+    """关联仓库建每日分析任务时，状态三列必须显式落空串（PR #2157 门禁复审 ④）。
+
+    同 `routes/autopilot.py::create_task`：MySQL strict 下三列 NOT NULL 且默认值未归一
+    时，这条 INSERT 不给值直接 1364 → 「关联组织仓库」500。
+    """
+    from src.domains.mgmt import org_analysis
+
+    org = _seed_org()
+    task_id = org_analysis.ensure_analysis_task(org["id"], actor_id=UID)
+    row = db.execute(
+        "SELECT dispatch_state, dispatch_state_reason, dispatch_state_at "
+        "FROM autopilot_tasks WHERE id=?", (task_id,)).fetchone()
+    assert tuple(row) == ("", "", ""), f"三列未落空串: {tuple(row)}"
+
+
+def test_ensure_daily_task_insert_column_list_is_exact():
+    """列清单按逗号切分后与期望集合精确相等（子串断言会把 dispatch_state 误判为命中）。"""
+    import inspect
+    import re
+
+    from src.domains.mgmt import org_analysis
+
+    src = inspect.getsource(org_analysis.ensure_analysis_task)
+    sql = " ".join(re.findall(r'"([^"]*)"', src))
+    m = re.search(r"INSERT INTO autopilot_tasks\s*\(([^)]*)\)", sql)
+    assert m, "未找到 ensure_analysis_task 的 INSERT 列清单"
+    cols = {c.strip() for c in m.group(1).split(",") if c.strip()}
+    expected = {
+        "name", "repo_key", "agent_type", "instruction", "skill_name", "cron",
+        "max_retry", "enabled", "last_run_at", "next_run_at", "created_at",
+        "updated_at", "created_by", "engine_runtime_ids", "custom_fields",
+        "work_branch", "engine_runtime_uids",
+        "dispatch_state", "dispatch_state_reason", "dispatch_state_at",
+    }
+    assert cols == expected, f"列清单不符: 缺={sorted(expected-cols)} 多={sorted(cols-expected)}"
+
+
 def test_single_and_all_targets_exclude_org_repo():
     from src.domains.mgmt import org_analysis
 

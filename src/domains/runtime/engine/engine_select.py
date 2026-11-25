@@ -19,6 +19,8 @@ import threading
 
 import time as _time
 
+import threading
+
 from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.kernel.config import CONFIG_DIR, log
 from src.kernel.session_manager import db
@@ -621,15 +623,24 @@ def _backend_claimable_map(runtime_ids: list) -> dict | None:
             ph = ",".join("?" * len(ids))
             c.execute(
                 "SELECT id, COALESCE(backend_status,''), COALESCE(circuit_open_until,''), "
-                "COALESCE(circuit_half_open,0) FROM agent_runtimes "
+                "COALESCE(circuit_half_open,0), COALESCE(session_circuit_until,''), "
+                "COALESCE(session_circuit_half_open,0), COALESCE(llm_provider_ok,1), "
+                "(SELECT COUNT(*) FROM agent_tasks t WHERE t.runtime_id=agent_runtimes.id "
+                " AND t.status IN ('dispatched','running')) "
+                "FROM agent_runtimes "
                 f"WHERE id IN ({ph})", tuple(ids))
             rows = c.fetchall()
     except Exception as e:
         log.debug(f"_backend_claimable_map failed (fail-open): {e}")
         return None
     from src.domains.runtime.engine.backend_health import claim_eligible
+    from src.domains.runtime.engine.session_guard import session_eligible
     now = _time.time()
-    return {int(r[0]): claim_eligible(r[1], r[2], r[3], now) for r in rows}
+    return {
+        int(r[0]): (claim_eligible(r[1], r[2], r[3], now)
+                    and session_eligible(r[4], r[5], r[6], now, active=r[7]))
+        for r in rows
+    }
 
 
 def _backend_claimable(members: list[dict]) -> dict | None:
@@ -1160,9 +1171,53 @@ def _best_health_fallback(members: list[dict]) -> int | None:
 
 # Issue #2791：`pool_engine_source` 取值（与 db schema 注释、local-claimer 设计的降级
 # 判定共用一套词汇）：scene=场景绑定 / auto=引擎自动选择 / directed=engine_config 定向锁定。
+# Issue #3790：扩展第四态 scene_missing=场景未在仓内 scene pool 登记（#541 同源的反向情形：
+# 场景 ID 在 devops_pipeline_scene 查不到 → 跳过全局模板回退），供事件 payload 与
+# agent_tasks.pool_engine_source 区分「场景未注册」与「引擎离线」。
 POOL_SOURCE_SCENE = "scene"
 POOL_SOURCE_AUTO = "auto"
 POOL_SOURCE_DIRECTED = "directed"
+POOL_SOURCE_SCENE_MISSING = "scene_missing"
+
+# Issue #3790：scene_missing 告警收敛窗口（秒）+ 状态上限。
+# 生产实测未登记场景每小时 22 条无结构 WARNING（custom-ac64212e / grape-skill-dev /
+# grape_loop 三个场景），按 (repo_key, scene_id, agent_type) 合并为「每窗口 1 行 + 计数」。
+_SCENE_MISSING_ALERT_WINDOW_DEFAULT = 300
+_SCENE_MISSING_ALERT_WINDOW_MAX = 86400
+
+
+def _scene_missing_alert_window_seconds(raw: str | None = None) -> int:
+    """Issue #3790 审查 R1：`SCENE_MISSING_ALERT_WINDOW` 解析必须健壮。
+
+    原实现 `int(os.environ.get(...))` 在**模块导入期**执行：env 写成 `5m`/`300s`/空串/
+    负数会让整个 engine_select 导入抛 ValueError（派发链路全断）——「可观测性配置
+    炸掉主链路」。现口径：缺省/非法/越界（≤0 或 > 上限）一律回落默认 300 秒并留痕，
+    绝不在导入期抛异常。
+    """
+    if raw is None:
+        raw = os.environ.get("SCENE_MISSING_ALERT_WINDOW", "")
+    _txt = str(raw).strip()
+    if not _txt:
+        return _SCENE_MISSING_ALERT_WINDOW_DEFAULT
+    try:
+        _val = int(_txt)
+    except (TypeError, ValueError):
+        log.warning(f"SCENE_MISSING_ALERT_WINDOW={_txt!r} 非法（须为秒数整数），"
+                    f"回落默认 {_SCENE_MISSING_ALERT_WINDOW_DEFAULT}s")
+        return _SCENE_MISSING_ALERT_WINDOW_DEFAULT
+    if _val <= 0 or _val > _SCENE_MISSING_ALERT_WINDOW_MAX:
+        log.warning(f"SCENE_MISSING_ALERT_WINDOW={_val} 越界"
+                    f"（允许 1..{_SCENE_MISSING_ALERT_WINDOW_MAX}），"
+                    f"回落默认 {_SCENE_MISSING_ALERT_WINDOW_DEFAULT}s")
+        return _SCENE_MISSING_ALERT_WINDOW_DEFAULT
+    return _val
+
+
+_SCENE_MISSING_ALERT_WINDOW_SECONDS = _scene_missing_alert_window_seconds()
+_SCENE_MISSING_ALERT_MAX_KEYS = 512
+_SCENE_MISSING_ALERT_TTL_SECONDS = 3600
+_scene_missing_alert_state: dict = {}   # {(repo_key, scene_id, agent_type): {...}}
+_scene_missing_alert_lock = threading.Lock()
 
 
 def resolve_scene_user_scope(repo_key: str, issue_id, actor: str = "") -> tuple[str, int]:
@@ -1457,8 +1512,71 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     return None
 
 
+def _prune_scene_missing_alert_state(now: float) -> None:
+    """Issue #3790：回收过期/超量的收敛状态（调用方必须持有 _scene_missing_alert_lock）。"""
+    stale = [k for k, v in _scene_missing_alert_state.items()
+             if now - float(v.get("last_emit") or 0) > _SCENE_MISSING_ALERT_TTL_SECONDS]
+    for k in stale:
+        _scene_missing_alert_state.pop(k, None)
+    if len(_scene_missing_alert_state) <= _SCENE_MISSING_ALERT_MAX_KEYS:
+        return
+    overflow = sorted(_scene_missing_alert_state.items(),
+                      key=lambda kv: float(kv[1].get("last_emit") or 0))
+    for k, _v in overflow[:len(overflow) // 2]:
+        _scene_missing_alert_state.pop(k, None)
+
+
+def _alert_scene_missing(repo_key: str, scene_id: str, agent_type: str = "") -> dict:
+    """Issue #3790：scene_missing 结构化告警 + 按 (repo_key, scene_id, agent_type) 窗口收敛。
+
+    未登记场景每次派发都会走到这里（生产实测 22 条/时）：窗口内仅首条输出完整 WARNING，
+    后续只累加 suppressed 计数；窗口滚动后输出汇总行（含被抑制条数），既不丢总量也不刷屏。
+    返回 {"emitted", "window_count", "suppressed", "total_count", "window_seconds"}
+    供调用方/测试断言。
+    """
+    now = _time.time()
+    key = (repo_key or "", scene_id or "", agent_type or "")
+    with _scene_missing_alert_lock:
+        _prune_scene_missing_alert_state(now)
+        st = _scene_missing_alert_state.get(key)
+        if st is None:
+            # last_emit=0 → 首条立即输出（新键不吞第一条）
+            st = {"window_start": now, "last_emit": 0.0, "count": 0,
+                  "suppressed": 0, "last_emit_count": 0}
+            _scene_missing_alert_state[key] = st
+        st["count"] = int(st.get("count") or 0) + 1
+        _total = int(st["count"])
+        _emitted = now - float(st.get("last_emit") or 0) >= _SCENE_MISSING_ALERT_WINDOW_SECONDS
+        if _emitted:
+            _suppressed = int(st.get("suppressed") or 0)
+            # 本窗口条数 = 累计 - 上次汇报时的累计（首条即 1）
+            _window_count = _total - int(st.get("last_emit_count") or 0)
+            st["last_emit"] = now
+            st["last_emit_count"] = _total
+            st["suppressed"] = 0
+        else:
+            st["suppressed"] = int(st.get("suppressed") or 0) + 1
+            _suppressed = st["suppressed"]
+            _window_count = _total - int(st.get("last_emit_count") or 0)
+    if _emitted:
+        log.warning(
+            f"get_scene_pool_engine_ids: scene_missing (Issue #3790): scene={scene_id} "
+            f"repo={repo_key} agent={agent_type} "
+            f"pool_engine_source={POOL_SOURCE_SCENE_MISSING} "
+            f"window_count={_window_count} suppressed={_suppressed} "
+            f"total_count={_total} "
+            f"window_seconds={_SCENE_MISSING_ALERT_WINDOW_SECONDS}, "
+            f"skip global template fallback for dispatch (Issue #541)")
+        _decision_log("pool_engine_source", repo_key=repo_key, agent_type=agent_type,
+                      scene_id=scene_id, pool_engine_source=POOL_SOURCE_SCENE_MISSING,
+                      window_count=_window_count, suppressed=_suppressed, total_count=_total,
+                      result="scene_missing")
+    return {"emitted": _emitted, "window_count": _window_count, "suppressed": _suppressed,
+            "total_count": _total, "window_seconds": _SCENE_MISSING_ALERT_WINDOW_SECONDS}
+
+
 def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0,
-                              issue_creator: str = "") -> str | None:
+                              issue_creator: str = "", source_out: dict | None = None) -> str | None:
     """获取限定广播引擎列表，返回 JSON 字符串供 agent_tasks.pool_engine_ids 使用。
 
     只从场景 node 的 engine_runtime_ids 读取，并按健康过滤（Issue #259）：
@@ -1482,19 +1600,25 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
     - ""：场景没配引擎 / node 不存在（原行为不变）
     - None：场景配了引擎但全部不健康 / 解析为空 / 查询异常（严格模式）→ 全灭，
       调用方不入队并明确报错（Issue #259 方案A / #653）
+
+    Issue #3790：`source_out` 为可选出参（dict），场景未在仓内 scene pool 登记时写入
+    `{"pool_engine_source": POOL_SOURCE_SCENE_MISSING}`；返回语义保持不变，未传/未命中
+    时调用方行为零变化（既有调用点无需改动）。
     """
     import json
     if not user_id:
         user_id = _repo_user_id(repo_key, issue_creator=issue_creator)
     if scene_id:
-        # Issue #541：仓内存在性兜底——scene_id 在该仓库查不到（如误绑模板场景名）
-        # 时不静默回退全局模板行（仅告警留痕）。
+        # Issue #541 / #3790：仓内存在性兜底——scene_id 在该仓库查不到（如误绑模板场景名）
+        # 时不静默回退全局模板行（原仅告警留痕，无结构化来源）。
         if repo_key:
             try:
                 from src.api.pipeline_config import scene_exists_in_repo
                 if not scene_exists_in_repo(scene_id, repo_key):
-                    log.warning(f"get_scene_pool_engine_ids: scene={scene_id} not found in repo "
-                                f"{repo_key}, skip global template fallback for dispatch (Issue #541)")
+                    # Issue #3790：上抛结构化来源 + 窗口收敛告警（替代每次派发一行 WARNING）
+                    if source_out is not None:
+                        source_out["pool_engine_source"] = POOL_SOURCE_SCENE_MISSING
+                    _alert_scene_missing(repo_key, scene_id, agent_type)
             except Exception as _e541:
                 log.warning(f"get_scene_pool_engine_ids: repo existence check failed: {_e541}")
         # Issue #653：严格模式开关（engine-selection.json strict_scene_engines，默认 True）
@@ -2095,45 +2219,66 @@ def _engine_uid_by_rid(c, runtime_id) -> str:
 
 
 def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = None,
-                              repo_key: str = "") -> list:
+                              repo_key: str = "") -> dict:
     """查询场景/引擎的被解绑提示信息（引擎绑定真实性同步 §4.3/§5.1b 前端数据源）。
 
     - scene_row_id 非空：查该场景的未重绑（rebound_at 空）解绑记录 → detached_engines
     - runtime_ids 非空：查这些引擎的未重绑解绑记录 → autopilot 任务 engine_detached 提示。
       卡点④修复：必须传 repo_key（任务所属仓库）——引擎审计是全局的，任务提示只关心
       「本仓库场景」的解绑记录，否则其他仓库同引擎的审计会误报到无关任务上。
-    返回 [{scene_row_id, scene_id, node_tag, runtime_id, runtime_name, detached_at, affected_autopilot_tasks}]
+
+    Issue #3909：`scene_engine_detach_log` / `agent_runtimes` 都归 **runtime 域**
+    （`configs/table_ownership.json`），本函数却被 mgmt 进程（主库=`grape_prod_mgmt`）调用，
+    直连进程主库在线上恒 1146 并被吞成空列表 → 「查询失败」与「无解绑」同形。现在按域取连接
+    （`db_registry.cursor_for("runtime")`，单库/测试拓扑回落进程主库），并把失败显式降级。
+
+    返回 `{"hints": [...], "degraded": bool, "reason": ""|"domain"|"query"}`：
+    - `degraded=False`：`hints` 就是事实（可能为空 = 确实无解绑）；
+    - `degraded=True`：本域不可用（`reason="domain"`）或查询失败（`reason="query"`），
+      调用方**不得**把空列表渲染成「无解绑」。
+
+    每个 hint：`{scene_row_id, scene_id, node_tag, runtime_id, runtime_name, engine_uid,
+    detached_at, affected_autopilot_tasks}`。
     """
-    from src.kernel.session_manager import db, db_lock
-    out = []
-    with db_lock:
-        c = db.cursor()
-        try:
+    from src.kernel import db_registry
+    out: list = []
+
+    def _degraded(reason: str, exc: Exception) -> dict:
+        log.warning(
+            f"get_detached_engine_hints: degraded ({reason}) {db_registry.conn_facts('runtime')} "
+            f"scene_row_id={scene_row_id} runtime_ids={len(runtime_ids or [])} "
+            f"repo_key={repo_key or '-'}: {exc}")
+        return {"hints": out, "degraded": True, "reason": reason}
+
+    if not scene_row_id and not runtime_ids:
+        return {"hints": out, "degraded": False, "reason": ""}
+    _rids: list = list(runtime_ids or [])
+
+    try:
+        with db_registry.cursor_for("runtime") as c:
             if scene_row_id:
                 c.execute(
                     "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
                     "detached_at, affected_autopilot_tasks "
                     "FROM scene_engine_detach_log WHERE scene_row_id=? AND (rebound_at='' OR rebound_at IS NULL)",
                     (scene_row_id,))
-            elif runtime_ids:
-                _ph = ",".join("?" * len(runtime_ids))
-                if repo_key:
-                    # 卡点④：按仓库过滤（autopilot 任务提示语义 = 本仓库场景受影响）
-                    c.execute(
-                        "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
-                        "detached_at, affected_autopilot_tasks "
-                        f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) AND repo_key=? "
-                        "AND (rebound_at='' OR rebound_at IS NULL)",
-                        (*runtime_ids, repo_key))
-                else:
-                    c.execute(
-                        "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
-                        "detached_at, affected_autopilot_tasks "
-                        f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) "
-                        "AND (rebound_at='' OR rebound_at IS NULL)",
-                        tuple(runtime_ids))
+            elif repo_key:
+                # 卡点④：按仓库过滤（autopilot 任务提示语义 = 本仓库场景受影响）
+                _ph = ",".join("?" * len(_rids))
+                c.execute(
+                    "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
+                    "detached_at, affected_autopilot_tasks "
+                    f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) AND repo_key=? "
+                    "AND (rebound_at='' OR rebound_at IS NULL)",
+                    (*_rids, repo_key))
             else:
-                return out
+                _ph = ",".join("?" * len(_rids))
+                c.execute(
+                    "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
+                    "detached_at, affected_autopilot_tasks "
+                    f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) "
+                    "AND (rebound_at='' OR rebound_at IS NULL)",
+                    tuple(_rids))
             import json as _json
             for r in c.fetchall():
                 try:
@@ -2147,9 +2292,11 @@ def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = 
                     "engine_uid": _engine_uid_by_rid(c, r[3]),
                     "detached_at": r[5] or "", "affected_autopilot_tasks": _aff or [],
                 })
-        except Exception as e:
-            log.warning(f"get_detached_engine_hints: query failed: {e}")
-    return out
+    except db_registry.DomainUnavailable as e:
+        return _degraded("domain", e)
+    except Exception as e:
+        return _degraded("query", e)
+    return {"hints": out, "degraded": False, "reason": ""}
 
 def _detach_dead_engine_bindings() -> dict:
     """引擎绑定真实性同步核心：离线超阈值的引擎，真实清理场景绑定 + 审计留痕。

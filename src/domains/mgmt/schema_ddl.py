@@ -345,9 +345,12 @@ CREATE TABLE IF NOT EXISTS autopilot_tasks (
     next_run_at     TEXT DEFAULT '',                     -- 下次预计触发时间
     -- Issue #3733：不可派发状态（''=正常；blocked_empty_instruction=已启用但指令为空）。
     -- 状态/原因/时间三列以库内为准（跨进程、跨重启权威）；原因直接进任务页展示。
-    dispatch_state        TEXT NOT NULL DEFAULT '',
-    dispatch_state_reason TEXT NOT NULL DEFAULT '',
-    dispatch_state_at     TEXT NOT NULL DEFAULT '',
+    -- VARCHAR(255) 而非 TEXT（PR #2157 门禁复审）：MySQL 不接受 TEXT 的字面量 DEFAULT，
+    -- mysql_compat 会把 `TEXT NOT NULL DEFAULT ''` 包成表达式默认值，落地后 strict 模式下
+    -- 不显式给值的 INSERT 直接 1364 —— 建单接口就是被这个打成 500 的。三列都是短码/时间戳。
+    dispatch_state        VARCHAR(255) NOT NULL DEFAULT '',
+    dispatch_state_reason VARCHAR(255) NOT NULL DEFAULT '',
+    dispatch_state_at     VARCHAR(255) NOT NULL DEFAULT '',
     created_at      TEXT DEFAULT (datetime('now')),
     updated_at      TEXT DEFAULT (datetime('now')),
     created_by      INTEGER DEFAULT 0,                   -- 创建者 user_id
@@ -678,7 +681,9 @@ CREATE TABLE IF NOT EXISTS grape_t_channel_outbound_card (
     sender_staff_id  TEXT NOT NULL DEFAULT '',
     card_template_id VARCHAR(191) NOT NULL DEFAULT '',
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
-    payload          TEXT NOT NULL DEFAULT '{}',
+    -- Issue #4339：卡片体随模板增长，TEXT(65,535) 不足以容纳超长 IM 卡片；
+    -- 与 events.payload 同批升 MEDIUMTEXT（外发重试的事实源，截断不可恢复）。
+    payload          MEDIUMTEXT NOT NULL DEFAULT '{}',
     status           VARCHAR(32) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','sent','failed','expired')),
     attempt_count    INTEGER NOT NULL DEFAULT 0,
     next_retry_at    VARCHAR(32) NOT NULL DEFAULT '',

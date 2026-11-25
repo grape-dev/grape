@@ -122,6 +122,7 @@ EVENT_TYPES = frozenset({
     "repos_connection_bind",        # 平台 PAT 绑定（repos.py::put_connection，写 user_repos/path A）
     "repos_connection_clear",       # 平台 PAT 解绑（repos.py::delete_connection）
     "repos_bot_token_bind",         # 仓库级 bot token 显式绑定（Issue #3427：PUT /{owner}/{repo}/bot-token）
+    "repos_vcs_health_reset",       # 运维清除仓库级 VCS 熔断台账（repos.py::reset_repo_vcs_health，detail 只含状态与计数，不含 token）
     "admin_auth_channels_saved",    # admin 保存登录渠道（admin/routes.py）
     "admin_obs_alert_policy_updated",  # admin 更新可观测告警策略（admin/routes.py）
     "admin_vcs_platforms_saved",    # admin 保存 VCS 平台卡（admin/platform_cards/service.py）

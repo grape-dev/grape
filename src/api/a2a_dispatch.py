@@ -426,7 +426,43 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
     if engine_id == 0 and _is_plugin() and get_execution_mode() != EXEC_MODE_DIRECT:
         from src.domains.runtime.pipeline.event_pipeline import _enqueue_pipeline_task
         _be = backend or "opencode"
-        _pool_eids = get_scene_pool_engine_ids(_a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
+        # [#1208 A2A selector 修复 2026-11-12] 兜底广播分支补三分叉 gate（同 run_pipeline 口径）
+        # Issue #3790：门禁是池语义的唯一解析口——池名单与来源（scene_missing）一并取回，
+        # 不再「先单独取池、再 gate 二次解析」，避免来源被丢弃 + 告警重复计数一次。
+        _pool_sel_a2a = ""
+        _pool_src_a2a = ""
+        _pool_eids = ""
+        _gate_resolved = False
+        try:
+            from src.domains.runtime.pipeline.event_pipeline import _scene_pool_gate
+            _gm_a2a, _gp_a2a, _gf_a2a = _scene_pool_gate(
+                _a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
+            if _gm_a2a == "selector":
+                _pool_sel_a2a = _gp_a2a["pool_selector"]
+                _pool_eids = ""
+                _gate_resolved = True
+            elif _gm_a2a == "pool":
+                _pool_eids = _gp_a2a["pool_engine_ids"]
+                # Issue #3790：门禁上抛来源必须透传——否则入队按「带 scene 上下文」推导成
+                # scene，scene_missing 退化为普通场景绑定（运营无法区分「未注册/离线」）
+                _pool_src_a2a = _gp_a2a.get("pool_engine_source", "") or ""
+                _gate_resolved = True
+            elif _gf_a2a:
+                log.warning(f"A2A: scene={_a2a_scene} agent={agent_name} selector zero-hit, "
+                            f"skip enqueue (Issue #1208): {_gf_a2a}")
+                try:
+                    from src.api.event_pipeline import _fail_event
+                    _fail_event(seq, _gf_a2a)
+                except Exception:
+                    from src.api.event_store import update_event_status
+                    update_event_status(seq, "failed")
+                return {"status": "failed", "seq": seq, "agent": agent_name, "error": _gf_a2a}
+        except Exception as _gate_e:
+            log.warning(f"A2A: selector gate failed (fail-open): {_gate_e}")
+        if not _gate_resolved:
+            # 门禁异常 fail-open：回落既有池解析（无来源标记），广播语义不变
+            _pool_eids = get_scene_pool_engine_ids(
+                _a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
         if _pool_eids is None:
             # Issue #259 方案A：场景派发失败 → 不入队，事件置 failed 并明确提示
             # Issue #541：报错区分「场景仓内不存在 / 未绑定引擎 / 引擎全部离线」
@@ -451,27 +487,6 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             except Exception:
                 pass
             return {"status": "failed", "seq": seq, "agent": agent_name, "error": _err541}
-        # [#1208 A2A selector 修复 2026-11-12] 兜底广播分支补三分叉 gate（同 run_pipeline 口径）
-        _pool_sel_a2a = ""
-        try:
-            from src.domains.runtime.pipeline.event_pipeline import _scene_pool_gate
-            _gm_a2a, _gp_a2a, _gf_a2a = _scene_pool_gate(
-                _a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
-            if _gm_a2a == "selector":
-                _pool_sel_a2a = _gp_a2a["pool_selector"]
-                _pool_eids = ""
-            elif _gf_a2a:
-                log.warning(f"A2A: scene={_a2a_scene} agent={agent_name} selector zero-hit, "
-                            f"skip enqueue (Issue #1208): {_gf_a2a}")
-                try:
-                    from src.api.event_pipeline import _fail_event
-                    _fail_event(seq, _gf_a2a)
-                except Exception:
-                    from src.api.event_store import update_event_status
-                    update_event_status(seq, "failed")
-                return {"status": "failed", "seq": seq, "agent": agent_name, "error": _gf_a2a}
-        except Exception as _gate_e:
-            log.warning(f"A2A: selector gate failed (fail-open): {_gate_e}")
         _enq_args = (
             repo_key, seq, agent_name, _be, skill_name or agent_name, evt,
             skill_id, skill_path or "", engine_id,
@@ -481,7 +496,7 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             _bcast_task_id = _enqueue_pipeline_task(
                 *_enq_args,
                 pool_engine_ids=_pool_eids, user_id=_a2a_scene_uid,
-                pool_selector=_pool_sel_a2a,
+                pool_selector=_pool_sel_a2a, pool_engine_source=_pool_src_a2a,
             )
         except TypeError as _te:
             # 混合版本滚动升级：a2a_dispatch 已带 pool_selector，但进程内 event_pipeline
@@ -569,6 +584,203 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
                     "reason": "already_taken_over"}
         log.info(f"A2A: enqueued task for {agent_name}, seq={seq}, engine={engine_id}, mode={kind}")
     return {"status": "ok", "seq": seq, "agent": agent_name}
+
+
+# ===== Issue #4345：A2A 派发基址候选解析 / 派发结果分类（单一来源）=====
+#
+# 人工「重派」与 takeover finish 共用同一套候选解析语义：
+#   显式 task_a2a_api_url > 网关 /a2a 前缀 > RUNTIME_SERVER_URL 回退。
+# 前两者可信任、不探测；回退命中时先 ``/api/health`` + ``POST /api/a2a`` 双重
+# 校验，失败则在同机候选集内重选，仍无可用候选返回 ``verified=False`` —— 调用方
+# 必须短路，不得再把请求 POST 到未验证基址（Issue #3910/#4345 共同根因）。
+#
+# 底层探测原语仍留在 ``takeover``（唯一实现，已被既有回归用例覆盖）；本模块只做
+# 「编排 + 结果分类」，通过模块属性动态取用，避免第二份探活实现再次漂移。
+
+class A2ADispatchError(Exception):
+    """A2A 派发失败：携带可映射到本端 HTTP 回执的结构化字段。"""
+
+    kind = "dispatch_error"
+
+    def __init__(self, message: str = "", *, base_url: str = "", source: str = "",
+                 upstream_status: int = 0, reason: str = "", detail: str = "",
+                 hint: str = "", candidates: list | None = None):
+        super().__init__(message or reason or "A2A dispatch failed")
+        self.base_url = (base_url or "").rstrip("/")
+        self.source = source or ""
+        self.upstream_status = int(upstream_status or 0)
+        self.reason = reason or message or ""
+        self.detail = detail or ""
+        self.hint = hint or ""
+        self.candidates = list(candidates or [])
+
+    def as_detail(self, code: int = 0) -> dict:
+        """HTTP 回执 detail：candidate_base_url/source/upstream_status/reason 必带。"""
+        out = {
+            "code": int(code or 0) or None,
+            "message": str(self)[:300],
+            "candidate_base_url": self.base_url,
+            "source": self.source,
+            "upstream_status": self.upstream_status,
+            "reason": self.reason,
+            "kind": self.kind,
+        }
+        if self.detail:
+            out["upstream_body"] = self.detail[:500]
+        if self.hint:
+            out["hint"] = self.hint
+        if self.candidates:
+            out["candidates"] = self.candidates
+        return out
+
+
+class A2AUpstreamError(A2ADispatchError):
+    """上游有响应但状态码非 2xx（4xx/5xx/3xx）。"""
+
+    kind = "upstream"
+
+
+class A2ATransportError(A2ADispatchError):
+    """连接/超时/DNS 等传输层异常（无上游状态码）。"""
+
+    kind = "transport"
+
+
+class A2AUnavailable(A2ADispatchError):
+    """候选基址不可用或无法解析（未发出派发请求）。"""
+
+    kind = "unavailable"
+
+
+def _takeover():
+    """动态取 takeover 模块，保证既有 monkeypatch（tests 直接改模块属性）生效。"""
+    from src.domains.runtime.engine import takeover
+    return takeover
+
+
+def _norm(base: str) -> str:
+    return (base or "").strip().rstrip("/")
+
+
+def resolve_a2a_dispatch_target(runtime_id: int = 0,
+                                exclude: set[str] | None = None) -> dict:
+    """解析 A2A 派发目标（候选探测 + 可达性校验）。
+
+    返回 ``{"base", "source", "verified", "candidates", "candidate_base_url", "reason"}``：
+    - ``verified=True``：基址来自可信任来源，或 health + ``POST /api/a2a`` 双重校验通过；
+    - ``verified=False``：回退基址探测失败且无其它可用候选 —— 调用方必须短路，
+      禁止把业务请求 POST 到该基址（否则上游 4xx 会被误包装成本端 5xx）。
+    """
+    from src.kernel.prompt_builder import (A2A_TRUSTED_BASE_SOURCES,
+                                           resolve_a2a_base_with_source)
+    tk = _takeover()
+    excluded = {_norm(b) for b in (exclude or set()) if _norm(b)}
+    base, source = "", ""
+    candidates: list[dict] = []
+    reason = ""
+    try:
+        base, source = resolve_a2a_base_with_source(int(runtime_id or 0))
+        base = _norm(base)
+        if base:
+            candidates.append({"base_url": base, "source": source or "",
+                               "ok": None, "detail": "resolved"})
+        if base and base not in excluded and source in A2A_TRUSTED_BASE_SOURCES:
+            return {"base": base, "source": source, "verified": True,
+                    "candidates": [{"base_url": base, "source": source,
+                                    "ok": True, "detail": "trusted source"}],
+                    "candidate_base_url": base, "reason": "trusted source"}
+        if int(runtime_id or 0) > 0:
+            rt_base = tk._a2a_internal_base(int(runtime_id or 0), exclude=set(excluded))
+            cached = _norm(getattr(tk, "_A2A_DISPATCH_BASE_CACHE", ""))
+            verified = bool(rt_base) and _norm(rt_base) == cached and bool(cached)
+            return {"base": rt_base, "source": source or "", "verified": verified,
+                    "candidates": candidates,
+                    "candidate_base_url": base or rt_base,
+                    "reason": "remote base verified" if verified
+                    else "remote base unverified (best-effort)"}
+        cached = _norm(getattr(tk, "_A2A_DISPATCH_BASE_CACHE", ""))
+        if cached and cached not in excluded:
+            return {"base": cached, "source": source or "", "verified": True,
+                    "candidates": candidates, "candidate_base_url": base or cached,
+                    "reason": "cached verified base"}
+        if base and base not in excluded:
+            ok, detail = tk._probe_dispatchable(base)
+            reason = detail
+            if ok:
+                setattr(tk, "_A2A_DISPATCH_BASE_CACHE", base)
+                return {"base": base, "source": source or "", "verified": True,
+                        "candidates": [{"base_url": base, "source": source or "",
+                                        "ok": True, "detail": detail}],
+                        "candidate_base_url": base, "reason": detail}
+            log.warning(f"takeover: skip a2a dispatch candidate {base} "
+                        f"(source={source}; {detail})")
+            candidates = [{"base_url": base, "source": source or "",
+                           "ok": False, "detail": detail}]
+            excluded.add(base)
+        local = tk._a2a_internal_base(0, exclude=set(excluded))
+        cached_after = _norm(getattr(tk, "_A2A_DISPATCH_BASE_CACHE", ""))
+        verified = bool(local) and _norm(local) == cached_after and bool(cached_after)
+        known = {c.get("base_url") for c in candidates}
+        if local and local not in known:
+            candidates.append({"base_url": local, "source": "local_candidate",
+                               "ok": verified,
+                               "detail": "probed" if verified else reason})
+        return {"base": local, "source": source or "", "verified": verified,
+                "candidates": candidates, "candidate_base_url": base or local,
+                "reason": reason or ("no dispatchable a2a candidate"
+                                     if not verified else "probed")}
+    except Exception as e:  # noqa: BLE001 — 解析失败不得阻断调用方兜底
+        log.debug(f"a2a_dispatch: resolve dispatch target skipped: {e}")
+        reason = f"resolve failed: {e}"
+    fallback = tk._a2a_internal_base(int(runtime_id or 0), exclude=set(excluded))
+    return {"base": fallback, "source": source or "", "verified": False,
+            "candidates": candidates, "candidate_base_url": base or fallback,
+            "reason": reason or "resolve failed"}
+
+
+def dispatch_a2a(base_url: str, body: dict, headers: dict | None = None,
+                 timeout: float = 30.0) -> dict:
+    """向 A2A 端点 POST 一个派发请求，并把失败分类为上游/传输两类异常。
+
+    上游有状态码时抛 ``A2AUpstreamError``（``upstream_status`` 可逐档透传）；
+    连接/超时等无状态码异常抛 ``A2ATransportError``。成功返回解析后的 JSON dict。
+    """
+    import httpx
+    base = _norm(base_url)
+    if not base:
+        raise A2AUnavailable("A2A base_url unresolved",
+                             reason="A2A base_url unresolved", base_url="")
+    url = f"{base}/api/a2a"
+    try:
+        r = httpx.post(url, json=body, headers=headers or {}, timeout=timeout)
+    except (httpx.HTTPError, OSError) as e:
+        raise A2ATransportError(f"A2A 传输异常（{base}）：{e}", base_url=base,
+                                reason=f"传输层异常：{type(e).__name__}: {e}") from e
+    status = int(getattr(r, "status_code", 0) or 0)
+    text = str(getattr(r, "text", "") or "")[:500]
+    if status >= 300:
+        raise A2AUpstreamError(f"A2A 上游返回 HTTP {status}", base_url=base,
+                               upstream_status=status,
+                               reason=f"上游返回 HTTP {status}", detail=text)
+    try:
+        data = r.json()
+    except Exception:
+        data = {}
+    return data if isinstance(data, dict) else {"raw": data}
+
+
+def classify_dispatch_http_status(exc: A2ADispatchError) -> int:
+    """派发异常 → 本端 HTTP 状态码。
+
+    上游 4xx（含基址不可用）→ 422（重派通道不可用，前端可提示指定 --base-url）；
+    上游 5xx / 传输异常 → 502（本端 5xx，原因标注传输层）。
+    入口幂等/接管/自循环闸的 409 不在本函数处理（由路由自身维护）。
+    """
+    if isinstance(exc, A2AUpstreamError) and 400 <= exc.upstream_status < 500:
+        return 422
+    if isinstance(exc, A2AUnavailable):
+        return 422
+    return 502
 
 
 # ===== Issue #2251: 组织下派终态 → 幂等触发 org_aggregate =====

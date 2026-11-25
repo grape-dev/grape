@@ -243,14 +243,17 @@ class TestNoProgressSweep:
         scheduler._sweep_no_progress_tasks(now_epoch=time.time())
         row = _task_row(tid)
         status, started_at, errors = row[0], row[1], row[2]
-        assert status == "running"
+        # Issue #3741：重派上限耗尽后收口 failed(reason=no_progress)，不再长期留 running
+        assert status == "failed"
         assert started_at is not None
         codes = _error_codes(errors)
         assert codes.count("NO_PROGRESS_REQUEUE") == 1
         assert codes.count("NO_PROGRESS_EXHAUSTED") == 1
-        # 再跑一轮不重复写 exhausted 噪音
+        assert codes.count("NO_PROGRESS_FAILED") == 1
+        # 再跑一轮：任务已终态，不再被扫描、不重复写诊断
         scheduler._sweep_no_progress_tasks(now_epoch=time.time())
         assert _error_codes(_task_row(tid)[2]).count("NO_PROGRESS_EXHAUSTED") == 1
+        assert _error_codes(_task_row(tid)[2]).count("NO_PROGRESS_FAILED") == 1
 
     def test_recent_activity_skips_requeue(self):
         tid, seq = "t_i2793_np_active", SEQ_BASE + 12
@@ -291,8 +294,11 @@ class TestNoProgressSweep:
         _seed_task(tid, seq, started_secs_ago=900, errors=prior)
         _seed_message(tid, 1, 900)
         scheduler._sweep_no_progress_tasks(now_epoch=time.time())
-        assert _task_row(tid)[0] == "running"
-        assert _error_codes(_task_row(tid)[2]).count("NO_PROGRESS_EXHAUSTED") == 1
+        # Issue #3741：上限耗尽即收口 failed；槽位截断后仍保留 EXHAUSTED + FAILED 诊断
+        assert _task_row(tid)[0] == "failed"
+        codes = _error_codes(_task_row(tid)[2])
+        assert codes.count("NO_PROGRESS_EXHAUSTED") == 1
+        assert codes.count("NO_PROGRESS_FAILED") == 1
 
     def test_per_skill_override_controls_threshold(self, tmp_path, monkeypatch):
         cfg_path = tmp_path / "task-timeout.json"

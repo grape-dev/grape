@@ -228,7 +228,11 @@ def _materialize_workdir_and_skill_gate(*, ws: str, repo_key: str, agent_type: s
             "agent_type": agent_type, "repo_key": repo_key,
             "reason": (_sv_887.get("reason") or "")[:300]})
         return prompt, False
-    log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")
+    # Issue #3818：prompt 打点只输出元信息（长度 + 载荷 hash 前缀 + 技能）。
+    # 原实现把 prompt 前 2000 字符原文（含 autopilot 指令里的 OBS 预签名 query、root 口令）
+    # 写进 INFO/Loki，任何有日志读权限的人都能重放凭据。
+    from src.domains.runtime.engine.payload_guard import metadata_for_log as _payload_meta
+    log.info(f"Exec agent: prompt built, {_payload_meta(prompt, skill=skill_name or agent_type)}")
     # 回写 prompt 到 agent_tasks（direct 模式创建时 prompt 为空，此处补写）
     log.info(f"Exec agent: prompt writeback check: task_id={task_id!r}, prompt_len={len(prompt)}")
     if task_id and prompt:
@@ -242,6 +246,29 @@ def _materialize_workdir_and_skill_gate(*, ws: str, repo_key: str, agent_type: s
         except Exception as _pe:
             log.warning(f"Exec agent: prompt writeback failed for task={task_id}: {_pe}")
     return prompt, True
+
+
+def _record_autopilot_payload_rejection(seq, repo_key: str, prompt: str) -> None:
+    """Issue #3818：autopilot 执行被拒/降级 failed → 记一次同载荷失败（熔断输入）。
+
+    仅 autopilot 合成 seq 参与（issue/coding 的正常事件任务不应按载荷计数）。
+    熔断键优先用 prompt 里的「任务指令」原文重算 hash，与调度侧同键；抽不到回落
+    prompt hash（两侧命不中时只损失这一条熔断输入，调度侧载荷审查仍然独立生效）。
+    """
+    try:
+        from src.domains.runtime.engine import payload_dispatch_guard as _ledger
+        if not _ledger.is_autopilot_seq(seq):
+            return
+        from src.domains.runtime.engine import payload_guard as _pg
+        _key_text = _pg.instruction_from_autopilot_prompt(prompt) or prompt or ""
+        _res = _ledger.record_failure(_pg.payload_hash(_key_text), repo_key=repo_key)
+        if _res.get("blocked"):
+            log.error(
+                f"[autopilot-alert] code=AUTOPILOT_PAYLOAD_BLOCKED seq={seq} "
+                f"reason={_res.get('reason')} failure_count={_res.get('failure_count')} "
+                f"repo_key={repo_key} payload_hash={_pg.payload_hash_prefix(_key_text)}")
+    except Exception as _e:  # noqa: BLE001 - 台账故障不得影响执行收尾
+        log.warning(f"Exec agent: record payload rejection skipped: {_e}")
 
 
 def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
@@ -423,13 +450,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         # Issue #1858：direct 执行同样注入三面基址（与 enqueue/重派/worker 同源）。
         **resolve_task_server_env(runtime_id),
     }
-    # Issue #94（weekly-09）：direct 分支 exec_account 可能带平台前缀全名（gitcode:<owner>/<repo>，
-    # 来自 local_claimer task.account），naive split 会得到 gitcode:<owner> → git-repo/repos 404。
-    # 统一用 split_owner_repo 剥前缀，与入队（484/2829/3134）口径一致，REPO_OWNER/REPO_NAME 无前缀。
-    from src.kernel.repo_key import split_owner_repo as _sor_env
-    _repo_owner_env, _repo_name_env = _sor_env(exec_account or repository)
-    env_extra["REPO_OWNER"] = _repo_owner_env
-    env_extra["REPO_NAME"] = _repo_name_env
+    # Issue #94（weekly-09）的「exec_account 带平台前缀全名，naive split 会得到
+    # gitcode:<owner>」问题已由上面的 derive_repo_identity 统一覆盖（它与入队
+    # 484/2829/3134 同一入口、同样剥 provider 前缀）。**不要**再在此处用
+    # `split_owner_repo(exec_account or repository)` 覆盖 REPO_OWNER/REPO_NAME——
+    # 那会把触发人账号（exec_account）当成仓库 owner（Issue #1660 回归，反馈 2874）；
+    # 该覆盖块由 #2157 合并基线时带入，已按 #1660 口径删除。
     # base 侧 #3482-rebase 移植：env 供 agent 复述/脱敏定位（与 worker 口径一致）
     env_extra["REPO_KEY"] = repo_key or repository
 
@@ -935,6 +961,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 log.warning(f"Exec agent: seq={seq} exit_code=0 but no verified output "
                             f"(self_reported={_self_ok}, write_action={_write_action}), "
                             f"demoting to failed (fake completion guard)")
+                # Issue #3818：拒绝 → 降级 failed 不能再变成重试放大器。同一 autopilot
+                # 载荷累计失败达阈值即进 dead-letter，调度侧下一 tick 直接拒派。
+                _record_autopilot_payload_rejection(seq, repo_key, prompt)
     else:
         new_status = "failed"
     # R20.8a.1: direct 模式 401 标记——不经过 fail_task，需在此补充标记

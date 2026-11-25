@@ -65,9 +65,12 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
             if _card:
                 return _card
         except Exception as _ge:  # noqa: BLE001
-            # 模块顶部已 import log，直接记；不要再套一层 try/except（那会多出一个静默 except，
-            # 棘轮会按口径漂移拦下）
-            log.debug(f"session_store.get_issue_stage: provider failed, fallback to _any: {_ge}")
+            # Issue #3999：provider 失败由 debug 提升为 warning，带 ident 与 repo_key，
+            # 不再让 stage 解析降级完全不可见。
+            log.warning(
+                "session_store.get_issue_stage: provider failed, fallback to _any: "
+                f"repo_key={repo_key} issue_id={issue_id!r} ident={_num!r}: {_ge}"
+            )
         try:
             row = rt.read_one_any("issue_card_row", (repo_key, _num))
             if row:
@@ -78,8 +81,21 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
                         "parent_issue_id": row[7] or "",
                         "is_subtask_mode": row[8] or 0,
                         "allow_scene_override": row[9] or 0}
-        except Exception:
-            pass
+        except Exception as _fe:
+            # Issue #3999：回退直读失败不再静默（原为 `pass`），带 ident 与 repo_key。
+            log.warning(
+                "session_store.get_issue_stage: card fallback read failed: "
+                f"repo_key={repo_key} issue_id={issue_id!r} ident={_num!r}: {_fe}"
+            )
+    elif str(issue_id or "").strip():
+        # Issue #3999：ident 无法归一为卡片主键（pr_* 伪 id / 垃圾形态）→ 不触达 provider，
+        # 计数 + debug 留痕，避免静默丢失可观测性。
+        from src.kernel.gsb.issue_card_metrics import observe_invalid_ident
+        _provider = observe_invalid_ident(repo_key)
+        log.debug(
+            "session_store.get_issue_stage: ident not usable as card key, skip provider: "
+            f"repo_key={repo_key} issue_id={issue_id!r} provider={_provider}"
+        )
     # 2. issue_state 兜底（过渡期兼容）
     try:
         row = rt.read_one_any("issue_state_legacy_row", (repo_key, issue_id))

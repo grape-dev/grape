@@ -1,7 +1,7 @@
 {
   "contract_version": "2.3.0a1",
-  "endpoint_count": 401,
-  "min_endpoint_count": 360,
+  "endpoint_count": 403,
+  "min_endpoint_count": 362,
   "groups": [
     "a2a",
     "agents",
@@ -36,6 +36,6 @@
     "task",
     "tasks"
   ],
-  "change_reason": "feat(auth): #4254 add GET /api/auth/beta-eligibility for beta whitelist hint",
-  "source_commit": "8b1599e96"
+  "change_reason": "merge origin/arch-weekly-11 into PR #2157: +1 endpoint from the baseline branch (premerge 402 + base 1), groups unchanged",
+  "source_commit": "c275ccd3d"
 }

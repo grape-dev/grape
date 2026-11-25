@@ -1307,6 +1307,68 @@
         "x-token-scope": "dual"
       }
     },
+    "/api/repos/{owner}/{repo}/vcs-health/reset": {
+      "post": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "Reset repo VCS breaker",
+        "description": "Issue #3759: clears the repo-level VCS missing breaker (`vcs_status`/`vcs_fail_count`/probe ledger). Use after rebinding the provider or confirming the upstream repository exists again; the next issue read re-probes upstream. Idempotent.",
+        "operationId": "repos_vcs_health_reset",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Owner"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/repos/{provider}/connection": {
       "get": {
         "tags": [
@@ -36222,16 +36284,14 @@
   },
   "x-changelog": {
     "version": "2.3.0a1",
-    "added": [
-      "/api/repos/{owner}/{repo_name}/bot-token"
-    ],
+    "added": [],
     "removed": [],
     "deprecated": [
       "/api/dashboard/efficiency"
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 402,
+  "x-endpoint-count": 403,
   "x-groups": [
     "a2a",
     "agents",
@@ -36266,6 +36326,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "acc8c9322",
-  "x-generated-at": "2026-11-25T05:46:00.265737+00:00"
+  "x-source-commit": "4d348e8e1",
+  "x-generated-at": "2026-11-25T06:50:06.981770+00:00"
 }

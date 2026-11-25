@@ -78,7 +78,10 @@ def env(tmp_path, monkeypatch):
         engine_runtime_ids TEXT DEFAULT '',
         custom_fields TEXT DEFAULT '',
         work_branch TEXT DEFAULT '',
-        engine_runtime_uids TEXT DEFAULT ''
+        engine_runtime_uids TEXT DEFAULT '',
+        dispatch_state TEXT NOT NULL DEFAULT '',
+        dispatch_state_reason TEXT NOT NULL DEFAULT '',
+        dispatch_state_at TEXT NOT NULL DEFAULT ''
     );
     """)
     # 凭据 3（global, alice）→ 引擎 1（uid A）；凭据 3 → 引擎 2（uid B）；悬空 id=77

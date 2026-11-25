@@ -274,6 +274,7 @@
     "skill_user": "Personal skills",
     "stale_removed_prefix": "These engines were removed after 8h offline: ",
     "stale_removed_suffix": ", re-check them below to rebind.",
+    "stale_unavailable": "Detach info temporarily unavailable (detach log query failed); retry later.",
     "st_recently_lost": "lost",
     "st_offline": "offline",
     "st_gc": "to GC",

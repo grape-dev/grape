@@ -17,6 +17,12 @@ AUTOPILOT_STATE_OK = ""
 # 已启用但不可派发：指令为空（trim 后为空串）
 AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION = "blocked_empty_instruction"
 
+# Issue #3818：指令命中凭据外传载荷审查（入库拒绝 / 派发拦截）
+AUTOPILOT_STATE_BLOCKED_PAYLOAD = "blocked_payload"
+
+# Issue #3818：同一 payload hash 重复投递达阈值，已熔断进 dead-letter
+AUTOPILOT_STATE_BLOCKED_PAYLOAD_REPEAT = "blocked_payload_repeat"
+
 # 原因出参：**稳定 code，不是给用户看的文案**（D1 国际化守卫）——
 # 后端一律不下发中文串，界面按 code 取语言包（shell/locales/{zh,en}/autopilot.json
 # 的 list.not_dispatchable / detail.not_dispatchable_desc）。历史库里若有自由文本，
@@ -25,9 +31,15 @@ AUTOPILOT_EMPTY_INSTRUCTION_REASON = AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION
 
 
 def reason_for_state(state: str) -> str:
-    """状态 → 人类可读原因（未知/空状态返回空串）。"""
+    """状态 → 原因 code（未知/空状态返回空串）。
+
+    Issue #3818：载荷审查/熔断两类拦截的原因**也是稳定 code**（`blocked_payload`
+    / `blocked_payload_repeat` 本身），界面按 code 取语言包，后端不下发中文文案。
+    """
     if state == AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION:
         return AUTOPILOT_EMPTY_INSTRUCTION_REASON
+    if state in (AUTOPILOT_STATE_BLOCKED_PAYLOAD, AUTOPILOT_STATE_BLOCKED_PAYLOAD_REPEAT):
+        return state
     return ""
 
 

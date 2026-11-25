@@ -99,6 +99,51 @@ def _extract_entity_type_from_text(text: str) -> str:
     return ""
 
 
+# ===== Issue #4339：payload 字节守卫（写入口）======
+# events.payload 已升 MEDIUMTEXT（上限 16,777,215 字节），同表 agent_logs/result 同理。
+# 此前列是 TEXT(65,535)：超长 issue/PR 事件 payload 在 MySQL 非严格 sql_mode 下被
+# **静默截断**成半截 JSON（生产 seq 107279/107291 均恰好 65,535 字节且 JSON_VALID=0），
+# payload_view_from_json 解析失败后整份 payload 视图降级为空 —— 静默数据丢失。
+# 这里在 INSERT 之前按后端上限显式判定：超限 ERROR + 拒绝写入（返回 0，走既有失败/
+# 幂等分支），**绝不写截断值**；>1MB 打 WARNING 观察 payload 增长趋势。
+_MEDIUMTEXT_MAX_BYTES = 16_777_215
+_PAYLOAD_WARN_BYTES = 1_048_576
+
+
+def payload_size_exceeded(payload_bytes: int) -> bool:
+    """payload 字节数是否超过 MEDIUMTEXT 上限（纯判定，无副作用、不打日志）。
+
+    Issue #4339 R1：events 有两个写入口（本模块 `_insert_event_row` 与
+    `event_pipeline` 去重快路径的裸 INSERT），两处都必须调同一份判定；缺一处
+    就有超限 payload 被 MySQL 非严格 `sql_mode` 静默截断。
+    """
+    return payload_bytes > _MEDIUMTEXT_MAX_BYTES
+
+
+def payload_size_guard(payload_bytes: int, event_type: str, repo_key: str,
+                       issue_id: str) -> bool:
+    """payload 字节数守卫：超 MEDIUMTEXT 上限 → ERROR 并拒绝写入（返回 False）。
+
+    告警前缀固定为 `event payload too large` / `event payload large`，可与
+    `event payload view: parse failed`（截断坏行的现象告警）分别 grep。
+    拒绝写入而非截断：截断产生不可恢复的坏行，代价远高于「本次事件写失败」。
+
+    调用方约定（Issue #4339 R2）：返回 False 时必须 fail-closed —— 不写事件行、
+    不派发任务，落 `event_skipped`（reason=`event_payload_rejected`）留痕。
+    """
+    if payload_size_exceeded(payload_bytes):
+        log.error(
+            f"event payload too large, INSERT rejected (never truncated): "
+            f"bytes={payload_bytes} limit={_MEDIUMTEXT_MAX_BYTES} "
+            f"event_type={event_type} repo={repo_key} issue={issue_id}")
+        return False
+    if payload_bytes > _PAYLOAD_WARN_BYTES:
+        log.warning(
+            f"event payload large: bytes={payload_bytes} "
+            f"event_type={event_type} repo={repo_key} issue={issue_id}")
+    return True
+
+
 def _insert_event_row(c, repo_key: str, event_type: str, title: str, issue_id: str,
                       agent_type: str, source: str, actor: str, summary: str,
                       payload: dict, status: str, result: str, scene_id: str,
@@ -112,6 +157,10 @@ def _insert_event_row(c, repo_key: str, event_type: str, title: str, issue_id: s
     from src.domains.mgmt.public import get_org_id_by_repo_key
     _org_id = get_org_id_by_repo_key(repo_key)
     _payload_json = json.dumps(payload or {})
+    # Issue #4339：超 MEDIUMTEXT 上限直接拒绝（返回 0 = 既有写入失败语义），绝不截断落库。
+    if not payload_size_guard(len(_payload_json.encode("utf-8")),
+                              event_type, repo_key, issue_id):
+        return 0
     if idempotency_key:
         c.execute(
             "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type, org_id, idempotency_key, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -665,6 +714,45 @@ def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: st
             log.warning(f"Event skipped FAILED: {e}")
 
 
+def merge_event_payload(seq: int, extra: dict) -> bool:
+    """Issue #3790：合并事件 payload 字段（读-改-写短事务），供派发门禁回填结构化来源。
+
+    派发门禁（_scene_pool_gate → get_scene_pool_engine_ids）在事件 INSERT 之后才解析出
+    `pool_engine_source`，需要把 scene_missing 等来源回填到事件 payload，事件中心才能
+    按该字段筛选/区分「场景未注册」与「引擎离线」。旧行 payload 非法 JSON 时以新值重建。
+
+    返回 True=已写入或已是目标值；False=事件不存在/写入失败（不抛，派发不因此失败）。
+    """
+    if not seq or not isinstance(extra, dict) or not extra:
+        return False
+    with db_lock:
+        c = db.cursor()
+        try:
+            row = c.execute("SELECT payload FROM events WHERE seq=?", (int(seq),)).fetchone()
+            if not row:
+                return False
+            current = {}
+            if row[0]:
+                try:
+                    current = json.loads(row[0])
+                except Exception:
+                    current = {}
+            if not isinstance(current, dict):
+                current = {}
+            if all(current.get(k) == v for k, v in extra.items()):
+                return True
+            current.update(extra)
+            c.execute("UPDATE events SET payload=? WHERE seq=?",
+                      (json.dumps(current, ensure_ascii=False), int(seq)))
+            db.commit()
+            return True
+        except Exception as e:
+            log.warning(f"merge_event_payload failed seq={seq}: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return False
 # ====== Issue #3444：评论→Issue 事件内容去重 ======
 # 背景：同一评论重复落库时评论 id 不同（两个评论 id，已脱敏），既有
 # `comment:<id>` 幂等键无法判重，两个 issue 处理事件并行派发。

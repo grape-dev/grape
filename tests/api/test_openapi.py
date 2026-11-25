@@ -343,6 +343,8 @@ EXPECTED_PUBLIC = {
     "repos_project_info": ("get", "/api/repos/{owner}/{repo}/project-info"),
     "repos_remove": ("post", "/api/repos/remove"),
     "repos_repair_host": ("post", "/api/repos/{owner}/{repo}/repair-host"),
+    # Issue #3759：孤儿仓库卡的 VCS 熔断运维入口（清除 vcs_missing 台账）
+    "repos_vcs_health_reset": ("post", "/api/repos/{owner}/{repo}/vcs-health/reset"),
     "repos_scene_recommend_config_get": ("get", "/api/repos/{owner}/{repo}/scene-recommend-config"),
     "repos_scene_recommend_config_set": ("put", "/api/repos/{owner}/{repo}/scene-recommend-config"),
     "repos_sync": ("post", "/api/repos/sync"),

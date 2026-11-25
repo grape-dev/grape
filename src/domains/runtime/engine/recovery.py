@@ -19,8 +19,9 @@ import json
 import os
 from datetime import datetime, timezone
 
+from src.kernel import db_registry
 from src.kernel.config import log
-from src.kernel.session_manager import db, db_lock
+
 
 # 强告警：连续 spawn_failed 次数或持续时长任一达到即告警（默认 10 次 / 10 分钟）
 SPAWN_FAIL_WARN_STREAK = max(1, int(os.environ.get("RUNTIME_SPAWN_FAIL_WARN_STREAK", "10")))
@@ -185,16 +186,36 @@ def _readd_scene_bindings(c, runtime_id: int, now_iso: str) -> list:
             "WHERE runtime_id=? AND (rebound_at='' OR rebound_at IS NULL)",
             (runtime_id,)).fetchall()
     except Exception as e:
-        log.warning(f"_readd_scene_bindings: query detach log failed (runtime={runtime_id}): {e}")
+        log.warning(f"_readd_scene_bindings: query detach log failed "
+                    f"{db_registry.conn_facts('runtime')} (runtime={runtime_id}): {e}")
         return added
 
     # SQL 在 mgmt public（本表归 mgmt）：两条拓扑同一句，调用方不再留兜底 SQL，
     # 也不再需要「lib 优先 / 本地兜底」两支。延迟 import 保持模块级不绑死两个大包。
     from src.domains.mgmt import public as _mgmt_scene
 
+    # Issue #3909：本函数的游标 `c` 现在是 **runtime 域**游标（recover_engine 走
+    # transaction_for("runtime")）。三库拓扑下它指向 runtime 库，拿来读写 mgmt 基表
+    # devops_pipeline_scene 就是跨库误写（mgmt public 的 `_same_domain_*` 只按进程域
+    # 判定，会把它当同库游标复用）→ 显式交 mgmt 自取连接；单库/测试拓扑同库，
+    # 仍复用调用方游标以保住事务快照与提交责任（与原语义逐字一致）。
+    #
+    # 判据只取**配置口径**（route_of），绝不看连接探活：`uses_own_dsn` 内含
+    # `domain_db() is not None`，mgmt 连接进 5s 退避或永久停用时返回 False，会把
+    # runtime 域游标误交给 mgmt public（mgmt 进程内 `_same_domain_*` 恒判同域复用）
+    # → 用 runtime 库连接读写 mgmt 基表。只有 runtime/mgmt 都走 local（单库/测试
+    # 拓扑，同库）才复用调用方游标；任一走 domain / 配置缺失（DomainUnavailable）
+    # 一律 fail-closed 到 mgmt 自取连接。
+    try:
+        _both_local = (db_registry.route_of("runtime") == "local"
+                       and db_registry.route_of("mgmt") == "local")
+    except db_registry.DomainUnavailable:
+        _both_local = False
+    _scn_c = c if _both_local else None
+
     for log_id, scene_row_id, node_tag in rows:
         try:
-            srow = _mgmt_scene.scene_nodes_row_by_id_any(scene_row_id, c)
+            srow = _mgmt_scene.scene_nodes_row_by_id_any(scene_row_id, _scn_c)
             if not srow:
                 c.execute("UPDATE scene_engine_detach_log SET rebound_at=? WHERE id=?",
                           (now_iso, log_id))
@@ -217,7 +238,7 @@ def _readd_scene_bindings(c, runtime_id: int, now_iso: str) -> list:
                         write_scene_nodes as _wsn_rb, content_hash as _ch_rb)
                     _rc_rb = _wsn_rb(
                         json.dumps(nodes, ensure_ascii=False), scene_row_id,
-                        _ch_rb(srow[0] or "") if srow[0] else "", c, now_iso, log)
+                        _ch_rb(srow[0] or "") if srow[0] else "", _scn_c, now_iso, log)
                     if _rc_rb in ("mismatch", "failed"):
                         # 判失败不标 rebound，保留审计行等下一轮重建（与原异常路径同语义）
                         raise RuntimeError(f"scene nodes write {_rc_rb} (scene={scene_row_id})")
@@ -331,17 +352,33 @@ def _recover_in_tx(c, runtime_id: int, trigger: str, force: bool, now_iso: str =
 
 
 def recover_engine(runtime_id: int, trigger: str = "manual", force: bool = False) -> dict:
-    """加回引擎场景绑定 + 任务绑定对账（供一键兜底端点调用，独立事务）。"""
-    with db_lock:
-        c = db.cursor()
-        try:
-            out = _recover_in_tx(c, runtime_id, trigger, force)
-            db.commit()
-            return out
-        except Exception as e:
-            log.warning(f"recover_engine failed (runtime={runtime_id}, trigger={trigger}): {e}")
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            return {"recovered": False, "reason": str(e)}
+    """加回引擎场景绑定 + 任务绑定对账（供一键兜底端点调用，独立事务）。
+
+    Issue #3909：本函数被 **mgmt 进程**（`routes/settings.py` 一键加回）调用，而它读写的
+    `agent_runtimes` / `scene_engine_detach_log` / `agent_tasks` / `task_messages` 全归
+    **runtime 域**。原实现 `with db_lock: db.cursor()` 直连进程主库，mgmt 进程即恒 1146。
+    现在按域取事务（`db_registry.transaction_for("runtime")`：三库 → runtime 独立事务，
+    单库/测试拓扑 → 主库 + 进程锁，零回归）。
+
+    基线唯一真实缺陷是 `db.cursor()` 写在 `try` 之外（连接异常直接冒泡成 500）与跨库
+    1146；基线异常路径本身返回 dict。本实现保留「显式失败原因」改进：域不可用或异常
+    一律返回 `{"recovered": False, "reason": ..., "degraded": True, "bindings": [],
+    "terminalized": [], "released": []}`，端点据此给出明确原因而不是无原因 503。
+    """
+    def _failed(reason: str) -> dict:
+        return {"recovered": False, "reason": reason, "degraded": True,
+                "bindings": [], "terminalized": [], "released": []}
+
+    try:
+        with db_registry.transaction_for("runtime") as c:
+            return _recover_in_tx(c, runtime_id, trigger, force)
+    except db_registry.DomainUnavailable as e:
+        log.warning(
+            f"recover_engine: runtime domain unavailable {db_registry.conn_facts('runtime')} "
+            f"runtime={runtime_id} trigger={trigger}: {e}")
+        return _failed("runtime_domain_unavailable")
+    except Exception as e:
+        log.warning(
+            f"recover_engine failed {db_registry.conn_facts('runtime')} "
+            f"runtime={runtime_id} trigger={trigger}: {e}")
+        return _failed(f"error: {e}")

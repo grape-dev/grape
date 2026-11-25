@@ -132,6 +132,8 @@ def _get_task_token(task: dict) -> str:
 
 # Issue #1938：级联收敛补偿的归因模型（枚举/终态映射/文案渲染/展示判定）
 from src.domains.runtime.engine import cascade as _cascade
+# Issue #3877：级联终态收敛失败/降级指标（kernel 收集器，未安装时 observe 为 no-op）
+from src.kernel import cascade_converge_metrics as _cascade_metrics
 
 # Issue #3564：优先级默认档常量唯一真源 = pipeline_config（与写侧校验同源）。
 # 模块级导入（QA #3564 复审：去掉 _claim_priority_gate 内逐次 try/except 兜底+静默吞 import）；
@@ -1565,6 +1567,8 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     pool_engine_source（local-claimer 设计）：pool_engine_ids 的来源标记——
     'scene' = 用户在场景里显式绑定（白名单全灭时保持 failed，Issue #253 硬约束）；
     'auto'  = 引擎自动选择/兜底产生的绑定（全灭时可降级放行全站，可审计）；
+    'directed' = engine_config.runtime_id 显式定向（Issue #2791，pool 收敛为单元素）；
+    'scene_missing' = 场景未在仓内 scene pool 登记（Issue #3790，跳过全局模板回退）；
     ''      = 未标记（历史任务，按 scene 对待——保守不降级）。
     """
     if not agent_session_id:
@@ -3349,6 +3353,114 @@ def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int 
             failure_phase=failure_phase)
 
 
+# ===== Issue #3877：级联终态 UPDATE 的列清单（按 events 实际列集裁剪）=====
+#: 补偿归因字段：`cascade.py` 读侧同一份清单（`cascade.CASCADE_FIELDS`）
+_EVENTS_CASCADE_COLUMNS = _cascade.CASCADE_FIELDS
+
+
+def _invalidate_table_columns(table: str) -> None:
+    """失效单表列缓存（Issue #3877：UPDATE 报 1054 后重探一次列集）。"""
+    _TABLE_COLS_CACHE.pop(table, None)
+
+
+def _events_columns() -> set:
+    """events 实际列集（runtime 库）。
+
+    探列失败返回空集 = 「未知」→ 调用方按全列写（保持历史行为，由异常路径兜底）；
+    只有**确定**探到列集时才裁剪 SET 子句（Issue #3877：缺 cascade_* 只写存在列）。
+    """
+    try:
+        return set(_table_columns("events") or ())
+    except Exception as _e:  # noqa: BLE001 - 探列失败不阻断收敛主流程
+        log.warning(f"_cascade_event_terminal: events column probe failed: {_e}")
+        return set()
+
+
+def _is_missing_column_error(exc) -> bool:
+    """是否「列不存在」类错误（1054 / Unknown column / no such column）→ 可重探列集重试。"""
+    _t = str(exc or "").lower()
+    return "1054" in _t or "unknown column" in _t or "no such column" in _t
+
+
+def _build_cascade_terminal_update(cols: set, values: dict):
+    """按 events 实际列集拼终态 UPDATE，返回 ``(sql, params, missing_cascade)``。
+
+    ``cols`` 为空集（探列失败/未知）→ 全列写，保持历史行为。
+    ``missing_cascade`` 非空 = 本次**降级**（归因列没写进去，终态字段照常收敛）；
+    一列都写不了（连 status 都不在）→ 抛错，绝不发空 SET 子句。
+    """
+    _known = set(cols or ())
+    _specs = (
+        # (列名, SET 片段, 是否带参数, 参数值)
+        ("status", "status=?", True, values.get("status")),
+        ("exit_code", "exit_code=?", True, values.get("exit_code")),
+        ("completed_at", "completed_at=?", True, values.get("completed_at")),
+        ("result", "result=?", True, values.get("result")),
+        ("structured_output", "structured_output=COALESCE(?, structured_output)", True,
+         values.get("structured_output")),
+        ("cascade_reason", "cascade_reason=?", True, values.get("cascade_reason")),
+        ("report_missing", "report_missing=1", False, None),
+        ("triggered_by", "triggered_by=?", True, values.get("triggered_by")),
+        ("cascade_task_status", "cascade_task_status=?", True,
+         values.get("cascade_task_status")),
+        ("cascade_prev_event_status", "cascade_prev_event_status=?", True,
+         values.get("cascade_prev_event_status")),
+        # Issue #3433：failed 终态的结构化归因（只有 values 带该键时才写，见调用方）
+        ("failure_info", "failure_info=?", True, values.get("failure_info")),
+    )
+    _sets, _params = [], []
+    if values.get("failure_info") is not None:
+        _specs = _specs + (("failure_info", "failure_info=?", True,
+                            values.get("failure_info")),)
+    for _col, _frag, _has_param, _val in _specs:
+        if _known and _col not in _known:
+            continue
+        if _col == "failure_info" and _col not in values:
+            # 可选列（Issue #3433）：非 failed 终态未提供值 = 本次不写，保留历史值；
+            # 其余列（含 report_missing 这类无参常量）始终写。
+            continue
+        _sets.append(_frag)
+        if _has_param:
+            _params.append(_val)
+    if not _sets:
+        raise RuntimeError(f"events no writable terminal column: probed={sorted(_known)}")
+    _missing = [c for c in _EVENTS_CASCADE_COLUMNS if _known and c not in _known]
+    return (f"UPDATE events SET {', '.join(_sets)} WHERE seq=?",
+            _params + [values.get("event_seq")], _missing)
+
+
+def _release_event_active_guard(cursor, event_seq: int, triggered_by: str,
+                                task_status: str) -> bool:
+    """事件守卫释放（Issue #587 语义 + #3877 时序加固）。
+
+    调用点已从「终态 UPDATE 之后同一 try」改进为 ``finally``：UPDATE 抛 1054/其它异常
+    时守卫仍要删除，否则同角色新交接被去重挡到 TTL（30min）超时。
+    本函数自身失败只记结构化日志 + 指标（stage=guard），绝不向上抛（不能把成功的
+    收敛吞成异常）。
+    """
+    try:
+        _g = cursor.execute(
+            "SELECT repo_key, issue_id, agent_type, scene_id FROM events WHERE seq=?",
+            (event_seq,)).fetchone()
+        if not _g:
+            return False
+        cursor.execute(
+            "DELETE FROM event_active_guard WHERE repo_key=? AND issue_id=? "
+            "AND agent_type=? AND seq=?",
+            (_g[0], _g[1] or "#0", _g[2] or "", event_seq))
+        # Issue #1938：按 agent / 场景统计「回报丢失补偿」次数（可观测）
+        _cascade.record_compensation(
+            agent_type=_g[2] or "", scene_id=(_g[3] if len(_g) > 3 else "") or "",
+            triggered_by=triggered_by, task_status=task_status)
+        return True
+    except Exception as _ge:  # noqa: BLE001
+        _reason = _cascade_metrics.classify_failure(_ge)
+        _cascade_metrics.observe_failed(_reason, stage="guard")
+        log.error(f"_cascade_event_terminal: failed for event {event_seq} -> guard release "
+                  f"| stage=guard reason={_reason} | error={_ge}")
+        return False
+
+
 def _cascade_event_terminal_impl(cursor, event_seq: int, status: str, exit_code: int = None,
                                  triggered_by: str = _cascade.TRIGGER_UPDATE_TASK_STATUS,
                                  task_status: str = "", task_result_text: str = None,
@@ -3364,6 +3476,12 @@ def _cascade_event_terminal_impl(cursor, event_seq: int, status: str, exit_code:
     - 覆盖全部 ``TASK_TERMINAL_STATUSES``（含 ``timeout_failed``）：事件终态映射 `failed`、
       exit_code 恒非 0，纠正「超时失败被记成 completed/0」的数据失真；
     - 能取到真实结论（agent_tasks.result_text）时优先回填，取不到才写补偿文案。
+
+    Issue #3877 变更（分库拓扑存量库缺 cascade 五列 → 1054 100% 收敛失败）：
+    - UPDATE 按 ``events`` **实际列集**裁剪：缺 cascade 列只写终态列（降级，不整条失败）；
+    - UPDATE 报 1054 时失效列缓存重探一次再写（并发迁移/连接级缓存漂移）；
+    - ``event_active_guard`` 释放移入 ``finally``：UPDATE 失败也删守卫；
+    - 失败/降级从静默 WARNING 升级为结构化日志 + 计数指标（Loki/Prometheus 可告警）。
 
     返回 True 表示本次发生收敛。
     """
@@ -3391,8 +3509,7 @@ def _cascade_event_terminal_impl(cursor, event_seq: int, status: str, exit_code:
         _now = datetime.now(timezone.utc).isoformat()
         # Issue #3433：级联收敛同属「超时/孤儿判死」来源，failed 终态须写结构化失败原因，
         # 否则前端只能走历史降级提示（详见 tests/runtime/test_issue_3433_failure_info.py）。
-        _failure_sql = ""
-        _failure_param = ()
+        _failure_info = None
         if _event_status == "failed":
             try:
                 from src.api.event_store import _events_column_exists
@@ -3410,42 +3527,142 @@ def _cascade_event_terminal_impl(cursor, event_seq: int, status: str, exit_code:
                     _fi = failure_info_for_cascade(
                         task_status=_task_status, result=_result, exit_code=_event_exit,
                         phase=failure_phase, agent=_agent, runtime=_runtime)
-                    _failure_sql = ", failure_info=?"
-                    _failure_param = (failure_info_json(_fi),)
-            except Exception as _fe:
+                    _failure_info = failure_info_json(_fi)
+            except Exception as _fe:  # noqa: BLE001 - 归因失败不得阻断收敛
                 log.warning(f"_cascade_event_terminal: build failure_info failed "
                             f"for seq={event_seq}: {_fe}")
-        cursor.execute(
-            "UPDATE events SET status=?, exit_code=?, completed_at=?, result=?, "
-            "structured_output=COALESCE(?, structured_output), "
-            "cascade_reason=?, report_missing=1, triggered_by=?, "
-            "cascade_task_status=?, cascade_prev_event_status=?"
-            + _failure_sql + " WHERE seq=?",
-            (_event_status, _event_exit, _now, _result, _structured,
-             _reason, (triggered_by or ""), _task_status, _prev_event_status)
-            + _failure_param + (event_seq,))
-        # Issue #587 审查修复：级联收敛须同步释放 event_active_guard（与
-        # update_event_status 终态路径语义一致），否则守卫残留只能靠 TTL 30min 兜底。
-        # 在同一事务/游标内完成，避免嵌套获取不可重入的 db_lock。
-        try:
-            _g = cursor.execute(
-                "SELECT repo_key, issue_id, agent_type, scene_id FROM events WHERE seq=?",
-                (event_seq,)).fetchone()
-            if _g:
-                cursor.execute(
-                    "DELETE FROM event_active_guard WHERE repo_key=? AND issue_id=? "
-                    "AND agent_type=? AND seq=?",
-                    (_g[0], _g[1] or "#0", _g[2] or "", event_seq))
-                # Issue #1938：按 agent / 场景统计「回报丢失补偿」次数（可观测）
-                _cascade.record_compensation(
-                    agent_type=_g[2] or "", scene_id=(_g[3] if len(_g) > 3 else "") or "",
-                    triggered_by=triggered_by, task_status=_task_status)
-        except Exception as _ge:
-            log.warning(f"_cascade_event_terminal: guard release failed for seq={event_seq}: {_ge}")
-        return True
-    except Exception as _e:
-        log.warning(f"_cascade_event_terminal: failed for event {event_seq} -> {status}: {_e}")
+    except Exception as _e:  # noqa: BLE001
+        _reason = _cascade_metrics.classify_failure(_e)
+        _cascade_metrics.observe_failed(_reason, stage="prepare")
+        log.error(f"_cascade_event_terminal: failed for event {event_seq} -> {status} "
+                  f"| stage=prepare reason={_reason} | error={_e}")
         return False
+
+    _values = {
+        "event_seq": event_seq,
+        "status": _event_status,
+        "exit_code": _event_exit,
+        "completed_at": _now,
+        "result": _result,
+        "structured_output": _structured,
+        "cascade_reason": _reason,
+        "triggered_by": triggered_by or "",
+        "cascade_task_status": _task_status,
+        "cascade_prev_event_status": _prev_event_status,
+    }
+    # Issue #3433：只有 failed 终态带结构化归因（其它终态不覆盖历史值）
+    if _failure_info is not None:
+        _values["failure_info"] = _failure_info
+    _missing: list = []
+    try:
+        _sql, _params, _missing = _build_cascade_terminal_update(_events_columns(), _values)
+        try:
+            cursor.execute(_sql, _params)
+        except Exception as _ue:  # noqa: BLE001
+            if not _is_missing_column_error(_ue):
+                raise
+            # 列缓存与库实际列集漂移（并发迁移 / 连接级缓存）：失效重探，缺列只写存在列。
+            _invalidate_table_columns("events")
+            _sql, _params, _missing = _build_cascade_terminal_update(_events_columns(), _values)
+            cursor.execute(_sql, _params)
+    except Exception as _e:  # noqa: BLE001
+        _reason = _cascade_metrics.classify_failure(_e)
+        _cascade_metrics.observe_failed(_reason, stage="update")
+        log.error(f"_cascade_event_terminal: failed for event {event_seq} -> {status} "
+                  f"| stage=update reason={_reason} "
+                  f"missing_columns={','.join(_missing) or '-'} | error={_e}")
+        return False
+    finally:
+        # Issue #587 审查修复 + #3877：级联收敛须同步释放 event_active_guard（与
+        # update_event_status 终态路径语义一致），否则守卫残留只能靠 TTL 30min 兜底。
+        # 放在 finally：终态 UPDATE 失败时同样必须释放（原实现写在 UPDATE 之后同一 try，
+        # 1054 时整段跳过 → 守卫残留 30min）。
+        _release_event_active_guard(cursor, event_seq, triggered_by, _task_status)
+    if _missing:
+        _missing_label = _cascade_metrics.observe_degraded(_missing)
+        log.warning(f"_cascade_event_terminal: degraded for event {event_seq} -> {status} "
+                    f"| missing_columns={_missing_label} | wrote only existing columns "
+                    f"| fix: apply migration 202611250001 (events cascade columns)")
+    return True
+
+
+#: 事件「仍活跃」的判定口径（未终态 = 级联收敛还没成功过）
+_EVENT_ACTIVE_STATUSES = ("pending", "running", "dispatched")
+
+#: `reconverge_terminal_gaps` 单次扫描上限（PR #2157 复审 C3 数值证据门）：
+#: 每次扫全库且逐个事件重放幂等收敛，单进程一次处理 200 条已远大于生产存量
+#: （1054 期间累计未收敛事件 < 50 条）；超出部分由下一轮调用继续，不丢数据。
+RECONVERGE_SCAN_LIMIT = 200
+
+
+def reconverge_terminal_gaps(seqs=None, limit: int = RECONVERGE_SCAN_LIMIT) -> dict:
+    """Issue #3877 存量补偿入口：任务已终态但事件仍活跃 → 幂等重跑一次收敛。
+
+    生产 1054 期间（seq 90081 / 94533 / 95284 等）事件卡在 running：任务早已终态，
+    但 ``_cascade_event_terminal`` 的 UPDATE 抛错，事件终态与 cascade 归因都没落库。
+    补列上线后跑本入口即可一次收敛，**可重复执行**（已终态事件走 noop 分支返回
+    ``noop``，不会改写已落库结论）。
+
+    收敛一律走 :func:`converge_event_to_task`：那是既有 `_real` 回填路径——能取到
+    ``agent_tasks.result_text`` 就回填真实结论（``report_missing_backfilled``），
+    取不到才写补偿文案（``report_missing_synthesized``）。
+
+    返回 ``{scanned, converged, noop, results[]}``；``seqs`` 为空则扫全库（``limit`` 截断，
+    同一 seq 多条重试任务只取最新一条，避免把别的任务的结论回填到本事件）。
+    """
+    _terminal = tuple(TASK_TERMINAL_STATUSES)
+    _act = tuple(_EVENT_ACTIVE_STATUSES)
+    _sql = (
+        "SELECT e.seq, t.id, t.created_at FROM events e JOIN agent_tasks t "
+        "ON t.event_seq = e.seq "
+        f"WHERE e.status IN ({','.join('?' * len(_act))}) "
+        f"AND t.status IN ({','.join('?' * len(_terminal))})")
+    _params: list = list(_act) + list(_terminal)
+    _want = [int(s) for s in (seqs or ()) if str(s).strip()]
+    if _want:
+        _sql += f" AND e.seq IN ({','.join('?' * len(_want))})"
+        _params.extend(_want)
+    _sql += " ORDER BY t.created_at DESC, e.seq DESC LIMIT ?"
+    _params.append(max(1, int(limit)))
+
+    _targets: list = []
+    _seen: set = set()
+    try:
+        with db_lock:
+            _rows = _rt_db.cursor().execute(_sql, _params).fetchall()
+    except Exception as _e:  # noqa: BLE001 - 入口失败要可见地返回，不静默
+        log.error(f"reconverge_terminal_gaps: scan failed | error={_e}")
+        return {"scanned": 0, "converged": 0, "noop": 0, "results": [],
+                "error": str(_e)}
+    for _row in _rows or ():
+        _seq = _row[0]
+        if _seq in _seen:
+            continue
+        _seen.add(_seq)
+        _targets.append((_seq, _row[1]))
+
+    _results: list = []
+    _converged = _noop = 0
+    for _seq, _task_id in _targets:
+        try:
+            _r = converge_event_to_task(_task_id)
+        except Exception as _e:  # noqa: BLE001 - 单条失败不阻断整批
+            log.error(f"reconverge_terminal_gaps: seq={_seq} task={_task_id} failed | error={_e}")
+            _results.append({"seq": _seq, "task_id": _task_id, "status": "failed",
+                             "error": str(_e)})
+            continue
+        if _r.get("status") == "converged":
+            _converged += 1
+        elif _r.get("status") == "noop":
+            _noop += 1
+        _results.append({"seq": _seq, "task_id": _task_id, "status": _r.get("status", ""),
+                         "cascade_reason": _r.get("cascade_reason", ""),
+                         "event_status_after": _r.get("event_status_after", "")})
+    if _targets:
+        log.info(f"reconverge_terminal_gaps: scanned={len(_targets)} converged={_converged} "
+                 f"noop={_noop} (Issue #3877 compensation)")
+    return {"scanned": len(_targets), "converged": _converged, "noop": _noop,
+            "results": _results}
 
 
 def _recover_orphan_event_terminal(cursor, event_seq: int, *, reason: str, phase: str,
@@ -3675,14 +3892,26 @@ def update_task_status(task_id, status, **kw):
     `lock_owner("update_task_status:<id>")` 提供灰度归因（指标 owner 粗化，日志全量）。
     """
     _cascade_trigger = kw.get("cascade_trigger") or _cascade.TRIGGER_UPDATE_TASK_STATUS
+    # Issue #3741（PR #2160 审查 ⑤）：可选乐观条件——仅当 agent_tasks.started_at 仍等于
+    # 调用方观察到的值才落终态。重派路径（_requeue_no_progress/_do_requeue）会复位
+    # started_at，条件不满足即说明「本次观察到的旧执行已被新一轮取代」→ rowcount=0 放弃，
+    # 不覆盖新执行。不传该关键字 = 原行为（无乐观条件）。
+    _expect_started_at = kw.get("expect_started_at")
     from src.kernel.lock_instrument import lock_owner
     _big_cols = {col: kw[col] for col in _TASK_STATUS_BIG_COLS if col in kw}
     # ① 终态判定（短临界区）：已终态 → 仅在 pending 且本次带 payload 时补写大字段。
     with lock_owner(f"update_task_status:{task_id}"), db_lock:
         c = _rt_db.cursor()
-        c.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
+        c.execute("SELECT status, runtime_id, started_at FROM agent_tasks WHERE id=?",
+                  (task_id,))
         row = c.fetchone()
         if not row:
+            return
+        # Issue #3741：乐观条件前置——执行已被重派取代（started_at 变了）时**不得**
+        # 进入大字段写入（errors 在 ② 段先写），否则会把旧执行的诊断串到新执行上。
+        if _expect_started_at is not None and str(row[2] or "") != str(_expect_started_at):
+            log.info(f"update_task_status: optimistic started_at guard missed for task "
+                     f"{task_id} (execution superseded), skip")
             return
         if row[0] in TASK_TERMINAL_STATUSES:
             if _big_cols and _task_big_is_pending(task_id):
@@ -3720,7 +3949,17 @@ def update_task_status(task_id, status, **kw):
             if col in kw:
                 sets.append(f"{col}=?")
                 params.append(kw[col])
-        c.execute(f"UPDATE agent_tasks SET {', '.join(sets)} WHERE id=?", params + [task_id])
+        _where = "id=?"
+        _where_params = [task_id]
+        if _expect_started_at is not None:
+            _where += " AND started_at=?"
+            _where_params.append(_expect_started_at)
+        c.execute(f"UPDATE agent_tasks SET {', '.join(sets)} WHERE {_where}",
+                  params + _where_params)
+        if _expect_started_at is not None and (getattr(c, "rowcount", -1) or 0) == 0:
+            log.info(f"update_task_status: optimistic started_at guard missed for task "
+                     f"{task_id} (execution superseded), skip terminal write")
+            return
         # 方案 E：任务真正开始执行（running）→ 事件 pending→running（与 claim 认领语义一致）
         if status == "running":
             try:
@@ -3736,6 +3975,19 @@ def update_task_status(task_id, status, **kw):
         # 槽位释放（agent-cluster-design.md §4.2.1）：非终态 → 终态（含 timeout_failed），且任务已绑定引擎 → busy_slots-1
         if status in TASK_TERMINAL_STATUSES and row[1] and row[1] > 0:
             release_busy_slot(row[1], cursor=c)
+        # Issue #4346（复审 Critical）：终态是「认领收口」的唯一必经点——任何终态
+        # （completed / failed / cancelled / timeout_failed）都必须结算 session 半开
+        # 占位。旧实现只在 completed（note_session_success）与 session 类失败
+        # （_write_failure）复位，取消 / exit!=0 业务失败 / 超时判死全漏 → 占位恒为 1
+        # 而 session_circuit_until 已过期 → 引擎被永久挡在认领闸门外（看板却显示
+        # 未熔断）。同事务内收口，与任务终态原子提交。
+        if status in TASK_TERMINAL_STATUSES and row[1] and row[1] > 0:
+            try:
+                from src.domains.runtime.engine import session_guard as _sg_out
+                _sg_out.note_claim_outcome(c, int(row[1]), status=status)
+            except Exception as _sge:
+                log.debug(f"update_task_status: session claim outcome hook failed "
+                          f"for task {task_id}: {_sge}")
         # Issue #587：任务终态 → 事件级联收敛（事务内兜底）。
         # cancel_task / 直接判死路径（pool unreachable 等）此前只写 agent_tasks 不回写 events，
         # 事件长期 running → A2A 去重无限期阻断同角色新交接。complete_task/fail_task 的
@@ -5708,6 +5960,21 @@ def fail_task(task_id, error, exit_code=-1):
             return
     except Exception as _fe:
         log.warning(f"fail_task: backend failover check failed for {task_id}: {_fe}")
+    # Issue #4346：session 通道失败（session/new 100s 超时 / 无 LLM provider）→
+    # 分类留痕 + 换引擎重试（requeue 归池，故障引擎进 session 冷却/熔断）；
+    # 重试耗尽或无其它可用引擎 → 继续走判死（回落下一跳，不原地挂起）。
+    # 必须先于 #403 瞬时重试：session 超时不经瞬时分类，否则只能直接 failed。
+    try:
+        from src.domains.runtime.engine import session_guard as _sg
+        _so = _sg.handle_task_failure(task_id, task, error, exit_code)
+        if _so in ("requeued", "already_requeued"):
+            log.info(f"Task {task_id}: session channel failure → retry {_so} on another "
+                     f"engine, skip fail_task (exit={exit_code})")
+            return
+        if _so in ("observed", "exhausted"):
+            log.info(f"Task {task_id}: session channel classified ({_so}), continuing fail path")
+    except Exception as _se:
+        log.warning(f"fail_task: session guard check failed for {task_id}: {_se}")
     # Issue #403：瞬时上游抖动自动重试（判定层收口，worker 失败上报路径）。
     # 终态幂等（completed/failed 跳过）与过期上报丢弃均已通过，此处任务仍
     # running；可重试（瞬时分类 ∧ 无写操作证据 ∧ attempts 未耗尽）则退避

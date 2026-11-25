@@ -2,6 +2,8 @@
 
 import sys, os, json, io
 
+import pytest
+
 # 强制使用独立测试库，防止 TestClient 误连生产库（双保险，即使 conftest 未加载）
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db")
@@ -1104,6 +1106,17 @@ class TestChat:
 
 # ===================== 9. Settings =====================
 class TestSettings:
+    @pytest.fixture(autouse=True)
+    def _beta_whitelisted(self, monkeypatch):
+        """Issue #4254：凭据配置接口只对内测白名单开放。
+
+        本组用例验的是「写入 / 空串清除 / 省略不改」的凭据语义，白名单门禁另有
+        tests/api/test_issue4254_beta_eligibility.py 覆盖；这里显式放行，避免用例
+        结果随 login_whitelist 种子数据（各环境不同）漂移。
+        """
+        from src.domains.mgmt.auth import signup_policy
+        monkeypatch.setattr(signup_policy, "is_beta_whitelisted_user", lambda user: True)
+
     def test_credentials(self):
         r = client.get("/api/settings/credentials", headers=_headers)
         assert r.status_code == 200
