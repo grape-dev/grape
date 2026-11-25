@@ -43,7 +43,10 @@ mkdir -p "$DATA" /app/configs "$HOME/.config/opencode"
 
 # ---------- 0) 引擎/设备身份：跨重部署必须稳定 ----------
 # 派生逻辑收敛到 deploy/hosted/engine-identity.sh（可独立 source 供行为测试）。
-. "$(dirname "$0")/engine-identity.sh"
+# 注意：本 entrypoint 被 Dockerfile COPY 到 /usr/local/bin/docker-entrypoint.sh，
+# 故用仓库内绝对路径 /app/deploy/hosted/...（与 /app/scripts、/app/configs 口径一致），
+# 不能用 dirname "$0"（会解析到 /usr/local/bin）。
+. "/app/deploy/hosted/engine-identity.sh"
 derive_engine_identity
 
 # ---------- 1) JWT_SECRET ----------
