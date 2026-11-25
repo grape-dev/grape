@@ -3,11 +3,10 @@
 判定维度从平台移到凭据（GitHub 权限模型 requested ∩ granted；gh-aw ADR-0002
 显式声明制，不静默推断）。五态断言（评审裁定口径）：
   true            → push 不删 .github/workflows
-  显式 false      → 删（新能力：明确受限的凭据）
-  未声明+github   → 删（旧逻辑回退，基线冻结）
-  未声明+gitcode  → 不删（零回归的真正断言）
-  OAuth 路径      → 保守删（保守默认，非平台事实——OAuth scope 不可内省，
-                    预留未来 oauth_scopes 声明入口）
+  显式 false      → 删（明确受限的凭据）
+  未声明 + 任意平台 → 不删（2026-11-25 负责人拍板 A，Issue #4301：
+                    未知态保留；此前 github 卡默认 false → 删，属静默丢文件）
+  OAuth 路径（无 <p>_pat） → 不删（同未知态；真被平台拒时转成可执行报错）
 """
 import os
 
@@ -101,13 +100,13 @@ def test_false_declared_removes_workflows(push_env, monkeypatch):
     assert push_env["workflows_kept"] is False, "声明受限的凭据未被删 workflows"
 
 
-def test_undeclared_github_falls_back_to_remove(push_env, monkeypatch):
-    """未声明 + github → 旧逻辑回退：删（基线冻结，行为不变）。"""
+def test_undeclared_github_keeps_workflows(push_env, monkeypatch):
+    """未声明 + github → 保留（2026-11-25 拍板 A：不再按平台卡 false 静默删）。"""
     import src.domains.mgmt.user.repo_manager as rm
     uid = f"{NS}w3"
     monkeypatch.setattr(rm, "credential_workflows_write", lambda u, p: None)
     _push("github", uid, monkeypatch)
-    assert push_env["workflows_kept"] is False
+    assert push_env["workflows_kept"] is True, "未声明态仍被按平台默认删除 = 拍板 A 未落地"
 
 
 def test_undeclared_gitcode_falls_back_to_keep(push_env, monkeypatch):
@@ -119,11 +118,53 @@ def test_undeclared_gitcode_falls_back_to_keep(push_env, monkeypatch):
     assert push_env["workflows_kept"] is True, "gitcode 未声明被删 workflows=行为翻转回归"
 
 
-def test_oauth_path_conservative_remove(push_env, monkeypatch):
-    """OAuth 路径（无 <p>_pat 声明）→ None → 旧逻辑回退：保守删。
-    注意：保守默认，非平台事实——OAuth scope 不可内省，预留 oauth_scopes 声明入口。"""
+def test_oauth_path_keeps_workflows(push_env, monkeypatch):
+    """OAuth 路径（无 <p>_pat 声明）→ None → 保留（拍板 A；与未声明同档）。"""
     import src.domains.mgmt.user.repo_manager as rm
     uid = f"{NS}w5"
     monkeypatch.setattr(rm, "credential_workflows_write", lambda u, p: None)
     _push("github", uid, monkeypatch)
-    assert push_env["workflows_kept"] is False
+    assert push_env["workflows_kept"] is True
+
+
+def test_workflow_scope_rejection_maps_to_actionable_error(push_env, monkeypatch):
+    """保留目录的代价：真被平台拒时要给出可执行报错（拍板 A 的配套，不许抛原文）。"""
+    import src.domains.mgmt.user.repo_manager as rm
+    uid = f"{NS}w6"
+    monkeypatch.setattr(rm, "credential_workflows_write", lambda u, p: None)
+    seen = push_env
+
+    def fake_git(args, cwd, timeout=120):
+        if args and args[0] == "push":
+            seen["workflows_kept"] = __import__("os").path.isdir(
+                __import__("os").path.join(cwd, ".github", "workflows"))
+            raise RuntimeError(
+                "refusing to allow a Personal Access Token to create or update workflow "
+                "`.github/workflows/ci.yml` without `workflow` scope")
+        return ""
+
+    monkeypatch.setattr(rm, "_run_git", fake_git)
+    with pytest.raises(RuntimeError) as ei:
+        _push("github", uid, monkeypatch)
+    msg = str(ei.value)
+    assert "workflow 写权限" in msg and "经典 PAT" in msg, f"报错不可执行: {msg}"
+    assert "without `workflow` scope" in msg, "应保留平台原文首行便于排障"
+    assert seen.get("workflows_kept") is True, "被拒前目录应仍在（保留分支）"
+
+
+def test_unrelated_push_error_not_relabelled(push_env, monkeypatch):
+    """非 workflow 的 push 失败必须原样上抛，不许被误包装成权限提示。"""
+    import src.domains.mgmt.user.repo_manager as rm
+    uid = f"{NS}w7"
+    monkeypatch.setattr(rm, "credential_workflows_write", lambda u, p: True)
+
+    def fake_git(args, cwd, timeout=120):
+        if args and args[0] == "push":
+            raise RuntimeError("fatal: unable to access: Could not resolve host")
+        return ""
+
+    monkeypatch.setattr(rm, "_run_git", fake_git)
+    with pytest.raises(RuntimeError) as ei:
+        _push("github", uid, monkeypatch)
+    assert "Could not resolve host" in str(ei.value)
+    assert "workflow 写权限" not in str(ei.value)

@@ -801,18 +801,20 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
             _template_source_downloader(source_platform)(
                 source_repo or clone_url, workdir, tmp, bot_token or user_token)
 
-        # D105-17：目标 host 已从平台卡派生（见函数头部 fail-closed 前置校验）
         # D105-18：workflows 目录处理按【凭据能力】三态判定——
-        # True=声明有权限（不删）；False=声明受限（删）；None=未声明 → 回退
-        # D105-19：平台默认值从平台卡 workflows_write 位读（github 内置卡=False，
-        # 其余 True）——provider=="github" 平台名硬分派消除，语义与存量逐字节等价。
+        # True=声明有权限（不删）；False=声明受限（删）；None=未声明 → **保留**
+        # 2026-11-25 负责人拍板（A 方案，Issue #4301）：未知态由「回退平台卡默认
+        # （github 卡=false → 删）」改为「保留」——静默丢文件比显式失败更坏。
+        # 未知的来源：没绑 PAT（只 OAuth 登录）、或细粒度 PAT（GitHub 不返回
+        # X-OAuth-Scopes，探不出能力）。这类账号的模板 push 若真被平台拒，
+        # 由下方 push 失败映射给出「补 workflow 权限/绑 PAT」的可执行报错。
+        # 平台卡 workflows_write 位不再参与本处判定（保留卡字段供其它消费方）。
         _wf = (credential_workflows_write(user_id, provider)
                if user_id else None)
-        if _wf is None:
-            from src.domains.runtime.public import get_platform_card as _gpc
-            _pc_wf = _gpc(provider)
-            _wf = (getattr(_pc_wf, "workflows_write", True) if _pc_wf is not None else True)
-        _wf_denied = not _wf
+        _wf_denied = _wf is False
+        if not _wf_denied and _wf is None:
+            log.info("push_template_to_repo: credential workflows capability unknown; "
+                     "keeping .github/workflows (owner decision 2026-11-25, A)")
         # push 目标 URL：任何分支都必须携带真实 token。
         # 历史 bug：受限分支（_wf_denied）曾拼 `https://***@host/...` —— 字面量
         # "***" 当用户名、没有密码，子进程里没有 credential helper/TTY，
@@ -823,12 +825,13 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
         # token 必须照常携带。
         target_url = f"https://oauth2:{user_token}@{_tgt_host}/{owner_login}/{target_repo}.git"
         if _wf_denied:
-            # token 无 workflows 权限，push 含 .github/workflows 的仓库会被拒绝
-            # ——怪癖以卡 workflows_write=False 声明（github 内置卡）。
+            # 凭据**显式**声明无 workflows 权限，push 含 .github/workflows 会被拒绝
+            # ——按凭据声明删，而不是按平台名/卡默认删。
             _wf_dir = os.path.join(workdir, ".github", "workflows")
             if os.path.isdir(_wf_dir):
                 shutil.rmtree(_wf_dir, ignore_errors=True)
-                log.info(f"Removed .github/workflows from template (GitHub App token lacks workflow permission)")
+                log.info("Removed .github/workflows from template "
+                         "(credential declares workflows_write=False)")
         if _run_git_has_origin(workdir):
             _run_git(["remote", "remove", "origin"], workdir)
         _run_git(["remote", "add", "origin", target_url], workdir)
@@ -854,18 +857,25 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
         #      强推，则退到一次性特性分支，绝不中断建仓。
         pushed_to = "main"
         try:
-            _run_git(["push", "-u", "origin", "HEAD:main"], workdir, timeout=180)
-        except RuntimeError as _e1:
-            if _is_protected_branch_error(str(_e1)):
-                pushed_to = _push_init_branch(workdir)
-            else:
-                try:
-                    _run_git(["push", "--force", "-u", "origin", "HEAD:main"],
-                             workdir, timeout=180)
-                except RuntimeError as _e2:
-                    if not _is_protected_branch_error(str(_e2)):
-                        raise
+            try:
+                _run_git(["push", "-u", "origin", "HEAD:main"], workdir, timeout=180)
+            except RuntimeError as _e1:
+                if _is_protected_branch_error(str(_e1)):
                     pushed_to = _push_init_branch(workdir)
+                else:
+                    try:
+                        _run_git(["push", "--force", "-u", "origin", "HEAD:main"],
+                                 workdir, timeout=180)
+                    except RuntimeError as _e2:
+                        if not _is_protected_branch_error(str(_e2)):
+                            raise
+                        pushed_to = _push_init_branch(workdir)
+        except RuntimeError as _e:
+            # 2026-11-25 负责人拍板 A：未知能力时保留 workflows 目录 → 若真被平台拒，
+            # 必须给出可执行报错（补权限/绑 PAT），而不是把平台原文抛给建仓调用方。
+            if not _is_workflow_scope_error(str(_e)):
+                raise
+            raise RuntimeError(_workflow_scope_hint(str(_e))) from _e
         if pushed_to != "main":
             log.warning(
                 f"push_template_to_repo: 默认分支受保护（{provider}，{owner_login}/{target_repo}），"
@@ -886,6 +896,32 @@ def _is_protected_branch_error(msg: str) -> bool:
         "protected branch", "protected_branch",
         "not allowed to force push",
         "You are not allowed to push code to protected"))
+
+
+def _is_workflow_scope_error(msg: str) -> bool:
+    """平台因「凭据缺 workflow 权限」拒绝推送的文本判定（Issue #4301）。
+
+    GitHub 原文：`refusing to allow a Personal Access Token to create or update
+    workflow '.github/workflows/x.yml' without 'workflow' scope`。
+    """
+    m = (msg or "").lower()
+    return ("without `workflow` scope" in m
+            or "without 'workflow' scope" in m
+            or "without workflow scope" in m)
+
+
+def _workflow_scope_hint(msg: str) -> str:
+    """把「缺 workflow 权限」的推送拒绝翻译成可执行报错（2026-11-25 拍板 A 的配套）。
+
+    未知能力时保留 .github/workflows，代价是真无权限的账号会在建仓推模板这步失败——
+    失败必须是可解释、可自修的，而不是把 git 原文抛给建仓流程。
+    """
+    first = next((l.strip() for l in (msg or "").splitlines() if l.strip()), "")
+    return ("模板含 .github/workflows，但推送凭据没有 workflow 写权限，平台拒绝了推送"
+            + (f"：{first}" if first else "") + "。"
+            "请为推送账号补上该权限后重试：经典 PAT 勾选 workflow；细粒度 PAT 把 "
+            "Workflows 设为 Read and write；或改用有该权限的仓库 Bot；"
+            "走 GitHub 登录授权推送的，需登录渠道含 workflow 并重新授权一次。")
 
 
 def _push_init_branch(workdir: str) -> str:
