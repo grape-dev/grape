@@ -37,6 +37,39 @@ STATE_COLUMNS = (
     ("dispatch_state_at", "VARCHAR(255) NOT NULL DEFAULT ''"),
 )
 
+#: `COLUMN_DEFAULT` 的三态判据（PR #2157 门禁复审 BLOCKED 的最小修复）。
+#:
+#: 原判据 `str(current.get(col) or "") == ""` 把 **NULL（= 列无默认值，待修）** 与
+#: **''（= 已修好）** 压成同一态：MySQL 存量库（#3733 首版 TEXT 落地成
+#: `NOT NULL DEFAULT NULL`）与新装库（CREATE TABLE 走 mysql_compat 的表达式默认值，
+#: COLUMN_DEFAULT 读到 `_utf8mb4''` 而非 `''`）上一条 MODIFY 都不发，
+#: 迁移 202611240011 空转 0 条 DDL 却照样盖章 —— 假绿，strict 下 1364 照旧。
+#:
+#: 三态显式化后：
+#: - ``OK``      ：列存在且默认值已是 ``''``（**唯一**可以零写的态）；
+#: - ``MISSING`` ：列不存在。本迁移只改列定义（MODIFY），改不了缺列，
+#:                 必须 raise 不盖章，交补列迁移 202611240007 在属主域重试；
+#: - ``NULL``    ：列存在但无默认值（COLUMN_DEFAULT IS NULL）→ **必发 MODIFY**；
+#: - ``OTHER``   ：列存在但默认值非 ``''``（如表达式默认 / 历史残留字面量）→ 必发 MODIFY。
+DEFAULT_OK = "ok"
+DEFAULT_MISSING = "missing"
+DEFAULT_NULL = "null"
+DEFAULT_OTHER = "other"
+
+
+def classify_column_default(current: dict, col: str) -> str:
+    """把 information_schema 读到的默认值判成三态之一（ensure 与 post_check 共用）。
+
+    共用同一判据是本次修复的要点：两个函数各自判断就会漂移，一处按 NULL 待修、
+    另一处按 NULL 已修，假绿就会从 post_check 那一侧复活。
+    """
+    if col not in current:
+        return DEFAULT_MISSING
+    value = current[col]
+    if value is None:
+        return DEFAULT_NULL
+    return DEFAULT_OK if str(value) == "" else DEFAULT_OTHER
+
 
 def backfill_dispatch_state(cursor: Any, now: str = "") -> int:
     """补状态三列 + 把 enabled 且空指令的存量行标记为不可派发（幂等）。
@@ -99,7 +132,13 @@ def run(conn: Any = None) -> int:
 
 
 def _state_column_defaults(conn: Any) -> dict:
-    """读 information_schema 取三列当前默认值（MySQL）；SQLite 返回空 dict（无需修正）。"""
+    """读 information_schema 取三列当前默认值（MySQL）。
+
+    只在 MySQL 后端调用（`ensure_state_column_defaults` /
+    `state_column_defaults_converged` 都先判后端）：SQLite 没有 information_schema。
+    返回 dict「列名 → COLUMN_DEFAULT」，**缺失的列不出现在 dict 里**——
+    缺失是三态判据中的独立一态，调用方不可用 `.get(col)` 的默认值糊过去。
+    """
     out = {}
     cursor = conn.cursor()
     try:
@@ -128,7 +167,10 @@ def ensure_state_column_defaults(conn: Any = None) -> int:
       被 min_code_version 门槛拦截时 **raise 不盖章**（跳过 ≠ 已迁移）；
     - 后端探测失败不再静默 `return 0`（执行器以「fn 正常返回 = 盖章」为约定，
       静默返回会把版本号盖死、1364 永不重试），改为 raise；
-    - 幂等：只对默认值不是空串的列发 MODIFY，返回值 = 实际修正列数。
+    - 幂等：只对**已收敛为空串默认值**（``classify_column_default == DEFAULT_OK``）的列
+      零写，其余三态（NULL / 表达式默认 / 缺列）分别 MODIFY 与 raise，返回值 = 实际修正列数
+      （PR #2157 门禁复审：只按「默认值非空串」判待修会把 NULL 当成已修，迁移空转却盖章）。
+    列缺失时 raise：本迁移只改列定义，改不了缺列，交补列迁移 202611240007 重试。
     SQLite（单实例、无蓝绿共存）列已是 TEXT DEFAULT ''，无需修正，返回 0。
     """
     from src.api import db_setup as _ds
@@ -147,8 +189,16 @@ def ensure_state_column_defaults(conn: Any = None) -> int:
         cursor = target.cursor()
         try:
             current = _state_column_defaults(target)
+            missing = [col for col, _ddl in STATE_COLUMNS
+                       if classify_column_default(current, col) == DEFAULT_MISSING]
+            if missing:
+                # 缺列不能靠 MODIFY 修（MySQL 1054），也不能盖章跳过：缺失即「未收敛」，
+                # 交补列迁移（202611240007，owner 域 + raise_on_guard）下次启动重试。
+                raise RuntimeError(
+                    "autopilot state column defaults: columns missing "
+                    f"{missing} - 补列迁移 202611240007 未落地，本迁移不盖章")
             for col, ddl in STATE_COLUMNS:
-                if str(current.get(col) or "") == "":
+                if classify_column_default(current, col) == DEFAULT_OK:
                     continue          # 已是空串默认值，零写
                 if not _ds._destructive_ddl(
                         cursor, f"ALTER TABLE {TABLE} MODIFY COLUMN {col} {ddl}",
@@ -168,6 +218,8 @@ def state_column_defaults_converged(conn: Any = None) -> None:
     """post_check：盖章前确认三列默认值已收敛为空串（不收敛则 raise，不盖章）。
 
     MySQL：`information_schema.COLUMNS.COLUMN_DEFAULT` 必须是 `''`；
+    列缺失（补列迁移未落地）与 `NULL`（列无默认值）**都判失败** —— 两者都让
+    strict 模式下的无值 INSERT 报 1364，判放过就是门禁本身成了假绿（PR #2157 复审）。
     SQLite：列定义本身带 `DEFAULT ''`（1500 行级小表，NULL 默认值不成立）。
     后端判不出时按失败处理（与 ensure 同口径，不静默通过）。
     """
@@ -184,12 +236,14 @@ def state_column_defaults_converged(conn: Any = None) -> None:
     target = _ds.db if conn is None else conn
     with _ds.db_lock:
         current = _state_column_defaults(target)
-    missing = [c for c, _ddl in STATE_COLUMNS if c not in current]
+    states = {col: classify_column_default(current, col) for col, _ddl in STATE_COLUMNS}
+    missing = [col for col, state in states.items() if state == DEFAULT_MISSING]
     if missing:
         raise RuntimeError(
             f"autopilot state column defaults post_check: columns missing {missing}")
-    bad = [c for c, _ddl in STATE_COLUMNS if str(current.get(c) or "") != ""]
+    bad = [(col, current.get(col)) for col, state in states.items()
+           if state != DEFAULT_OK]
     if bad:
         raise RuntimeError(
             "autopilot state column defaults post_check: DEFAULT not normalized for "
-            f"{bad} (still NULL) - not stamped, retry on next start")
+            f"{bad} (NULL/非空串默认值均未收敛) - not stamped, retry on next start")
