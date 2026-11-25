@@ -53,7 +53,7 @@ def _prod_dsn(monkeypatch):
 
 def test_forbidden_reasons_collect_all_three_criteria(monkeypatch):
     monkeypatch.setattr(sc, "_load", lambda: {"env": "production"})
-    monkeypatch.setenv("GRAPE_DSN_RUNTIME", "mysql://u:p@10.0.0.1:3306/grape_prod_runtime")
+    monkeypatch.setenv("GRAPE_DSN_RUNTIME", "mysql://u:p@127.0.0.1:3306/grape_prod_runtime")
     monkeypatch.setenv("GRAPE_HOSTNAME", "prod-master-001")
 
     reasons = sc.dev_envelope_forbidden_reasons()
