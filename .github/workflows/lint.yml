@@ -57,3 +57,10 @@ jobs:
         run: |
           python -m pytest -q tests/runtime/test_issue_3923_worktree_head_and_attribution.py \
                             tests/runtime/test_repogit.py
+      - name: Feishu session lifecycle regression (issue #3735 / #3897)
+        # PR #2158 复审 Required：本单 8 例新增回归此前只在本地跑，未接入任何 CI
+        # 白名单——「装配层丢弃 (ctx, api) 对必须 close session」这条不变量在 CI 里
+        # 无覆盖，退回只 pop/clear 也不会变红（与 #4203/#4248/#3923 同一复审判据）。
+        run: |
+          python -m pytest -q tests/runtime/im/test_issue_3735_feishu_session_lifecycle.py \
+                            tests/runtime/im/test_issue_3897_feishu_endpoint_session.py
