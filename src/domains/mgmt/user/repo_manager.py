@@ -1550,7 +1550,11 @@ def push_workflows_capability(repo_key: str) -> dict:
         capability = credential_workflows_write(user_id, provider)
         if capability is not None:
             return {"capability": capability, "source": "pat"}
-    if provider:
+    # Only GitHub publishes the workflow flag as an OAuth scope. Other platforms
+    # report coarse strings ("all", "user_info", "openid profile email") where the
+    # absence of a "workflow" token carries no meaning -- live probe on 276 managed
+    # repos showed 89 gitcode/gitee repos would have been blocked as false positives.
+    if provider and workflows_probe_supported(provider):
         has = _login_channel_scope_has(provider, "workflow")
         if has is False:
             return {"capability": False, "source": "login_channel"}

@@ -46,7 +46,9 @@ def _cleanup():
         c = db.cursor()
         c.execute("DELETE FROM user_credentials WHERE CAST(user_id AS TEXT) LIKE ?", (f"{NS}%",))
         c.execute("DELETE FROM managed_repos WHERE repo_key LIKE ?", (f"github:{NS}/%",))
+        c.execute("DELETE FROM managed_repos WHERE repo_key LIKE ?", (f"gitcode:{NS}/%",))
         c.execute("DELETE FROM grape_t_repo_credentials WHERE repo_key LIKE ?", (f"github:{NS}/%",))
+        c.execute("DELETE FROM grape_t_repo_credentials WHERE repo_key LIKE ?", (f"gitcode:{NS}/%",))
         db.commit()
 
 
@@ -130,6 +132,24 @@ def test_capability_login_channel_without_workflow_is_false(set_level, monkeypat
     got = rm.push_workflows_capability(rk)
     _clean(rk)
     assert got == {"capability": False, "source": "login_channel"}, got
+
+
+def test_capability_non_github_channel_scope_never_blocks(set_level, monkeypatch):
+    """Non-GitHub platforms: coarse channel scopes ("all"/"user_info") are not OAuth
+    scope lists, so a missing "workflow" token must stay unknown, never False.
+
+    Live probe caught this: 89 gitcode/gitee repos were reported as workflow-blocked."""
+    import src.domains.mgmt.user.repo_manager as rm
+
+    rk = f"gitcode:{NS}/ns-probe"
+    _seed_repo(rk)
+    monkeypatch.setattr(rm, "_login_channel_scope", lambda p: "all")
+    set_level("user")
+    got = rm.push_workflows_capability(rk)
+    blocker = rm.workflows_capability_blocker(f"{NS}u1", "gitcode", True, rk)
+    _clean(rk)
+    assert got.get("capability") is None, got
+    assert blocker == "", blocker
 
 
 def test_capability_login_channel_with_workflow_stays_unknown(set_level, monkeypatch):
