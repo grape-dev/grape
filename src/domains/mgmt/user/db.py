@@ -568,6 +568,10 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     bot_username TEXT DEFAULT '',
     host_user_id TEXT DEFAULT '',         -- Issue #372: 路径 B 托管用户 ID（无全局 bot token 时；UUID TEXT，D105 后恒 str，''=未配置）
     webhook_secret TEXT DEFAULT '',       -- Issue #372: webhook 验证密钥（与 token 解耦）
+    -- Issue #4241：托管/修复成功时实际注册到 VCS 的 hook 全路径（如
+    -- https://grape.example.com/webhook/gitcode）。漂移判定基线：与当前权威
+    -- get_webhook_url() 前缀不一致即 webhook_stale；存量行空值=unknown（不误报）。
+    webhook_url TEXT DEFAULT '',
     is_org_repo INTEGER DEFAULT 0,         -- 组织自动 provisioning 的仓库；禁止解绑/迁移
     linked_by TEXT DEFAULT '',             -- 关联到组织的操作用户（D105 后 user id 恒 TEXT）
     linked_at TEXT DEFAULT '',             -- 关联时间
@@ -1532,12 +1536,14 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
                      bot_username: str = "", dev_scene: str = "",
                      github_webhook_token: str = "", bot_github_token: str = "",
                      org_id: str = "", host_user_id: str = "", webhook_secret: str = "",
-                     **extra_cols) -> bool:
+                     webhook_url: str = "", **extra_cols) -> bool:
     """写入仓库级托管配置（repo_key 带平台前缀，一仓库一行 upsert）。
 
     org_id > 0 时绑定到指定组织；org_id=0 时为全局（兼容旧逻辑）。
     host_user_id: Issue #372 路径 B 托管时写入当前用户 ID（无全局 bot token 场景）。
     webhook_secret: Issue #372 路径 B webhook 验证密钥（随机生成，与 token 解耦）。
+    webhook_url: Issue #4241 本次实际注册到 VCS 的 hook（全路径），作为地址漂移
+        判定基线；传空串保留存量值（未迁移库无该列时静默跳过，不阻断主写）。
     """
     from src.kernel.repo_key import to_repo_key, from_repo_key
     repo_key = to_repo_key(repo_key)
@@ -1668,6 +1674,14 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
                     c.execute(
                         "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                         (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", "", "", bot_username, "", "", org_id))
+            # Issue #4241：记录本次实际注册的 hook 地址（漂移判定基线）。独立
+            # UPDATE + 列缺失静默跳过——不改变主写语义，也不影响未迁移库。
+            if webhook_url:
+                try:
+                    c.execute("UPDATE managed_repos SET webhook_url=? WHERE repo_key=?",
+                              ((webhook_url or "").strip(), repo_key))
+                except Exception as _wu_e:
+                    log.warning(f"add_managed_repo: webhook_url write skipped ({_wu_e})")
             # S82/D98/D99/F4：grape_t_repo_credentials 单写（唯一权威；cred_type 归一
             # 值域 {'bot','webhook'}，列名/逻辑键经 _cred_type_of 归一映射，
             # N3 value 加密；upsert 两步法防 UNIQUE 冲突）。
@@ -1971,7 +1985,9 @@ def get_managed_repos(user_id: int, org_id: str = "", personal_org: bool = False
             "COALESCE(m.org_id,''), COALESCE(o.name,''), COALESCE(m.is_org_repo,0), "
             # Issue #3759：仓库级 VCS 熔断台账，供列表标红（vcs_missing）
             "COALESCE(m.vcs_status,''), COALESCE(m.vcs_missing_since,''), "
-            "COALESCE(m.vcs_last_error_code,''), COALESCE(m.vcs_next_probe_at,'') "
+            "COALESCE(m.vcs_last_error_code,''), COALESCE(m.vcs_next_probe_at,''), "
+            # Issue #4241：实际注册 hook 地址（webhook 三态判定基线）
+            "COALESCE(m.webhook_url,'') "
             "FROM managed_repos m "
             "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
             "LEFT JOIN organization o ON o.id=m.org_id "
@@ -1991,7 +2007,8 @@ def get_managed_repos(user_id: int, org_id: str = "", personal_org: bool = False
                 "bot_gitcode_token, gitcode_webhook_token, bot_username, created_at, 0, 0, "
                 "COALESCE(host_status,''), COALESCE(org_id,''), '', COALESCE(is_org_repo,0), "
                 "COALESCE(vcs_status,''), COALESCE(vcs_missing_since,''), "
-                "COALESCE(vcs_last_error_code,''), COALESCE(vcs_next_probe_at,'') "
+                "COALESCE(vcs_last_error_code,''), COALESCE(vcs_next_probe_at,''), "
+                "COALESCE(webhook_url,'') "
                 "FROM managed_repos ORDER BY full_name")
         rows = c.fetchall()
         # autocommit=False 下 SELECT 会打开事务，同线程连接后续 SELECT 看到旧快照。
@@ -2013,6 +2030,8 @@ def get_managed_repos(user_id: int, org_id: str = "", personal_org: bool = False
             "vcs_missing_since": (r[16] or "") if len(r) > 16 else "",
             "vcs_last_error_code": (r[17] or "") if len(r) > 17 else "",
             "vcs_next_probe_at": (r[18] or "") if len(r) > 18 else "",
+            # Issue #4241：实际注册 hook 地址（空=存量未回填，判 unknown 不误报）
+            "webhook_url": (r[19] or "") if len(r) > 19 else "",
         } for r in rows]
 
 
@@ -2136,7 +2155,10 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
         _warning = "webhook 重建失败，请到仓库页执行重检修复"
     # 统一入口：写 token + 清 host_user_id + 清 webhook_secret + 写 webhook_id
     _update_repo_bot_token(repo_key, bot_token, provider,
-                           webhook_token=bot_token, webhook_id=_new_hook_id)
+                           webhook_token=bot_token, webhook_id=_new_hook_id,
+                           # Issue #4241：重建成功时同步记录实际注册地址，供漂移判定
+                           webhook_url=(_webhook_url_for_provider(get_webhook_url(), provider)
+                                        if _new_hook_id else ""))
     return {"ok": True, "warning": _warning, "related_repos": _related_repos}
 
 
@@ -3017,7 +3039,8 @@ def _query_path_b_repos(provider: str = "gitcode") -> list[dict]:
         return []
 
 def _update_repo_bot_token(repo_key: str, bot_token: str, provider: str = "gitcode",
-                           webhook_token: str = "", webhook_id: str = ""):
+                           webhook_token: str = "", webhook_id: str = "",
+                           webhook_url: str = ""):
     """Issue #372 §13.2: 写入 managed_repos 的 bot token 字段（路径 B → A 升级用）。
 
     写入后 get_repo_token_with_refresh 第 2 步自动命中，pipeline 切路径 A。
@@ -3099,6 +3122,14 @@ def _update_repo_bot_token(repo_key: str, bot_token: str, provider: str = "gitco
                             + " WHERE repo_key=?", (repo_key,))
                 except Exception as _be:
                     log.warning(f"_update_repo_bot_token: legacy column blank-out skipped ({_be})")
+            # Issue #4241：记录本次重建实际注册的 hook 地址（漂移判定基线）；
+            # 列缺失（未迁移库）时跳过，不阻断 token 主写。
+            if webhook_url:
+                try:
+                    c.execute("UPDATE managed_repos SET webhook_url=? WHERE repo_key=?",
+                              ((webhook_url or "").strip(), repo_key))
+                except Exception as _wu_e:
+                    log.warning(f"_update_repo_bot_token: webhook_url write skipped ({_wu_e})")
             _mg_db.commit()
     except Exception as e:
         log.warning(f"_update_repo_bot_token: update failed: {e}")
@@ -3172,7 +3203,9 @@ def auto_upgrade_path_b_repos(provider: str, bot_token: str, bot_username: str):
                 setattr(auto_upgrade_path_b_repos, '_webhook_rebuild_failed', _webhook_rebuild_failed)
             else:
                 _update_repo_bot_token(_rk, bot_token, provider,
-                                       webhook_token=bot_token, webhook_id=_new_hook_id)
+                                       webhook_token=bot_token, webhook_id=_new_hook_id,
+                                       # Issue #4241：同步记录实际注册地址
+                                       webhook_url=_webhook_url_for_provider(get_webhook_url(), provider))
                 upgraded += 1
             # 限流保护：每次邀请间隔 1 秒
             time.sleep(1)
@@ -3515,23 +3548,129 @@ def get_webhook_url() -> str:
       `webhook_path` 追加**（`/webhook/gitcode`、`/webhook/gitlab` …），所以值里带的
       `/webhook/xxx` 会被 `_webhook_url_for_provider` 丢弃——填 `https://x/webhook/gitcode`
       与填 `https://x` 等价。
-    - 读取优先级：configs/server-config.json → meta.webhook_url → 空串。
+    - 读取优先级（Issue #4241 收敛为单一事实源）：meta.webhook_url →（为空时）
+      configs/server-config.json 作**种子**播种进 meta 并返回 → 空串。
+      运行时权威是 DB meta（可在线修改、多进程一致）；server-config.json 只在
+      meta 为空时提供一次初始值，避免「文件与 DB 双源漂移」导致 webhook 状态误判。
       不设 localhost 兜底，让 repos.py「未配置即拒（422）」的守卫生效。
     - 与 `get_server_base_url()` 同一事实的两个键：后者优先 server_base_url、并会把本键
       剥掉 `/webhook/*` 后缀使用；两个键目前并存（合并成单一键会影响 6 个读取点与自动探测
       落库路径，2026-11-15 裁定暂不合并，只在本注释与配置示例里写明口径）。
     """
+    global _WEBHOOK_URL_SEEDED
     try:
-        from src.kernel.config import read_server_config
-        _wh = (read_server_config().get("webhook_url") or "").strip()
+        _wh = (get_meta_value("webhook_url") or "").strip()
         if _wh:
             return _wh
     except Exception:
         pass
+    # meta 为空 → server-config.json 仅作一次性种子（播种后即成为权威，文件不再参与判定）
     try:
-        return (get_meta_value("webhook_url") or "").strip()
+        from src.kernel.config import read_server_config
+        _seed = (read_server_config().get("webhook_url") or "").strip()
+        if _seed:
+            if not _WEBHOOK_URL_SEEDED:
+                _WEBHOOK_URL_SEEDED = True
+                try:
+                    set_meta_value("webhook_url", _seed)
+                    log.info("get_webhook_url: seeded meta.webhook_url from server-config.json")
+                except Exception as _se:
+                    log.warning(f"get_webhook_url: seed meta.webhook_url failed: {_se}")
+            return _seed
     except Exception:
+        pass
+    return ""
+
+
+# 进程内一次性播种标记（meta 已写入后即不再写；重跑无副作用）
+_WEBHOOK_URL_SEEDED = False
+
+
+def normalize_webhook_address(url: str) -> str:
+    """比对用地址归一化：scheme/host 小写、去尾斜杠、丢弃默认端口与 query/fragment。
+
+    Issue #4241：漂移判定只比「协议 + 主机 + 路径前缀」，避免尾斜杠/大小写/
+    查询串差异造成误报。
+    """
+    import urllib.parse as _up
+    _raw = (url or "").strip()
+    if not _raw:
         return ""
+    try:
+        _u = _up.urlsplit(_raw)
+    except Exception:
+        return _raw.rstrip("/").lower()
+    if not _u.scheme or not _u.netloc:
+        return _raw.rstrip("/").lower()
+    _scheme = _u.scheme.lower()
+    _netloc = _u.netloc.lower()
+    # 默认端口归一（https:443 / http:80 与省略端口等价）
+    if (_scheme == "https" and _netloc.endswith(":443")) or \
+            (_scheme == "http" and _netloc.endswith(":80")):
+        _netloc = _netloc.rsplit(":", 1)[0]
+    _path = (_u.path or "").rstrip("/")
+    return f"{_scheme}://{_netloc}{_path}"
+
+
+def webhook_state_for_row(webhook_id: int, registered_url: str,
+                          authority_url: str = "") -> str:
+    """Issue #4241 三态判定（纯函数，零远程调用）：ok / stale / absent / unknown。
+
+    - absent：webhook_id 为空/0（从未建立 hook）
+    - unknown：已建 hook 但落盘地址为空（存量行）或权威地址未配置——无判据，不误报 stale
+    - stale：落盘地址与权威地址前缀不一致（地址漂移，实际投递大概率已坏）
+    - ok：落盘地址与权威地址一致（含 hook 全路径 == 权威基址 + 平台路径）
+    """
+    try:
+        _hid = int(webhook_id or 0)
+    except (TypeError, ValueError):
+        _hid = 0
+    if _hid <= 0:
+        return "absent"
+    _registered = normalize_webhook_address(registered_url)
+    if not _registered:
+        return "unknown"
+    _authority = normalize_webhook_address(authority_url if authority_url
+                                           else get_webhook_url())
+    if not _authority:
+        return "unknown"
+    if _registered == _authority or _registered.startswith(_authority + "/"):
+        return "ok"
+    return "stale"
+
+
+def get_managed_webhook_url(repo_key: str) -> str:
+    """读仓库行落盘的「实际注册 hook 地址」（Issue #4241）。"""
+    from src.kernel.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    try:
+        with db_lock:
+            c = _mg_db.cursor()
+            c.execute("SELECT COALESCE(webhook_url,'') FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+            return (row[0] or "") if row else ""
+    except Exception as e:
+        log.warning(f"Get managed webhook url failed: {e}")
+        return ""
+
+
+def webhook_state(repo_key: str) -> str:
+    """Issue #4241：仓库 webhook 三态（ok/stale/absent/unknown），纯本地判定。"""
+    from src.kernel.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    try:
+        with db_lock:
+            c = _mg_db.cursor()
+            c.execute("SELECT webhook_id, COALESCE(webhook_url,'') FROM managed_repos "
+                      "WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+    except Exception as e:
+        log.warning(f"webhook_state: read failed for {repo_key}: {e}")
+        return "unknown"
+    if not row:
+        return "absent"
+    return webhook_state_for_row(row[0], row[1], get_webhook_url())
+
 
 def detect_webhook_from_host(host: str, forwarded_host: str = "", forwarded_proto: str = "") -> str:
     """Issue #372 §14.2.2: 从入站请求头推导 webhook_url。

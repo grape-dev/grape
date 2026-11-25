@@ -6285,6 +6285,17 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
     return _impl(user_id, org_id, personal_org)
 
 
+def webhook_state(repo_key: str) -> str:
+    """仓库 webhook 三态（Issue #4241）：ok / stale / absent / unknown。
+
+    纯本地判定（落盘注册地址 vs 当前权威 get_webhook_url 前缀），零远程调用——
+    insight 域仪表盘健康检查经此取值，不直连 managed_repos。
+    """
+    from src.domains.mgmt.user.db import webhook_state as _impl
+
+    return _impl(repo_key)
+
+
 def dispatch_user_id_mode() -> str:
     """派发身份开关（off/shadow/on，默认 on）——Issue #21 第 2 步。"""
     from src.domains.mgmt.auth.dispatch_identity import current_mode

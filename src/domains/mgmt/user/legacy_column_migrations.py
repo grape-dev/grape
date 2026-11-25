@@ -37,6 +37,7 @@ _MANAGED_REPOS_LEGACY_COLUMNS = (
     ("webhook_secret", "TEXT DEFAULT ''"),
     ("bot_token_status", "TEXT DEFAULT ''"),        # R16.5.1: 过期标记
     ("host_vcs_username", "TEXT DEFAULT ''"),       # R16.5.5: 路径 B 自循环检测
+    ("webhook_url", "TEXT DEFAULT ''"),             # Issue #4241: 实际注册 hook 地址（漂移判定）
 )
 
 

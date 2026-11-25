@@ -7022,6 +7022,15 @@ def _migrate_tables():
             log.info("Added managed_repos.host_status column")
     except Exception as e:
         log.warning(f"Add managed_repos.host_status column failed: {e}")
+    # ===== Issue #4241：managed_repos.webhook_url（实际注册 hook 地址，漂移判定基线） =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "managed_repos", "webhook_url", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Added managed_repos.webhook_url column")
+    except Exception as e:
+        log.warning(f"Add managed_repos.webhook_url column failed: {e}")
     # ===== Issue #179: skill 表加 category_id 列（老库升级） =====
     try:
         with db_lock:
