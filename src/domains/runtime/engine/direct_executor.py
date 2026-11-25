@@ -457,12 +457,10 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         # Issue #1858：direct 执行同样注入三面基址（与 enqueue/重派/worker 同源）。
         **resolve_task_server_env(runtime_id),
     }
-    # Issue #94（weekly-09）的「exec_account 带平台前缀全名，naive split 会得到
-    # gitcode:<owner>」问题已由上面的 derive_repo_identity 统一覆盖（它与入队
-    # 484/2829/3134 同一入口、同样剥 provider 前缀）。**不要**再在此处用
-    # `split_owner_repo(exec_account or repository)` 覆盖 REPO_OWNER/REPO_NAME——
-    # 那会把触发人账号（exec_account）当成仓库 owner（Issue #1660 回归，反馈 2874）；
-    # 该覆盖块由 #2157 合并基线时带入，已按 #1660 口径删除。
+    # Issue #4363（承接 #1660）：仓库身份只认 derive_repo_identity 同源派生结果，
+    # **不得**再用 exec_account（触发人账号或带前缀全名）二次 split 覆盖——exec_account
+    # 是个人登录名（无 `/`）时 split 得 owner=<触发人>、name=""，正是「REPO_OWNER 有值、
+    # REPO_NAME 为空」的派发侧根因。Issue #94 的前缀剥离已由 derive 的 from_repo_key 统一处理。
     # base 侧 #3482-rebase 移植：env 供 agent 复述/脱敏定位（与 worker 口径一致）
     env_extra["REPO_KEY"] = repo_key or repository
 

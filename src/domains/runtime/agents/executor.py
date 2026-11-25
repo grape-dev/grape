@@ -838,19 +838,13 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
             log.info(f"{label}chat task: user token present (len={len(user_token)}), NOT injecting into env (P2)")
         else:
             log.warning(f"{label}NO user platform token available for chat; VCS ops go through grape CLI + session token")
-        # chat env 兜底（Issue #1757）：仅补缺失键，env_extra 显式值优先，绝不覆盖。
+        # chat env 兜底（Issue #1757 / #4363）：仅补缺失键，env_extra 显式值优先，绝不覆盖。
         # Issue #1757 复审：仓库身份统一走 derive_repo_identity（与 chat_repo_env / 事件链同源），
         # 不再自己调 split_owner_repo，避免两份派生逻辑漂移。
-        if repo_key and not repo_key.startswith("chat:") and "REPO_OWNER" not in env:
-            try:
-                from src.kernel.repo_key import derive_repo_identity
-                full_name, owner, name = derive_repo_identity(repo_key, repo_key)
-                if owner and name:
-                    env.setdefault("REPO_FULL_NAME", full_name or repo_key)
-                    env.setdefault("REPO_OWNER", owner)
-                    env.setdefault("REPO_NAME", name)
-            except Exception as e:
-                log.warning(f"{label}chat env fallback repo split failed: {e}")
+        # Issue #4363：逐变量 setdefault 补齐，不再以「REPO_OWNER 是否存在」为整块闸门
+        # （OWNER 有值、NAME 缺失时旧闸门整块跳过，runbook 的 --repo "$REPO_NAME" 全空）。
+        if repo_key and not repo_key.startswith("chat:"):
+            _fill_repo_identity_env(env, repo_key=repo_key, label=label)
         if "GRAPE_SERVER_URL" not in env:
             try:
                 from src.kernel.prompt_builder import _local_port
@@ -906,12 +900,16 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
             else:
                 log.warning(f"Failed to inject user credentials: {e}")
 
-# ── 运行时环境变量注入契约（Issue #2395）──────────────────────────────────
-# 四个变量在 VOD/Issue/Coding/QA 各引擎路径必须口径一致：
+# ── 运行时环境变量注入契约（Issue #2395 / #4363）──────────────────────────
+# 变量在 VOD/Issue/Coding/QA 各引擎路径必须口径一致：
 #   DEVOPS_EVENT_TYPE  真实事件类型（唯一口径 = executor.stream_agent 的 event_type 参数）
 #   ACCOUNT            触发人账号（不是仓库名/仓库全名，历史 Issue #1746）
 #   GRAPE_ISSUE_ID     平台内部需求卡片 id（issue 表主键，历史 Issue #667；≠ ISSUE_NUMBER）
 #   GRAPE_WORK_BRANCH  场景开发基线分支（服务端场景/Issue 快照解析，历史 Issue #2322）
+#   REPO_FULL_NAME/REPO_OWNER/REPO_NAME  仓库身份三元组（Issue #4363）：runbook 的
+#     --repo "$REPO_NAME" 依赖此三元组，缺失会让技能命令整条失效。三者由
+#     derive_repo_identity 同源派生（REPO_FULL_NAME 权威、缺失回退 repo_key），
+#     逐变量补齐（不得以「REPO_OWNER 是否存在」代表三者齐备）。
 # 各引擎 get_env() 不再预置空串；任务级 env_extra 合并后由本函数统一补齐/覆盖，
 # 缺失时输出可诊断告警（仅变量名与引擎标识，不打印值），并降级继续执行不阻断任务。
 _RUNTIME_CONTRACT_ENV = (
@@ -919,6 +917,9 @@ _RUNTIME_CONTRACT_ENV = (
     "ACCOUNT",
     "GRAPE_ISSUE_ID",
     "GRAPE_WORK_BRANCH",
+    "REPO_FULL_NAME",
+    "REPO_OWNER",
+    "REPO_NAME",
 )
 
 # Issue #3905：issue 任务的三变量（DEVOPS_EVENT_TYPE 恒有值，不参与「全缺」判定）
@@ -1010,11 +1011,44 @@ def _runtime_contract_scope(env: dict, event_type: str) -> tuple:
         return ("DEVOPS_EVENT_TYPE", "ACCOUNT")
     return _RUNTIME_CONTRACT_ENV
 
+# 仓库身份三元组：唯一事实源是 REPO_FULL_NAME（缺失回退 repo_key），三者同源派生。
+_REPO_IDENTITY_ENV = ("REPO_FULL_NAME", "REPO_OWNER", "REPO_NAME")
+
+
+def _fill_repo_identity_env(env: dict, *, repo_key: str = "", label: str = "",
+                            backend_name: str = "") -> None:
+    """逐变量补齐仓库身份三元组（Issue #4363）。
+
+    旧实现（chat 兜底块）以「REPO_OWNER 是否存在」作为整块闸门：OWNER 已注入而
+    REPO_NAME 缺失时整块直接跳过，三变量一次都不补，导致 runbook 的
+    `--repo "$REPO_NAME"` 全为空。此处改为**逐变量**判据：任一缺失即由
+    derive_repo_identity 派生（REPO_FULL_NAME 优先，缺失回退 repo_key），仅补
+    缺失键、不覆盖 env_extra 的显式值，保证 REPO_FULL_NAME == REPO_OWNER/REPO_NAME。
+    """
+    if all((env.get(k) or "").strip() for k in _REPO_IDENTITY_ENV):
+        return
+    rk = (repo_key or "").strip()
+    if rk.startswith("chat:"):
+        return
+    repository = (env.get("REPO_FULL_NAME") or "").strip()
+    if not repository and not rk:
+        return
+    try:
+        from src.kernel.repo_key import derive_repo_identity
+        full_name, owner, name = derive_repo_identity(repository, rk)
+    except Exception as e:
+        log.warning(f"{label}runtime env contract: repo identity derive failed "
+                    f"(backend={backend_name or '-'}): {e}")
+        return
+    for key, value in zip(_REPO_IDENTITY_ENV, (full_name, owner, name)):
+        if value and not (env.get(key) or "").strip():
+            env[key] = value
+
 
 def _apply_runtime_env_contract(env: dict, *, event_type: str = "", account: str = "",
                                 repo_key: str = "", label: str = "",
                                 backend_name: str = "") -> dict:
-    """任务级 env 合并后统一补齐运行时契约四变量（Issue #2395）。
+    """任务级 env 合并后统一补齐运行时契约变量（Issue #2395 / #4363）。
 
     - DEVOPS_EVENT_TYPE 以本次真实 event_type 为权威值（覆盖 env_extra 中的空串/旧值）；
     - ACCOUNT 缺失时回退调用方 account，但拒绝把仓库标识（含 `/`/`:`）误当账号；
@@ -1022,7 +1056,9 @@ def _apply_runtime_env_contract(env: dict, *, event_type: str = "", account: str
       语义与 ISSUE_NUMBER 区分：前者是 issue 表主键，后者是仓库 Issue 编号；
     - GRAPE_WORK_BRANCH 缺失时回退场景配置（与 event_pipeline 同源）：回退查询按
       **仓库 Issue 编号**（ISSUE_NUMBER）索引 issue 表，不得用内部卡片 id（GRAPE_ISSUE_ID）——
-      后者是 issue 表主键，命中恒错键会让场景回退恒空。
+      后者是 issue 表主键，命中恒错键会让场景回退恒空；
+    - REPO_FULL_NAME/REPO_OWNER/REPO_NAME 逐变量 setdefault 补齐（derive_repo_identity
+      同源派生，不再以 REPO_OWNER 存在性为整块闸门）。
     任一必需变量仍缺失 → WARNING（只列变量名 + 引擎/agent 标签，不打印值），不阻断；
     Issue #3905：非 Issue 域任务（autopilot / chat）只校验 DEVOPS_EVENT_TYPE + ACCOUNT
     （见 ``_runtime_contract_scope``），缺失同时进结构化指标，连续三变量全缺升级 ERROR。
@@ -1056,8 +1092,22 @@ def _apply_runtime_env_contract(env: dict, *, event_type: str = "", account: str
         except Exception as exc:
             log.warning(f"{label}runtime env contract: GRAPE_WORK_BRANCH resolve failed "
                         f"(backend={backend_name or '-'}): {exc}")
+    # Issue #4363：仓库身份三变量逐变量补齐（同源 derive_repo_identity），
+    # 不覆盖 env_extra 显式值——修「OWNER 有值、NAME 缺失时整块跳过」的闸门漏洞。
+    _fill_repo_identity_env(env, repo_key=repo_key, label=label,
+                            backend_name=backend_name)
     _scope = _runtime_contract_scope(env, event_type)
-    missing = [name for name in _scope if not (env.get(name) or "").strip()]
+    # 仓库三变量只在存在仓库上下文时视为必需：无仓库的通用 chat 任务不注入仓库身份
+    # 属正常，不能刷 contract missing 噪声（「补齐失败才告警」）。
+    _has_repo_context = bool(
+        any((env.get(k) or "").strip() for k in _REPO_IDENTITY_ENV)
+        or ((repo_key or "").strip() and not (repo_key or "").strip().startswith("chat:"))
+    )
+    missing = [
+        name for name in _scope
+        if not (env.get(name) or "").strip()
+        and not (name in _REPO_IDENTITY_ENV and not _has_repo_context)
+    ]
     if missing:
         log.warning(f"{label}runtime env contract missing: {','.join(missing)} "
                     f"(backend={backend_name or '-'}); task continues with degraded env")
