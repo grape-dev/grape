@@ -29,7 +29,7 @@ from lark_oapi.ws.enum import FrameType, MessageType
 
 from ...channel.channel import (
     CancelContext, Channel, ChannelConfig, ChannelError,
-    ChannelRegistrationConflict, PermanentChannelError,
+    ChannelRegistrationConflict, ChannelWsClosed, PermanentChannelError,
 )
 from ...channel.capability import Capability
 from ...channel.message import InboundMessage, OutboundMessage, SendResult
@@ -78,15 +78,22 @@ def _ws_close_code(exc: BaseException) -> Optional[int]:
 
 
 def _ws_failure(app_id: str, exc: BaseException) -> ChannelError:
-    """传输层异常 → 契约异常：3001 归为并发注册冲突，其余为普通链路失败。
+    """传输层异常 → 契约异常：3001 归为并发注册冲突，带关闭码的归为 WS 关闭，其余为普通链路失败。
 
     保留原始异常在 cause 链（``raise ... from exc``），真实 bug 仍可排查。
+    Issue #3795：携带关闭码（飞书 3003 ping timeout 等）的关闭不再降格成无码 ChannelError，
+    由 Supervisor 按 ``ws_close_<code>`` 归因 —— 否则看板上「服务端主动关闭」与
+    「网络抖动」不可区分。
     """
     code = _ws_close_code(exc)
     if code in REGISTER_CONFLICT_CLOSE_CODES:
         return ChannelRegistrationConflict(
             f"feishu ws register conflict: app={app_id} close_code={code} ({exc})")
-    return ChannelError(f"feishu ws failed: app={app_id} close_code={code} ({exc!r})")
+    if code is None:
+        return ChannelError(f"feishu ws failed: app={app_id} ({exc!r})")
+    return ChannelWsClosed(
+        f"feishu ws failed: app={app_id} ws closed code={code} ({exc!r})",
+        close_code=code)
 
 
 # 解析/帧辅助（原 feishu_async.py 抽出，见专题当前无 legacy 依赖）；
