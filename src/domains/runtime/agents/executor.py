@@ -357,9 +357,14 @@ def terminate_active_agents(grace_seconds: int = 5):
                         # 对齐 event_pipeline._fail_event 语义；终态保护天然幂等（双主安全）。
                         # rebase 融合注：reason 用 _SHUTDOWN_EVENT_REASON（上游 #2337 文案；
                         # 原 cherry-pick 版引用过未定义的 _reason，此处修正）。
-                        update_event_complete(event_seq, "failed", exit_code=-1,
-                                              completed_at=_now,
-                                              result=_SHUTDOWN_EVENT_REASON[:200])
+                        from src.domains.runtime.agents.failure_info import build_failure_info
+                        update_event_complete(
+                            event_seq, "failed", exit_code=-1,
+                            completed_at=_now,
+                            result=_SHUTDOWN_EVENT_REASON[:200],
+                            failure_info=build_failure_info(
+                                error_type="ServiceShutdown", phase="terminated",
+                                message=_SHUTDOWN_EVENT_REASON, exit_code=-1))
                     # Step 1：统一释放 busy 槽（不漏槽，防止重启累积卡死队列）
                     if runtime_id:
                         try:

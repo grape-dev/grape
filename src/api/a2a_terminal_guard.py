@@ -141,6 +141,8 @@ def extract_carrier_pr_numbers(*texts) -> list[int]:
             try:
                 num = int(m.group(1))
             except (TypeError, ValueError):
+                # 坏条目跳过不炸列表（同 issue_vcs_index 解析族），留 debug 痕迹可定位脏数据。
+                log.debug(f"a2a-terminal-guard: carrier PR number parse skipped: {m.group(0)!r}")
                 continue
             if num > 0 and num not in out:
                 out.append(num)

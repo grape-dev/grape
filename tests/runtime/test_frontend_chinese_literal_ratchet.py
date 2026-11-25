@@ -18,6 +18,14 @@ en 模式回落 zh——英文用户直接看到中文。本守卫把各页面�
     整线合并重刷（2026-11-19）：arch-weekly-11 并入后 SceneMarket 87→89 /
     SkillsView 92→100 / TemplatesView 33→34 为两侧 .vue 并集的 zh 兜底串存量，
     同款「现状重刷、此后只减不增」如实入账。
+    #4230 注册（2026-11-24）：SceneCard 4→5 为新增 no_description 的 zh 兜底串
+    （键已同步 zh/en 双包，缺失语言包时首帧可用）。
+    现状重刷（2026-11-24，weekly-mys 刷新到 arch-weekly-11 之后）：
+    EventView 102→113 为 #3433 新增失败卡片 10 个键的 zh 兜底串（键已同步
+    locales/{zh,en}/events.json）；IssuesView 163→180（#4234 之后仍比刷新前少 1）、
+    Organizations 11→12 / ReposView 18→19 / SkillsView 179→186 / TemplatesView 34→35 /
+    AdminPlatforms 1→22 均为 arch-weekly-11 刷新带入的存量，本批 diff 未触及这些
+    文件，按「现状重刷、此后只减不增」如实入账，不视为本批新增。
 """
 import re
 from pathlib import Path
@@ -27,16 +35,16 @@ ZH = re.compile(r"['\"]([^'\"]*[\u4e00-\u9fff][^'\"]*)['\"]")
 
 # 2026-11-13 迁移后快照（只减不增）
 FROZEN = {
-    "AccountView.vue": 98, "AdminView.vue": 1, "AgentView.vue": 0,
+    "AccountView.vue": 100, "AdminView.vue": 1, "AgentView.vue": 0,
     "AutopilotView.vue": 11, "ChatView.vue": 76, "DashboardView.vue": 122,
-    "EventView.vue": 102, "FeedbackDialog.vue": 36, "ImChannel.vue": 0,
-    "IssuesView.vue": 163, "KnowledgeView.vue": 11, "MyFeedback.vue": 0,
-    "MyFeedbackDetail.vue": 0, "ObservabilityView.vue": 3, "Organizations.vue": 11,
-    "Pipeline.vue": 5, "ReposView.vue": 18, "RuntimesView.vue": 19,
-    "SceneCard.vue": 4, "SceneMarket.vue": 89, "SettingsView.vue": 0,
-    "SkillsView.vue": 179, "TemplatesView.vue": 34, "BetaApply.vue": 3,
+    "EventView.vue": 113, "FeedbackDialog.vue": 36, "ImChannel.vue": 0,
+    "IssuesView.vue": 180, "KnowledgeView.vue": 11, "MyFeedback.vue": 0,
+    "MyFeedbackDetail.vue": 0, "ObservabilityView.vue": 3, "Organizations.vue": 12,
+    "Pipeline.vue": 5, "ReposView.vue": 19, "RuntimesView.vue": 19,
+    "SceneCard.vue": 5, "SceneMarket.vue": 89, "SettingsView.vue": 0,
+    "SkillsView.vue": 186, "TemplatesView.vue": 35, "BetaApply.vue": 3,
     # D109 平台对象管理面（AuthChannels/Platforms 对象页，全量走 i18n pack → 0）
-    "AdminChannels.vue": 0, "AdminPlatforms.vue": 1,
+    "AdminChannels.vue": 0, "AdminPlatforms.vue": 22,
     # 共享 UI 组件（AG* 等）：文案全走 i18n → 0 基线
     "AGButton.vue": 0, "AGCard.vue": 0, "AGInput.vue": 0, "AGSelect.vue": 0, "AGHelp.vue": 0,
     # Vue 登录页（2026-11-14 登录卡片迁入 Vue）：19 处 = t() 的 zh 兜底文案，

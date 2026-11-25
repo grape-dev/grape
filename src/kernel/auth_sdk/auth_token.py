@@ -80,7 +80,12 @@ def verify_session_token_for_repo(token: str, repo_key: str) -> dict | None:
     info = verify_session_token(token)
     if not info or not repo_key:
         return None
-    if info.get("repo_key") and info["repo_key"] == repo_key:
+    if not info.get("repo_key"):
+        return None
+    # Issue #3397：仓库作用域按大小写不敏感比对——会话签发时 repo_key 可能固化为
+    # 小写，而调用方使用 VCS 实际大小写路径，精确相等会把同一仓库误判为 403。
+    from src.kernel.repo_key import same_repo_key
+    if same_repo_key(info["repo_key"], repo_key):
         return info
     return None
 

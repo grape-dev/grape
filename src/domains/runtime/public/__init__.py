@@ -6478,6 +6478,18 @@ def runtime_status_healthy(runtime_id) -> tuple | None:
         return c.fetchone()
 
 
+def runtime_health_row(runtime_id) -> tuple | None:
+    """Issue #3508：引擎健康判定所需最小行
+    (display_name, name, credential_id, status, healthy, installed, last_seen_at)；
+    行不存在返回 None。口径与 engine_health_ok 入参一致（mgmt 侧
+    scenes engine-status 据此派生 reachability/health_score 结构化条目）。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT display_name, name, credential_id, status, healthy, installed, last_seen_at "
+            "FROM agent_runtimes WHERE id=?", (runtime_id,))
+        return c.fetchone()
+
+
 def devops_session_runtime_id(repo_key: str, agent_type: str) -> str:
     """仓库×代理类型绑定的引擎 id（无则空串）。"""
     with _any_cursor() as c:
@@ -7417,6 +7429,14 @@ def explain_engine_selection(repo_key: str, agent_type: str, scene_id: str = "",
     return _impl(repo_key, agent_type, scene_id, user_id, issue_creator)
 
 
+def engine_health_ok(credential_id, status, healthy, installed, last_seen_at,
+                     stale_seconds: int | None = None) -> bool:
+    """引擎可达性判定的唯一真源（供 mgmt 只读消费，Issue #3508）。"""
+    from src.domains.runtime.engine.health import engine_health_ok as _impl
+
+    return _impl(credential_id, status, healthy, installed, last_seen_at, stale_seconds)
+
+
 def derive_runtime_health(status: str, last_seen_at: str | None,
                           now: float | None = None) -> str:
     """在线态派生的唯一入口（status 为 agent_runtimes 在线态真源）。"""
@@ -7722,11 +7742,16 @@ def usage_payload(u: dict, engine: str = "") -> dict:
 _usage_payload = usage_payload
 
 
-def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
-    """runtime 健康分（缺省走 TTL 缓存）。"""
+def get_health_score(runtime_id: int, force_refresh: bool = False,
+                     allow_compute: bool = True) -> dict:
+    """runtime 健康分（缺省走 TTL 缓存）。
+
+    allow_compute=False 供 mgmt 只读消费（Issue #3508）：查询路径不现算落表，
+    避免 GET 请求向 runtime_health_scores 写脏行。
+    """
     from src.domains.runtime.engine.health_scorer import get_health_score as _impl
 
-    return _impl(runtime_id, force_refresh)
+    return _impl(runtime_id, force_refresh, allow_compute)
 
 
 def reset_health(runtime_id: int) -> dict | None:

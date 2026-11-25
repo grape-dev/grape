@@ -358,6 +358,13 @@ def test_parse_issue_workdir(repo, ws):
     assert wg.parse_issue_workdir(os.path.join(ws, "owner", "repo"), ws) == ("", "", "")
     assert wg.parse_issue_workdir(os.path.join(ws, "gitcode", "owner", "repo",
                                                "issues", "14", "vod"), ws) == ("", "", "")
+    # Issue #3375：同 Issue 多 PR / issue-less PR 目录也可解析
+    assert wg.parse_issue_workdir(
+        os.path.join(ws, "gitcode", "owner", "repo", "issues", "12", "pr-7", "coding"),
+        ws) == (repo, "12", "coding")
+    assert wg.parse_issue_workdir(
+        os.path.join(ws, "gitcode", "owner", "repo", "prs", "452", "qa"),
+        ws) == (repo, "452", "qa")
 
 
 def test_guard_issue_workdir_removal_archives_then_allows(repo, ws):

@@ -22,7 +22,7 @@ import pytest
 SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
 LOCALES = SHELL / "locales"
 
-LOCALE_FINGERPRINT = 'd01bb044011597a3'
+LOCALE_FINGERPRINT = 'dd0aaf9c89fa88d7'
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {

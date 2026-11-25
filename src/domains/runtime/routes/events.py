@@ -8,6 +8,12 @@ from src.kernel.config import log
 from src.kernel.issue_ident import native_issue_number  # Issue #3055
 
 
+def _task_pr_number(task) -> str:
+    """任务行上的 PR 号（Issue #3375）：从 env_extra 快照解析，供 cwd 重算使用。"""
+    from src.kernel.pr_scope import pr_number_from_env_extra
+    return pr_number_from_env_extra((task or {}).get("env_extra"))
+
+
 class _OwnedCursor:
     """自带连接的游标：close 时把连接一并关掉。"""
 
@@ -207,13 +213,17 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     db = _rt_db
     with db_lock:
         c = db.cursor()
-        try:
-            c.execute(
-                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, runtime, skill, exit_code, duration, agent_logs, started_at, completed_at, result, structured_output, scene_id FROM events WHERE seq=?",
-                (seq,))
-            row = c.fetchone()
-        except Exception:
-            row = None
+        _base_cols = ("seq, repo_key, issue_id, event_type, source, agent_type, title, actor, "
+                      "summary, payload, status, created_at, runtime, skill, exit_code, duration, "
+                      "agent_logs, started_at, completed_at, result, structured_output, scene_id")
+        # Issue #3433：按列名探测决定是否选 failure_info（历史库/未迁移库无该列），
+        # 仅缺列降级，其他 DB 错误不吞并（交由调用方按真实错误处理）。
+        from src.api.event_store import _events_column_exists
+        _has_failure_info = _events_column_exists(c, "failure_info")
+        _select_cols = _base_cols + (", failure_info" if _has_failure_info else "")
+        c.execute(f"SELECT {_select_cols} FROM events WHERE seq=?", (seq,))
+        row = c.fetchone()
+        _col_names = [d[0] for d in (c.description or [])]
 
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到"})
@@ -258,6 +268,17 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
         "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
+    # Issue #3433：结构化失败原因（历史事件/未迁移库缺列时降级为 null）。
+    # 用 cursor.description 列名定位，避免 SELECT 列序变动导致静默取空/取错列。
+    _failure_info = None
+    _failure_idx = _col_names.index("failure_info") if "failure_info" in _col_names else -1
+    if _has_failure_info and _failure_idx >= 0 and _failure_idx < len(row) and row[_failure_idx]:
+        try:
+            from src.domains.runtime.agents.failure_info import parse_failure_info
+            _failure_info = parse_failure_info(row[_failure_idx]) or None
+        except Exception:
+            _failure_info = None
+    result["failure_info"] = _failure_info
     # Issue #574：Skill 展示改 display_name（与场景选择处同款查询条件；display_name 为空时前端回退 Skill ID）
     _skill_display_name = ""
     try:
@@ -772,7 +793,13 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     # 3) 事件状态回写 failed（兜底，fail_task/cancel_task 已处理但再确认一次）
     # Issue #476：显式 reason，避免 terminate 产生空 result 无头失败
     try:
-        update_event_status(seq, "failed", result="用户手动终止事件（terminate）")
+        from src.domains.runtime.agents.failure_info import build_failure_info
+        _terminate_reason = "用户手动终止事件（terminate）"
+        update_event_status(
+            seq, "failed", result=_terminate_reason,
+            failure_info=build_failure_info(
+                error_type="CancelledByUser", phase="cancelled",
+                message=_terminate_reason))
     except Exception as e:
         log.warning(f"Event terminate: update_event_status failed: {e}")
 
@@ -1123,6 +1150,46 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
     except Exception as _e:
         log.warning(f"[redispatch] ledger/skip check failed (allow-through): {_e}")
 
+    # 1.0b）Issue #4088：评论族事件重派的派发幂等守卫——(repo, agent, comment_id)
+    # 命中且 event_seq 不同（跨 seq 重放）→ 拒绝重派并回显命中事件 seq（该评论
+    # 已有首派事件，重复重派会再次送达同一 Agent 产生重复回执）；同 seq（本事件
+    # 自身恢复）放行。无 cid / 非评论事件不拦截。
+    try:
+        _evt_type_4088 = evt.get("event_type", "") or ""
+        from src.domains.runtime.pipeline.event_pipeline import (
+            _COMMENT_EVENT_TYPES as _comment_evt_types_4088,
+        )
+        if _evt_type_4088 in _comment_evt_types_4088:
+            _pl_4088 = evt.get("payload") or {}
+            if isinstance(_pl_4088, str):
+                try:
+                    import json as _pj4088
+                    _pl_4088 = _pj4088.loads(_pl_4088)
+                except Exception:
+                    _pl_4088 = {}
+            if isinstance(_pl_4088, dict):
+                from src.kernel.repo_key import parse_repo_key as _prk4088
+                from src.kernel.outbound_ledger import extract_event_content_id as _xid4088
+                from src.api.event_store import comment_dispatch_guard_allows_redispatch
+                _prov4088 = _prk4088(evt.get("repo_key", "") or "")[0]
+                _cid4088 = extract_event_content_id(_prov4088, _pl_4088)
+                if _cid4088:
+                    _gate4088 = comment_dispatch_guard_allows_redispatch(
+                        evt.get("repo_key", "") or "",
+                        evt.get("agent_type", "") or "", _cid4088, seq)
+                    if not _gate4088.get("allowed"):
+                        _hit4088 = int(_gate4088.get("hit_seq") or 0)
+                        log.info(f"[redispatch] seq={seq} blocked: comment_id={_cid4088} "
+                                 f"already dispatched at seq={_hit4088} (duplicate_comment_dispatch)")
+                        raise HTTPException(status_code=409, detail={"code": 409,
+                            "message": f"重复评论派发：comment_id={_cid4088} 已有派发事件 "
+                                       f"seq={_hit4088}，请改为重派该事件",
+                            "idempotent": True, "idempotent_hit_seq": _hit4088})
+    except HTTPException:
+        raise
+    except Exception as _e4088:
+        log.warning(f"[redispatch] comment dispatch guard check failed (allow-through): {_e4088}")
+
     # 1.5）onboarding 主事件重派 → 任务级自愈（Issue #46 重构后兼容）：
     #     历史 onboarding_exp/onboarding_explore 事件仍可能被 redispatch；onboarding 后端已改为「按模板创建标准任务」，
     #     旧事件映射到新任务 type（onboarding_exp→experience，onboarding_explore→dev）后走 retry_onboarding_task 补建。
@@ -1256,7 +1323,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
         try:
             from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
             _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
-                                    old.get("issue_id") or "")
+                                    old.get("issue_id") or "", _task_pr_number(old))
         except Exception:
             _cwd = old.get("cwd") or ""
         _is_local_direct = (_cid == 0)
@@ -1790,7 +1857,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
                 try:
                     from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
                     _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
-                                            old.get("issue_id") or "")
+                                            old.get("issue_id") or "", _task_pr_number(old))
                 except Exception:
                     _cwd = old.get("cwd") or ""
 
@@ -3053,15 +3120,16 @@ def list_events(owner: str, repo: str,
                       page_size: int = Query(20, ge=1, le=100),
                       status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
                       user: dict = Depends(get_current_user_or_api_key)):
-    from src.kernel.repo_key import to_repo_key, repo_key_candidates
+    from src.kernel.repo_key import to_repo_key, repo_key_candidates_ci, same_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
-    # 候选键卡派生（原写死 gitcode/github 两家 → gitee/gitlab 仓的事件恒不可见）
-    _cand = set(repo_key_candidates(f"{owner}/{repo}"))
+    # 候选键卡派生 + 仓登记实际大小写（Issue #3397：全小写路径也要命中实际大小写行）
+    _cand = set(repo_key_candidates_ci(f"{owner}/{repo}"))
 
     # tk_ 会话 token：限定其绑定仓库（防 Agent 跨仓库读事件列表）
+    # Issue #3397：token 签发写法与请求路径大小写可能不同 → 大小写不敏感比对。
     if user.get("auth_type") == "session_token":
         _tok_repo = user.get("repo_key") or ""
-        if _tok_repo and _tok_repo not in _cand:
+        if _tok_repo and not any(same_repo_key(_tok_repo, _k) for _k in _cand):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 无权访问该仓库事件"})
 
     # 权限校验：用户必须有权访问该仓库

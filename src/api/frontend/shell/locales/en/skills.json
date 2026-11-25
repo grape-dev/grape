@@ -135,6 +135,7 @@
   "all_scenes": "All Scenes",
   "all_categories": "All",
   "no_scenes": "No scenes available",
+  "no_description": "No description",
   "skills_unit": "skills",
   "repos_in_use": "repos in use",
   "no_repos_in_use": "No repos using this scene",

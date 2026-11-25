@@ -519,3 +519,43 @@ class TestLinkedRepoTokenFromEnv:
         monkeypatch.setattr("src.kernel.repo.Repo", _FakeRepo)
         wts = repogit.ensure_linked_repo_worktrees(self.LINKED, "coding", "466")
         assert wts and wts[0]["worktree_dir"] == ("gitcode:OPCTeam/HDBlogService", "tok_osenv")
+
+
+class TestPrScopedWorktree:
+    """Issue #3375：同 Issue 多 PR 派生独立分支/目录，清理链路按 PR 维度对称。"""
+
+    def test_multi_pr_derives_branch_and_dir(self):
+        wt12 = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "5",
+                                            pr_number="12")
+        wt13 = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "5",
+                                            pr_number="13")
+        assert wt12 and wt13 and wt12 != wt13
+        assert wt12.endswith(os.path.join("issues", "5", "pr-12", "coding")), wt12
+        assert wt13.endswith(os.path.join("issues", "5", "pr-13", "coding")), wt13
+        assert _git(["rev-parse", "--abbrev-ref", "HEAD"], wt12).stdout.strip() == "feat/issue-5-pr-12"
+        assert _git(["rev-parse", "--abbrev-ref", "HEAD"], wt13).stdout.strip() == "feat/issue-5-pr-13"
+
+    def test_no_pr_branch_unchanged(self):
+        wt = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "5")
+        assert _git(["rev-parse", "--abbrev-ref", "HEAD"], wt).stdout.strip() == "feat/issue-5"
+
+    def test_cleanup_pr_scoped_only_removes_target(self):
+        wt12 = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "5",
+                                            pr_number="12")
+        wt13 = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "5",
+                                            pr_number="13")
+        repogit.cleanup_issue_worktree("gitcode:owner/repo", "coding", "5",
+                                       pr_number="12")
+        assert not os.path.isdir(wt12)
+        assert os.path.isdir(wt13)
+
+    def test_cleanup_issue_less_pr_workdir(self):
+        ws = repogit.pr_workdir_dir("gitcode:owner/repo", "coding", "452")
+        os.makedirs(ws, exist_ok=True)
+        with open(os.path.join(ws, "out.txt"), "w", encoding="utf-8") as f:
+            f.write("artifact")
+        assert repogit.cleanup_pr_worktree("gitcode:owner/repo", "coding", "452")
+        assert not os.path.isdir(ws)
+
+    def test_cleanup_pr_worktree_missing_is_noop(self):
+        assert repogit.cleanup_pr_worktree("gitcode:owner/repo", "coding", "999") is False

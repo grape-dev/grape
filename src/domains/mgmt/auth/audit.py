@@ -117,6 +117,20 @@ EVENT_TYPES = frozenset({
     "skill_meta_patched",            # 技能元信息免传包更新（Issue #3202：detail 含 skill_id/更新字段名列表，不记值）
     "skill_version_created",         # 技能版本行写入（Issue #3168：detail 含 skill_id/version，上传/更新/重传共用）
     "engine_tag_change",            # 引擎角色标签写入（Issue #3396 F2：add/update/delete/set，detail 含 runtime_id/tag(s)/enabled/priority，不含凭据）
+    # C3 收口（2026-11-24 架构闸）：以下事件此前在调用点已埋 log_audit，但未登记进白名单，
+    # 一律被「Unknown audit event type」丢弃 = 写了等于没写。逐条按调用点用途登记。
+    "repos_connection_bind",        # 平台 PAT 绑定（repos.py::put_connection，写 user_repos/path A）
+    "repos_connection_clear",       # 平台 PAT 解绑（repos.py::delete_connection）
+    "repos_bot_token_bind",         # 仓库级 bot token 显式绑定（Issue #3427：PUT /{owner}/{repo}/bot-token）
+    "admin_auth_channels_saved",    # admin 保存登录渠道（admin/routes.py）
+    "admin_obs_alert_policy_updated",  # admin 更新可观测告警策略（admin/routes.py）
+    "admin_vcs_platforms_saved",    # admin 保存 VCS 平台卡（admin/platform_cards/service.py）
+    "email_change_no_secondary_factor",  # 无次要因子改邮箱（auth/email_change.py）
+    "issue_reopened_from_completed",     # 已完成需求被重新打开（runtime/routes/issues.py）
+    "placeholder_merge",            # 占位账号合并（grape_auth.py）
+    "rebind",                       # 第三方重新绑定（grape_auth.py）
+    "repo_migrate",                 # 仓库账本迁移（kernel/repo_migrate.py）
+    "scene_copy",                   # 场景复制（mgmt/routes/scenes.py）
 })
 
 

@@ -82,9 +82,9 @@ def _warning_log_messages(caplog) -> list:
     ]
 
 
-def test_missing_table_emits_single_fail_open_warning(monkeypatch, capsys, caplog):
-    """缺表场景：stderr 守卫告警 JSON 仅 1 条，含 fail_open=true，退出码 0。"""
-    caplog.set_level(logging.WARNING)
+def test_missing_table_emits_single_readable_fail_open_hint(monkeypatch, capsys, caplog):
+    """缺表场景：stderr 只有 1 条可读中文提示，退出码 0（Issue #2923 收口）。"""
+    caplog.set_level(logging.DEBUG)
     monkeypatch.setattr(sm, "db", _MissingTableDB(sm.db))
     # PR 查询（grape CLI）同时失败，凑齐 state read ×3 + PR query + state write 五类异常。
     monkeypatch.setattr(
@@ -96,15 +96,18 @@ def test_missing_table_emits_single_fail_open_warning(monkeypatch, capsys, caplo
     assert bg.hook_main([REPO_KEY]) == 0
 
     err = capsys.readouterr().err
-    payloads = _guard_warning_payloads(err)
-    assert len(payloads) == 1, err
-    payload = payloads[0]
-    assert payload["level"] == "WARNING"
-    assert payload["fail_open"] is True
-    assert payload["event"] == "branch_guard.fail_open"
-    stages = {attempt["stage"] for attempt in payload["attempts"]}
-    assert {"state_read", "pr_query", "state_write"} <= stages
-    assert len(payload["attempts"]) >= 5, payload["attempts"]
+    hint_lines = [line for line in err.splitlines() if "[branch-guard]" in line]
+    assert len(hint_lines) == 1, err
+    assert "分支基线核验暂不可用" in hint_lines[0]
+    assert "推送已放行" in hint_lines[0]
+    # 用户侧不再出现原始异常文案（Issue #2923）。
+    assert "no such table" not in err
+    assert "network down" not in err
+    # 明细保留在 debug 日志，供排障定位具体阶段。
+    debug_messages = [record.getMessage() for record in caplog.records
+                      if record.levelno == logging.DEBUG]
+    assert any("state read failed" in message for message in debug_messages)
+    assert any("PR query failed" in message for message in debug_messages)
     # 回归护栏：单点异常不得再经 log.warning 各自刷一条 WARNING（logger 名
     # devops-bot 的 JSON 不一定被 capsys 捕获），否则「stderr 仅 1 条告警」被打破。
     assert _warning_log_messages(caplog) == [], caplog.records

@@ -714,7 +714,7 @@ function openBind(provider) {
 // github/gitcode 用官方实测过的预选参数链接；其余平台取 /auth/providers 的
 // pat_create_url（来自平台卡）；都没有就不渲染按钮（宁缺勿指错站）。
 const PAT_CREATE_URLS = {
-  github: 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps',
+  github: 'https://github.com/settings/tokens/new?scopes=repo,workflow,admin:repo_hook&description=Grape%20DevOps',
   gitcode: 'https://gitcode.com/setting/token-classic/create',
 }
 function oauthOpenCenteredPopup(url) {

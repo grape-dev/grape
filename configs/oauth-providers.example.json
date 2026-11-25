@@ -70,7 +70,7 @@
     "client_secret": ""
   },
   "github": {
-    "_note": "scope 只需 read:user + user:email（登录不碰仓库写权限）。GitHub 记住授权：scope 不变则静默跳回、不弹授权页；scope 升级才重新弹。/user 默认不返回邮箱，由渠道卡 emails_endpoint 能力位补抓 /user/emails。",
+    "_note": "scope 只需 read:user + user:email（登录不碰仓库写权限）。GitHub 记住授权：scope 不变则静默跳回、不弹授权页；scope 升级才重新弹。/user 默认不返回邮箱，由渠道卡 emails_endpoint 能力位补抓 /user/emails。仓库写操作（含 .github/workflows 推送）走 PAT：创建时需勾选 repo + workflow（Issue #3386）。",
     "name": "GitHub",
     "type": "oauth2",
     "auth_url": "https://github.com/login/oauth/authorize",

@@ -96,7 +96,7 @@ from src.domains.runtime.im.channel.card import self_check_card_capabilities  # 
 from src.domains.runtime.im.channel.channel import ChannelConfig
 from src.domains.runtime.im.channel.message import InboundMessage
 from src.domains.runtime.im.channel.registry import ChannelRegistry, default_registry
-from src.domains.runtime.im.channel.types import MsgType, Scope, Type
+from src.domains.runtime.im.channel.types import ChatType, MsgType, Scope, Type
 
 from src.domains.runtime.im.engine.dedup import InboundDedup
 from src.domains.runtime.im.engine.egress import EGRESS_ENV, HandlerEgress, egress_mode, legacy_send_card_reply
@@ -746,6 +746,92 @@ def _lookup_user_sync(db_path: str, installation_id: str, open_id: str,
 
 _BIND_WORDS = ("/绑定", "/bind me", "/bindme", "绑定我", "绑定账号")
 
+# 未绑定身份时的帮助词：卡片底部「❓ 帮助」按钮回传的 value 就是 {"cmd": "/help"}。
+# 不认这一条时，未绑定用户点帮助会落进 unbound 分支被吞掉、换回一张一模一样的绑定卡，
+# 观感就是"帮助按钮没生效"。帮助词必须先于绑定词判断。
+_HELP_WORDS = ("/help", "/帮助", "/?", "help", "帮助")
+
+_UNBOUND_HELP_TEXT = (
+    "❓ 帮助\n"
+    "你的飞书账号还没绑定 grape 账号，所以现在只认绑定指令。\n"
+    "· 点卡片上的「绑定我」按钮，或回复 /绑定 —— 绑定到本机器人所属的账号\n"
+    "· 会先回一张确认卡，点「确认绑定」才真正写入绑定关系\n"
+    "· 绑定成功后会回一条确认，再发一条消息就能开始用\n"
+    "· 绑定之后回复 /help 可以看全部命令\n"
+    "· 群里打字回复要先 @我，点按钮不需要\n"
+)
+
+# 两段式绑定的第二步/放弃词：点确认卡上的按钮时，飞书回传的 value 就是 {"cmd": "/确认绑定"}。
+_BIND_CONFIRM_WORDS = ("/确认绑定", "确认绑定", "/confirm bind")
+_BIND_CANCEL_WORDS = ("/取消绑定", "取消绑定", "/cancel bind")
+_WHOAMI_WORDS = ("/我是谁", "我是谁", "/whoami")
+
+_GROUP_HINT = "群里也可以直接点按钮；如果你想用打字的方式，请先 @我 再发命令。"
+
+
+def _identity_card(title: str, body: str,
+                   buttons: "list[tuple[str, str, str]]") -> dict:
+    """构建带按钮的飞书互动卡（v1 schema）：buttons = [(文案, cmd 值, 样式), ...]。"""
+    actions = []
+    for label, cmd, style in buttons:
+        btn: dict = {"tag": "button", "text": {"tag": "plain_text", "content": label},
+                     "value": {"cmd": cmd}}
+        if style:
+            btn["type"] = style
+        actions.append(btn)
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue",
+                   "title": {"tag": "plain_text", "content": title}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": body}},
+            {"tag": "action", "actions": actions},
+        ],
+    }
+
+
+def _binding_guide_card(group: bool = False) -> dict:
+    """未绑定身份的引导卡：把「绑定我 / 我是谁 / 帮助」做成按钮。
+
+    未绑定的人只会被身份层挡住，卡片上不挂按钮就只能靠打字猜命令；群里打字还要 @机器人，
+    所以按钮是唯一稳定可用的入口。
+    """
+    body = "我还没认出你是谁。绑定后我才能用 grape 账号的身份替你干活。"
+    if group:
+        body += "\n" + _GROUP_HINT
+    return _identity_card("需要先绑定你的账号", body, [
+        ("✅ 绑定我", "/绑定", "primary"),
+        ("👤 我是谁", "/我是谁", ""),
+        ("❓ 帮助", "/help", ""),
+    ])
+
+
+def _bind_confirm_card(label: str, group: bool = False) -> dict:
+    """绑定确认卡：先让用户确认要绑到哪个 grape 账号，再落库。"""
+    body = (f"将把你的飞书身份绑定为 grape 用户 **{label}**。\n"
+            "个人机器人没有单独的账号体系，绑定后你的操作都记在这个 grape 账号下。")
+    if group:
+        body += "\n" + _GROUP_HINT
+    return _identity_card("确认绑定这个账号？", body, [
+        ("✅ 确认绑定", "/确认绑定", "primary"),
+        ("❌ 取消", "/取消绑定", ""),
+    ])
+
+
+def _account_label_sync(user_id: str) -> str:
+    """grape 用户 id → 可读标签「昵称(ID)」；查不到名字就只回 ID。"""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return ""
+    name = ""
+    try:
+        row = _mgmt_public.get_grape_account_by_id(uid)
+        if isinstance(row, dict):
+            name = str(row.get("nickname") or row.get("username") or "")
+    except Exception:      # noqa: BLE001 - 取不到名字不影响绑定本身
+        name = ""
+    return f"{name}（ID {uid}）" if name else f"ID {uid}"
+
 
 def _bind_identity_sync(db_path: str, installation_id: str, scope: str,
                         owner_user_id: str, platform_user_id: str,
@@ -963,9 +1049,11 @@ def _inbound_to_parsed(msg: InboundMessage) -> dict:
             image_key = ref.storage_key
         elif ref.type in (MsgType.FILE, MsgType.MEDIA):
             file_key = ref.storage_key
+    _ctype = msg.source.channel_type
     parsed = {
         "type": "message",
         "chat_id": msg.source.chat_id,
+        "channel_type": str(getattr(_ctype, "value", _ctype) or ""),
         "chat_type": msg.source.chat_type.value,
         "sender_open_id": msg.source.sender_id,
         "sender_id": msg.source.sender_id,
@@ -1555,18 +1643,58 @@ class ImEngine:
         # ---- ⑤' 身份逃生口：未绑定时先认绑定指令，写 grape_t_channel_sender_identity
         async def identity_bind(inst_view: Installation, msg: InboundMessage) -> bool:
             text = (msg.command_text or msg.text or "").strip().lower()
+            chat_id = msg.source.chat_id
+            group = msg.source.chat_type == ChatType.GROUP
+            # 帮助词先于绑定词：未绑定用户点卡片底部「❓ 帮助」（cmd=/help）时，
+            # 必须回一段可读说明，否则只会再收到那张绑定引导卡。
+            if text in _HELP_WORDS:
+                await _reply_text(chat_id, _UNBOUND_HELP_TEXT)
+                return True
+            if text in _WHOAMI_WORDS:
+                await _reply_text(
+                    chat_id,
+                    "你当前还没有绑定 grape 账号。点「绑定我」或回复 /绑定 来绑定。")
+                return True
+            if text in _BIND_CANCEL_WORDS:
+                await _reply_text(chat_id, "已取消绑定。需要时再点「绑定我」或回复 /绑定。")
+                return True
+            if text in _BIND_CONFIRM_WORDS:
+                # 第二步：用户已确认要绑到这张卡上写明的账号，这里才真正落库。
+                user_id = await asyncio.to_thread(
+                    _bind_identity_sync, engine.db_path, inst_view.installation_id,
+                    inst_view.scope, inst_view.owner_user_id, msg.source.sender_id,
+                    msg.source.sender_stable_id)
+                if not user_id:
+                    await _reply_text(
+                        chat_id,
+                        "绑定失败：这个渠道没开个人身份绑定，或安装没有归属用户。")
+                    return True
+                label = await asyncio.to_thread(_account_label_sync, user_id)
+                await _reply_text(
+                    chat_id,
+                    f"✅ 已绑定：你的飞书账号现在是 grape 用户 {label}。再发一条消息即可开始使用。")
+                return True
             if text not in _BIND_WORDS:
                 return False
-            user_id = await asyncio.to_thread(
-                _bind_identity_sync, engine.db_path, inst_view.installation_id,
-                inst_view.scope, inst_view.owner_user_id, msg.source.sender_id,
-                msg.source.sender_stable_id)
-            if not user_id:
-                await _reply_text(msg.source.chat_id,
-                                  "绑定失败：这个渠道没开个人身份绑定，或安装没有归属用户。")
+            # 第一步：只发确认卡，不立刻写身份行 —— user 轨绑的是机器人归属人，
+            # 点的人如果不是本人，绑错了事后很难发现，所以要他先看一眼账号再确认。
+            if inst_view.scope != "user" or not str(inst_view.owner_user_id):
+                await _reply_text(
+                    chat_id, "绑定失败：这个渠道没开个人身份绑定，或安装没有归属用户。")
                 return True
-            await _reply_text(msg.source.chat_id,
-                              f"✅ 已绑定：你的账号现在是 grape 用户 {user_id}。再发一条消息即可开始使用。")
+            label = await asyncio.to_thread(
+                _account_label_sync, str(inst_view.owner_user_id))
+            card = _bind_confirm_card(label, group=group)
+            sent = ""
+            if inst_view.channel_type == "feishu":
+                sent = await _send_card(chat_id, "确认绑定这个账号？", raw_card=card,
+                                        kind="card")
+            if not sent:
+                # 非飞书渠道没有 raw 卡片通道：退化成文字，照样走两步确认。
+                await _reply_text(
+                    chat_id,
+                    f"将把你的账号绑定为 grape 用户 {label}。\n"
+                    "回复「确认绑定」完成，回复「取消绑定」放弃。")
             return True
 
         # ---- 出站：绑定引导卡（fire-and-forget，chat 定向卡片）
@@ -1649,6 +1777,20 @@ class ImEngine:
 
         async def _reply_card(chat_id: str, text: str, **kw):
             return await _send_card(chat_id, text, **kw)
+
+        # ---- ⑤'' 未绑定引导卡：把「绑定我 / 我是谁 / 帮助」做成按钮
+        # 群里打字回复必须先 @机器人（应用只有 group_at_msg 权限），按钮回调不需要 ——
+        # 所以未绑定的人唯一稳定可用的入口是按钮，卡片必须自带动作。
+        async def unbound_card(msg: InboundMessage) -> None:
+            group = msg.source.chat_type == ChatType.GROUP
+            card = _binding_guide_card(group=group)
+            text = "请先绑定你的账号以使用 grape（点「绑定我」完成绑定）。"
+            if channel_type == "feishu":
+                sent = await _send_card(msg.source.chat_id, text, raw_card=card,
+                                       kind="card")
+                if sent:
+                    return
+            await replier.send_binding_card(msg)
 
         if sender_factory is not None:
             # 渠道自带发送器（企微：持有长连接 transport，不经 legacy 传输闭包）
@@ -1739,7 +1881,23 @@ class ImEngine:
                 await engine._dispatch_agent(inst, msg)
                 return None
             text = str(cmd.get("text", ""))
+            # 已绑定用户点旧卡片上的「我是谁 / 绑定我」也要有答复：
+            # 这些是身份类按钮，不进命令表（命中不了就会静默丢弃，用户以为按钮坏了）。
+            _ident = text.strip().lower()
+            if _ident in _WHOAMI_WORDS or _ident in _BIND_WORDS or _ident in _BIND_CONFIRM_WORDS:
+                uid = await asyncio.to_thread(
+                    _lookup_user_sync, engine.db_path, inst_view.installation_id,
+                    msg.source.sender_id, inst_view.channel_type)
+                if uid:
+                    label = await asyncio.to_thread(_account_label_sync, uid)
+                    await _reply_text(chat_id, f"你已经绑定为 grape 用户 {label}，无需再绑定。")
+                else:
+                    await _reply_text(chat_id, "你当前还没有绑定 grape 账号，请点「绑定我」。")
+                return None
             fn = engine._process_command or engine._legacy_process_command()
+            # Issue #3475 复审修复：真实命令路径必须透传渠道，否则微信等新引擎渠道的
+            # 命令提示会退回飞书文案（BotContext 无 channel_type 属性可兜底）
+            _ctype = msg.source.channel_type
             try:
                 # 本文件属 runtime 域、由 mgmt 进程执行：命令处理用到的
                 # repo_im_group_binding / issue / chat_agent_session 都是 runtime 基表，
@@ -1753,6 +1911,7 @@ class ImEngine:
                 account=ctx.app_id, msg_id=msg_id,
                 sender_open_id=msg.source.sender_id,
                 card_value=_card_value_of(msg), action_token=_action_token_of(msg),
+                channel_type=str(getattr(_ctype, "value", _ctype) or ""),
             )
             if result:
                 await eg.reply_text(ctx, msg_id, result)
@@ -1790,6 +1949,7 @@ class ImEngine:
             bindings=bindings,
             dedup=dedup,
             replier=replier,
+            unbound_card=unbound_card,
             append_message=append_message,
             parse_command=parse_command,
             apply_command=apply_command,

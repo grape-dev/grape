@@ -233,7 +233,7 @@ provider` 才清"——D3 生效后，用户自绑的真实邮箱 `source='user'
 - `schedule_notify(user_id, kind, text) -> bool`：有循环 → `create_task`；无循环 →
   `enqueue_user_notify()` 同步把通知写进 IM outbox（与 `notify_user` 共用
   `active_targets/p2p_chat_id/_make_payload/out_track_id` 口径，投递交给 outbox 消费进程）。
-- `user_id` 归一收敛到 `outbox.norm_user_id`（`notify._norm_uid` 委托它）：纯数字转 int
+- `user_id` 归一收敛到 `kernel.user_ids.norm_uid`（`notify` 与 `outbox` 共用）：纯数字转 int
   （**数字 id 的 sha1 输入不变**，历史 pending 行不会被当成新事件重发），UUID 原样保留。
   这是评审 P1 修复的第一版只改了 `notify` 侧、漏了 `outbox.out_track_id` 的补漏（缺陷 #3510：
   出单号处裸 `int()` → ValueError → 入队失败，站内信对 UUID 账号仍然送不到）。（D105 后 `grape_accounts.id` 是 TEXT UUID，

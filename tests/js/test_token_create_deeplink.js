@@ -5,7 +5,7 @@
  * 该文件已随 Vue 迁移删除 → 改为对 AccountView.vue + /auth/providers 做源码断言。
  *
  * 覆盖 T1-T5：
- *   T1. GitHub → settings/tokens/new?scopes=repo（预选仓库权限）
+ *   T1. GitHub → settings/tokens/new?scopes=repo,workflow,admin:repo_hook（预选仓库/工作流/webhook 权限）
  *   T2. GitCode → setting/token-classic/create（官方实测页面）
  *   T3. 其余平台取 /auth/providers 的 pat_create_url（平台卡），没有就不渲染按钮
  *   T4. 按钮为通栏链接，target=_blank + rel=noopener noreferrer，文案带域名
@@ -38,9 +38,12 @@ function accountDict(d) {
   return (d && d.account) || {};
 }
 
-test('T1 GitHub 直达链接带 scopes=repo 预选', () => {
-  assert.match(VIEW, /github: 'https:\/\/github\.com\/settings\/tokens\/new\?scopes=repo&description=Grape%20DevOps'/,
-    'GitHub PAT 创建链接缺失或丢参数');
+test('T1 GitHub 直达链接带 repo,workflow,admin:repo_hook 预选', () => {
+  assert.match(
+    VIEW,
+    /github: 'https:\/\/github\.com\/settings\/tokens\/new\?scopes=repo,workflow,admin:repo_hook&description=Grape%20DevOps'/,
+    'GitHub PAT 创建链接缺失或丢 workflow/admin:repo_hook 参数'
+  );
 });
 
 test('T2 GitCode 直达 classic 令牌新建页', () => {

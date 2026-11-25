@@ -146,7 +146,8 @@ def verify_custom_fields_clean(conn=None) -> None:
                 "WHERE custom_fields IS NOT NULL AND custom_fields != ''").fetchall():
             try:
                 fields = json.loads(raw or "[]")
-            except Exception:  # noqa: BLE001 - fn 已对不可解析项留痕，不算残留
+            except Exception as e:  # noqa: BLE001 - fn 已对不可解析项留痕，不算残留
+                log.debug(f"202611240001: unparsable task custom_fields kept (task#{task_id}): {e}")
                 continue
             if isinstance(fields, list):
                 bad = [f for f in fields if is_invalid_custom_field(f)]
@@ -158,7 +159,8 @@ def verify_custom_fields_clean(conn=None) -> None:
                 "WHERE advanced_options IS NOT NULL AND advanced_options != ''").fetchall():
             try:
                 opts = json.loads(raw or "{}")
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                log.debug(f"202611240001: unparsable scene advanced_options kept (scene#{scene_id}): {e}")
                 continue
             if not isinstance(opts, dict):
                 continue

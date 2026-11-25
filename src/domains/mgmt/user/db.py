@@ -1871,6 +1871,27 @@ def get_managed_repo_owner_row(repo_key: str) -> "dict | None":
             "host_status": row[6] or ""}
 
 
+def upsert_host_status(repo_key: str, status: str = "", step: str = "", error: str = ""):
+    """写入托管失败诊断（Issue #3427；复审修正：不再补插诊断行）。
+
+    失败出口（token 解析 / 权限 / 422 / webhook）统一调用本函数，避免
+    `set_host_status` 纯 UPDATE 对未注册仓库静默丢弃诊断。**但诊断绝不
+    INSERT 进 managed_repos 主表**——那会让 `managed_repo_exists` 由 False
+    变 True，短路 repair_host 未注册仓自证放行（Issue #671）、绕过
+    bind_repo_bot_token 的 404 守卫。未注册仓仅记结构化 warning（诊断
+    不落库，由日志排障），注册仓复用 `set_host_status` 同一 UPDATE。
+    """
+    from src.kernel.repo_key import to_repo_key
+    rk = to_repo_key(repo_key) or ""
+    _status = status or ""
+    if managed_repo_exists(rk):
+        set_host_status(rk, _status, step, error)
+    elif _status:
+        log.warning(f"upsert_host_status: unregistered repo, drop diagnostic "
+                    f"repo={rk} status={_status} step={step or ''} "
+                    f"error={error or ''}")
+
+
 def get_host_status(repo_key: str) -> str:
     """读取仓库托管状态（managed_repos.host_status），无记录返回空串。"""
     from src.kernel.repo_key import to_repo_key
@@ -2083,6 +2104,7 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
                            webhook_token=bot_token, webhook_id=_new_hook_id)
     return {"ok": True, "warning": _warning, "related_repos": _related_repos}
 
+
 def update_managed_repo_bot_username(repo_key: str, bot_username: str) -> bool:
     try:
         with db_lock:
@@ -2093,6 +2115,20 @@ def update_managed_repo_bot_username(repo_key: str, bot_username: str) -> bool:
     except Exception as e:
         log.warning(f"Update managed repo bot username failed: {e}")
         return False
+
+
+def get_managed_repo_bot_username(repo_key: str) -> str:
+    """Issue #3427：读托管仓绑定的 bot_username（bind 接口已校验持久化的 rc login）。"""
+    try:
+        with db_lock:
+            _row = _mg_db.cursor().execute(
+                "SELECT bot_username FROM managed_repos WHERE repo_key=? LIMIT 1",
+                (repo_key,)).fetchone()
+        return (_row[0] or "") if _row else ""
+    except Exception as e:
+        log.warning(f"Get managed repo bot username failed: {e}")
+        return ""
+
 
 def resolve_managed_repo_key(repo_owner: str, repo_name: str) -> str:
     """owner/repo → 带前缀 repo_key（按 managed_repos 候选集探针解析真实前缀）。
@@ -2376,6 +2412,21 @@ def _platform_bot_token(provider: str) -> str:
         return _decrypt_repo_secret(enc) or ""
     except Exception:
         return ""
+
+
+def global_bot_token_decrypt_failed(provider: str) -> bool:
+    """Issue #3427（复审 Spec-3）：平台行 bot token 密文存在但解不开。
+
+    `_platform_bot_token` 把解密失败吞成空串（与「未配置」不可区分）；本函数
+    供凭据解析器在读到空 token 时区分「确未配置」与「密文损坏/密钥变更」。
+    """
+    enc = _platform_bot_row(provider).get("token_enc") or ""
+    if not enc:
+        return False
+    try:
+        return not (_decrypt_repo_secret(enc) or "")
+    except Exception:
+        return True
 
 
 def get_global_gitcode_bot_token() -> str:
@@ -5563,16 +5614,27 @@ def _split_url_configured_value(key: str) -> str:
     except Exception:
         return ""
 
+_URL_SPLIT_USAGE = {
+    "browser_callback_url": "浏览器回调",
+    "worker_connect_url": "worker 回连",
+    "task_business_api_url": "任务业务 API",
+}
+
+
 def get_url_split_warning() -> str:
-    """Issue #471 E1：拆分配置项错误的明确报错引导；配置正确返回空串。"""
+    """拆分配置项错误的明确报错引导；配置正确返回空串。
+
+    Issue #471 E1：浏览器回调 / worker 回连指向回环时告警；
+    Issue #3766：任务业务 API 基址（`task_business_api_url`）指向回环时同样告警——
+    远程 Agent 任务无法通过回环访问业务 API，会表现为 issues / git-repo 全 404。
+    """
     warnings = []
-    for _key in ("browser_callback_url", "worker_connect_url"):
+    for _key, _usage in _URL_SPLIT_USAGE.items():
         _v = _split_url_configured_value(_key)
         if not _v:
             continue
         _host = _v.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
         if _host in _LOOPBACK_HOSTS:
-            _usage = "浏览器回调" if _key == "browser_callback_url" else "worker 回连"
             warnings.append(
                 f"{_key} 当前指向本机回环地址 {_v}，{_usage}对外不可达；"
                 f"请在 configs/server-config.json 配置对外可访问地址后重启。"
@@ -5998,6 +6060,66 @@ def _encrypt_repo_secret(plaintext: str) -> str:
         return plaintext
     from src.domains.mgmt.auth.credential_crypto import encrypt
     return encrypt(plaintext)
+
+
+def _clear_repo_path_b_identity(rk: str):
+    """写 rc 后的路径 A 化收尾（Issue #3427，仅清路径 B 身份与过期标记）。
+
+    清 managed_repos.host_user_id（否则解析器对路径 B 仓库跳过 rc/global）
+    + 清 bot_token_status 过期标记（新 token 写入时短路自动解除）。
+    注意：与 _update_repo_bot_token 不同口径——后者还清 webhook_secret、
+    写 webhook_id、同步 <p>_webhook_token 列（db.py:3071-3080），本函数不涉及。
+    清身份失败向上抛（调用方转 500），清状态失败仅告警。
+    """
+    from src.kernel.session_manager import db as _db, db_lock as _db_lock
+    with _db_lock:
+        _cur = _db.cursor()
+        _cur.execute("UPDATE managed_repos SET host_user_id='' WHERE repo_key=?", (rk,))
+        _db.commit()
+    try:
+        from src.domains.mgmt.public import set_repo_bot_token_status_any
+        set_repo_bot_token_status_any(rk, "")
+    except Exception as e:
+        log.warning(f"_clear_repo_path_b_identity: clear status failed: {e}")
+
+
+def set_repo_bot_credential_encrypted(repo_key: str, token: str) -> dict:
+    """Issue #3427：显式绑定仓库级 bot token（写入 grape_t_repo_credentials）。
+
+    加密写 rc（cred_type='bot'，S82 起唯一权威），再复用
+    `_clear_repo_path_b_identity`（与存量 _update_repo_bot_token 同一收尾：
+    清 bot_token_status 过期标记 + 清 managed_repos.host_user_id 转路径 A）。
+    调用方（PUT /api/repos/{owner}/{repo}/bot-token）在写入前必须已完成
+    上游校验（GET /user）。返回 upsert 结果 dict。
+    """
+    from src.kernel.repo_key import to_repo_key
+    rk = to_repo_key(repo_key) or ""
+    if not rk:
+        raise ValueError("invalid repo_key")
+    from datetime import datetime as _dt
+    _updated_at = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+    from src.domains.insight import public as _insight_public
+    _prev_raw = ""
+    try:
+        _prev_raw = _insight_public.repo_credential_value(rk, "bot") or ""
+    except Exception:
+        _prev_raw = ""
+    _r = _insight_public.upsert_repo_credential_value(
+        rk, "bot", _encrypt_repo_secret(token or ""), _updated_at)
+    # Issue #3427（复审 Spec-5）：显式绑定 = 路径 A，rc 写入后清 host_user_id。
+    # 若清身份失败，回滚本次 rc 写入再向上抛——端点返回 500 时不得留下
+    # 「API 报失败但 rc 实际已写入」的分叉状态（避免旧值被覆盖后无法区分）。
+    try:
+        _clear_repo_path_b_identity(rk)
+    except Exception:
+        try:
+            _insight_public.upsert_repo_credential_value(
+                rk, "bot", _prev_raw, _updated_at)
+        except Exception as _rb_err:
+            log.warning(f"set_repo_bot_credential_encrypted: rollback rc failed "
+                        f"repo={rk}: {_rb_err}")
+        raise
+    return _r
 
 def get_repo_credential_value(repo_key: str, cred_type: str) -> str:
     """S80b：读 grape_t_repo_credentials 单表值（S82 起 rc 唯一权威、无条件；

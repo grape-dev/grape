@@ -63,5 +63,22 @@
   "stall_banner": {
     "title": "完成但未接力（停滞 {{minutes}} 分钟）",
     "hint": "平台已告警：下一棒需人工确认（场景序推导只作建议，不自动派发）"
-  }
+  },
+  "repo_scope_tag": "【仓库级】",
+  "engine_health_error": "引擎健康状态查询失败，请稍后重试",
+  "engine_health_error_prefix": "引擎健康状态查询失败：",
+  "retry_later": "请稍后重试",
+  "engine_unreachable_nodes": "物理不可达（节点：{nodes}）",
+  "engine_low_score_nodes": "健康分不足（节点：{nodes}）",
+  "scene_engine_warning_prefix": "该场景绑定的引擎存在健康异常：",
+  "scene_engine_warning_suffix": "，创建后任务将无法派发",
+  "scene_engine_reason_prefix": "。异常原因：",
+  "engine_reason_low_score": "健康分不足（低于派发阈值）",
+  "engine_reason_consecutive_failures": "连续失败过多",
+  "engine_reason_heartbeat_lost": "心跳丢失",
+  "engine_reason_unreachable": "物理不可达（离线或心跳丢失）",
+  "engine_reason_engine_missing": "引擎不存在或已删除",
+  "engine_reason_health_unavailable": "健康数据暂不可用",
+  "retry": "重试",
+  "engine_health_checking": "引擎健康检测中…"
 }

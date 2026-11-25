@@ -20,7 +20,13 @@ from src.kernel.config import log
 
 # 显式主语锚点：Issue #N / Issue N / Spec: Issue #N（大小写不敏感，允许复数 issues）。
 # 不用 \b：中文紧邻（如「实现Issue #2225」）时中文字符也属 \w，边界不成立会漏判。
-_ANCHOR_RE = re.compile(r"(?i)(?<![a-z])issues?\s*#?\s*(\d+)")
+# Issue #4257：`Issue` 与编号之间必须至少有一个空白——`issue#25107` 这类紧邻形态
+# 是 A2A 链路顺序的「段名#序号」引用（如 `vod#25105 → issue#25107 → coding#25108`），
+# 不是正文主语；此前 `\s*#?` 允许零空白，把它当主语而误判为其它 Issue 并 409。
+_ANCHOR_RE = re.compile(r"(?i)(?<![a-z])issues?\s+(?:#\s*)?(\d+)")
+# 「段名#序号」链路引用（vod#25105 / issue#25107 / coding#25108 等）：搜索主语锚点前
+# 先剔除，避免链路里的编号被当成正文主语（Issue #4257）。
+_CHAIN_REF_RE = re.compile(r"\w+#\d+")
 # 标题/正文通用引用：#N
 _REF_RE = re.compile(r"#(\d+)")
 
@@ -50,19 +56,26 @@ def _as_int(value):
         return None
 
 
+def _strip_chain_refs(text: str) -> str:
+    """剔除 `段名#序号` 链路引用，仅保留真正的主语候选（Issue #4257）。"""
+    return _CHAIN_REF_RE.sub(" ", text)
+
+
 def first_issue_anchor(text: str) -> int | None:
-    """正文首个显式 `Issue #N` 主语锚点（跳过引用行）。
+    """正文首个显式 `Issue #N` / `Issue N` 主语锚点（跳过引用行与链路引用）。
 
     引用行（`>` / `>>` 开头的行，含嵌套）是他号正文的原文摘录，不是本正文的
     主语——QA 报告等以 `> Issue #N` 引用开头是合法形态，锚点必须落在首个
     非引用段落里，否则误杀合法正文（F4）。
+    链路顺序引用（`vod#25105 → issue#25107 → coding#25108`）是 A2A 事件序号，
+    不是正文主语，先剔除再找锚点（Issue #4257）。
     """
     body = text or ""
     non_quote = "\n".join(
         line for line in body.splitlines()
         if not line.lstrip().startswith(">")
     )
-    m = _ANCHOR_RE.search(non_quote)
+    m = _ANCHOR_RE.search(_strip_chain_refs(non_quote))
     return int(m.group(1)) if m else None
 
 
