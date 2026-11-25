@@ -9,6 +9,11 @@
 | T5 | 自动恢复 + 运维 reset 入口 + 列表字段 | done | `note_recovery` / `POST vcs-health/reset` / `/managed` 的 `vcs_*` |
 | T6 | `_vcs_req` 与 `api_client` 日志降噪 | done | `TestUpstreamReqDedupe`（含 429 不标 permanent 与状态码透传回归） |
 | T7 | 文档（spec/plan/task） | done | `docs/issue-3759/*` |
+| T8 | 复审 Required 1：仓库级事实与调用方凭据解耦（`note_caller_error` 零写库 / `credential` / `is_repo_absence_status`） | done | `TestCredentialDecoupling`（7 例） |
+| T9 | 复审 Required 1 影响链：熔断期合成 missing 不软删 issue 卡 | done | `TestConfirmMissingFailsOpen`（2 例） |
+| T10 | 复审 Required 2：`allow_read` 原子占位 + 60s 租约 + unknown 保留熔断 | done | `TestProbeRelease`（4 例） |
+| T11 | 复审 Optional：`note_recovery` 缓存优先、记账节流单锁、api_client 折叠用例、契约 `change_reason` 列明吸收的漂移 | done | `TestRecoveryCache` / `TestApiClientLogDedupe`；两份 baseline `change_reason` |
+| T12 | 复审 Nit：`_VCS_HEALTH_COLUMNS` 私有化；reset 写语义下沉 mgmt | done | `test_ops_reset_clears_ledger_through_mgmt`；`tests/kernel/test_gsb_route.py` |
 
 ## 回归命令
 

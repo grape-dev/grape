@@ -23,7 +23,8 @@
 |------|------|------|
 | `src/kernel/log_dedupe.py` | 新增 | `WindowDeduper`：按 key 固定窗口（默认 60s）去重；窗口滚动回传上一窗口折叠数 |
 | `src/domains/runtime/vcs/issue_poll_breaker.py` | 新增 | 永久失败判定 + 仓库级探测 + 退避 + 熔断判定 + 自愈 + 运维 reset；台账读写（mgmt.public / 30s 缓存） |
-| `src/api/git_repo_api.py` | 修改 | `_vcs_req` 日志窗口聚合（key=provider+仓库+归一资源+错误码；永久失败附处置建议）；`get_issue` 熔断短路 + 失败落台账 + 成功自愈 |
+| `src/api/git_repo_api.py` | 修改 | `_vcs_req` 日志窗口聚合（key=provider+仓库+归一资源+错误码；永久失败附处置建议）；`get_issue` 只做调用方错误留痕（零台账写、不短路） |
+| `src/api/issue_vcs_index.py` | 修改 | `_confirm_missing` 熔断期整体 fail-open（合成的 missing 不软删卡片） |
 | `src/domains/runtime/vcs/api_client.py` | 修改 | HTTP 错误 WARNING 同款窗口聚合（脱敏 URL 语义不变） |
 | `src/domains/runtime/pipeline/event_pipeline.py` | 修改 | `_vcs_get_issue` 熔断短路；404/401/403 落台账；成功清熔断 |
 | `src/domains/mgmt/public/__init__.py` | 修改 | 新增 `get_repo_vcs_health` / `set_repo_vcs_health`（列白名单 + 单库拓扑回落） |
@@ -38,7 +39,9 @@
 | 决策点 | 选项 | 选择 | 理由 |
 |--------|------|------|------|
 | 台账落点 | 新表 / 仓库卡列 | **仓库卡列**（`managed_repos`） | 需求明确「仓库卡落 `vcs_missing`」；卡已有跨域写白名单机制，运维可见 |
-| 失败判定 | 仅 404 / 4xx 除 429 | **4xx 除 429** | 401/403 同为不可自愈（权限/归属错配）；429 限流可重试 |
+| 失败判定 | 仅 404 / 4xx 除 429 | **分类：4xx 除 429；台账：仅 404/410** | 401/403 同为不可自愈（权限/归属错配）用于日志分类；但「仓库已不存在」的仓库级事实只认 404/410，且必须来自平台仓储凭据（复审 Required 1） |
+| 探测放行 | 到点即放行 / 原子占位 | **原子占位（60s 租约）** | 8 并发批量复核在同一 due 时点会整批打上游（复审 Required 2-①） |
+| 探测 unknown | 置 ok / 保留熔断 | **保留既有熔断** | 一次 5s 超时不得解除已确认的 vcs_missing（复审 Required 2-②） |
 | 熔断粒度 | 逐 issue / 仓库级 | **仓库级共享窗口** | 告警量与上游调用量不随 issue 数线性增长（验收硬项） |
 | 探测策略 | 每次失败都探 / 退避探 | **首次 + 退避到点** | 首次失败只多一次上游请求；熔断期 0 请求 |
 | 探测不确定 | 熔断 / 不熔断 | **不熔断（fail-open）** | 401/403 可能只是 token 局部失效，误熔断会伤健康仓库 |
@@ -49,7 +52,9 @@
 
 | 风险 | 缓解 |
 |------|------|
-| 误判永久失败错误熔断健康仓库 | 仓库级探测必须 `missing` 才熔断；探测 unknown/401/403 一律不熔断；`vcs-health/reset` 一键清除 |
+| 误判永久失败错误熔断健康仓库 | 仓库级探测必须 `missing` 才熔断；探测 unknown/401/403 一律不熔断；`vcs-health/reset` 一键清除；用户态调用方凭据的失败零台账写（复审 Required 1） |
+| 到点整批打上游 / 超时解熔断 | `allow_read()` 原子占位 + 60s 租约；unknown 保留既有熔断（复审 Required 2） |
+| 熔断期的合成 missing 软删卡片 | `issue_vcs_index._confirm_missing` 熔断中整体 fail-open（复审 Required 1 影响链） |
 | 台账读写放大（每条读一次库） | 30s 进程缓存；`note_recovery` 仅在有脏状态时写库（健康仓库零写） |
 | 跨域写失败 | `cross_write` 幂等意图 + lib 失败回落；写失败降级为进程内状态，不改变读路径 404/403 契约 |
 | MySQL 补列默认值坑 | 8 列全部 `VARCHAR(255)/INTEGER NOT NULL DEFAULT`，`allow_copy=True` + `raise_on_guard=True` + 后置校验（不盖章即重试） |
