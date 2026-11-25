@@ -153,9 +153,11 @@ def _get_issue_creator(repo_key: str, issue_number: str) -> str:
 
 
 def _get_issue_owner_id(repo_key: str, issue_number: str) -> str:
-    """读取**团队组织**需求创建人的 Grape 用户 id。
+    """读取**团队组织**需求的归属用户 id（``issue.user_id``）。
 
-    仅组织需求携带创建人身份；个人空间/无组织/无法确认组织类型时返回空串，
+    注意：该列是需求归属人口径（随 assignee/换手更新），并非不可变的 created_by；
+    组织下派需要的是“当前承接人”身份，故沿用该列。
+    仅团队组织需求携带用户身份；个人空间/无组织/无法确认组织类型时返回空串，
     保持个人仓库原来的“仓库身份（user_id=0）”行为不受影响。
     外部/机器人建的 Issue 没有 Grape 账号时同样返回空串，由调用方回退。
     """

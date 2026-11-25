@@ -371,35 +371,7 @@ upstreamOf / downstreamOf / sharedKernelWith
 - `not_for` / `exclude_keywords` 只做降权或边界提示，不做硬排除（多域任务可能同时涉及多个仓）；
 - 低置信度不自动扩散。
 
-## 7. Grape 的落地路线
-
-### P0：地图骨架（1–2 周）
-
-- 在现有 `repo map` 上增加 `domain / system / owner / lifecycle / criticality`；
-- 从 CODEOWNERS / 组织成员推导 owner；
-- 组织级视图增加 Domain → System → Repository 分组；
-- 单仓卡片保持「核心功能 → 核心职责 → 其他能力」；
-- 增加 `observed / inferred` 关系字段。
-
-### P1：能力地图与治理（2–3 周）
-
-- 增加 Capability 实体，支持 L1/L2/L3；
-- 能力 ↔ 仓库双向视图（能力覆盖、仓库实现）；
-- 治理面板：未分析、无 owner、无能力、过期、重叠、孤儿；
-- 人工复核/编辑，写回组织仓库 descriptor；
-- push webhook + 每日增量刷新 + stale 标记。
-
-### P2：关系图与自动发现（3–4 周）
-
-- 跨仓依赖图：manifest、OpenAPI、事件、共享库；
-- API registry：provides/consumes；
-- 自动发现新仓库/转移仓库；
-- 按 criticality 决定 light/deep 分析；
-- 地图质量指标接入组织下派（覆盖度低时转人工）。
-
----
-
-## 8. 一句话总结
+## 7. 一句话总结
 
 **组织仓库地图的核心不是「让 AI 描述每个仓库」，而是「建立一套可持续演进的实体-能力-关系模型」，让 AI 只负责生成初稿和证据，人负责治理事实源。**
 
