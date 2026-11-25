@@ -107,6 +107,46 @@ def _repo_bot_cache_get(key: tuple):
 _UNCACHEABLE_SOURCES = frozenset({"error", "legacy_rc_error"})
 
 
+# ── Issue #4343：全局 bot token 缺失告警窗口聚合（降噪）──────────────────────
+# 未配置全局 bot token 是静态配置事实，不是每次请求的运行故障；解析候选链逐键
+# 触发时同 provider 会重复告警（实测单次 pipeline 查询可达 4 条）。窗口内只落
+# 1 条 WARNING（可归因观测点保留），窗口内后续降 INFO。
+_GLOBAL_TOKEN_MISSING_WARN_WINDOW_ENV = "GRAPE_GLOBAL_TOKEN_MISSING_WARN_WINDOW_SECONDS"
+_GLOBAL_TOKEN_MISSING_WARN_WINDOW_DEFAULT = 300
+_global_token_missing_warn_at: dict = {}
+_global_token_missing_lock = threading.Lock()
+
+
+def _global_token_missing_warn_window() -> float:
+    """告警聚合窗口（秒）：env 可调，<=0 视为禁用聚合（每次都告警，兼容排障）。"""
+    try:
+        raw = float(os.environ.get(_GLOBAL_TOKEN_MISSING_WARN_WINDOW_ENV,
+                                   str(_GLOBAL_TOKEN_MISSING_WARN_WINDOW_DEFAULT)))
+    except (TypeError, ValueError):
+        raw = float(_GLOBAL_TOKEN_MISSING_WARN_WINDOW_DEFAULT)
+    return raw
+
+
+def _warn_global_token_missing(provider_name: str, repo_key: str) -> None:
+    """全局 bot token 缺失：同 provider 窗口内 1 条 WARNING，后续 INFO。"""
+    window = _global_token_missing_warn_window()
+    _msg = (f"global bot token missing for provider={provider_name} "
+            f"(repo_key={repo_key}): 路径 A 仓库策略链将无可用凭据——"
+            f"请检查 meta key global_bot_{provider_name}_token 或文件 fallback")
+    if window <= 0:
+        log.warning(_msg)
+        return
+    now = time.monotonic()
+    with _global_token_missing_lock:
+        last = _global_token_missing_warn_at.get(provider_name, 0.0)
+        if now - last >= window:
+            _global_token_missing_warn_at[provider_name] = now
+            log.warning(_msg)
+            return
+    log.info(f"global bot token missing for provider={provider_name} "
+             f"(repo_key={repo_key}, suppressed within warn window)")
+
+
 def _repo_bot_cache_put(key: tuple, source: str, value: str, cred_id: str = "") -> None:
     """写缓存。存储读失败 / rc 读失败后的 legacy 回落不入缓存——瞬时故障不该被冻结一个 TTL。"""
     ttl = repo_bot_token_cache_ttl()
@@ -629,12 +669,11 @@ class GlobalBotToken(TokenStrategy):
         # D91：缺失告警（路径 A 全局 bot 是主力凭据，静默空串会让"配置错误不可见"
         # ——失败只在任务报错时暴露，运维无从区分"未配置"与"配置错/被误删"）。
         # 路径 A UserToken 不生效，此处空串=策略链必然失败，告警是唯一观测点。
+        # Issue #4343：配置缺失是静态事实而非每次请求的运行故障——同 provider
+        # 窗口内（默认 300s，env 可调）只落 1 条 WARNING，窗口内后续降 INFO，
+        # 防止解析候选链逐键触发把 mgmt 告警刷爆（实测 495 条/小时）。
         if not token:
-            log.warning(
-                f"global bot token missing for provider={self.provider.provider_name} "
-                f"(repo_key={repo_key}): 路径 A 仓库策略链将无可用凭据——"
-                f"请检查 meta key global_bot_{self.provider.provider_name}_token 或文件 fallback"
-            )
+            _warn_global_token_missing(self.provider.provider_name, repo_key)
         return token
 
     def _is_expired(self, repo_key: str) -> bool:
