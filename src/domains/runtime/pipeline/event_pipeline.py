@@ -3065,7 +3065,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         #   "同 (repo,issue,agent) 无 running 事件" SELECT）；
         # - C：近 60s 同类事件（含已终态）也视为重复，处理 webhook 重发/终态后二次投递。
         # 解决 GitCode/GitHub 双 webhook 或 create_task 同步补发 + 真实 webhook 并发双投。
-        from src.api.event_store import append_skipped_event, _utc_now_str
+        from src.api.event_store import append_skipped_event, _utc_now_str, payload_size_guard
         try:
             with db_lock:
                 _dc = _rt_db.cursor()
@@ -3106,10 +3106,30 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     result["skipped"] = "duplicate_recent_window"
                     return result
                 # ⑧ 去重通过 → 直接 INSERT（不再调 append_event 函数，避免重复加锁开销）
+                # Issue #4339 R1：裸 INSERT 必须先过与 append_event 同一份字节守卫。
+                # issue_opened/issue_updated/pull_request_* 带 issue_id+agent_type 时正是
+                # 走这条路径，守卫若只挂在 event_store 上，超 MEDIUMTEXT 的 payload 仍会被
+                # MySQL 非严格 sql_mode 静默截断成半截 JSON。
+                _payload_json = json.dumps(payload or {})
+                _payload_bytes = len(_payload_json.encode("utf-8"))
+                if not payload_size_guard(_payload_bytes, event_type, repo_key,
+                                          issue_id or "#0"):
+                    # fail-closed：不写截断行、释放本次抢占的守卫行（否则同 (issue,agent)
+                    # 的后续事件会被残留守卫永久挡掉），落 event_skipped 审计后直接返回。
+                    _dc.execute(
+                        "DELETE FROM event_active_guard WHERE repo_key=? AND issue_id=? "
+                        "AND agent_type=? AND seq=0",
+                        (repo_key, issue_id or "#0", agent_type))
+                    _rt_db.commit()
+                    append_skipped_event(
+                        repo_key, event_type, "event_payload_rejected",
+                        detail=f"bytes={_payload_bytes}", issue_id=issue_id or "#0")
+                    result["skipped"] = "event_payload_rejected"
+                    return result
                 _dc.execute(
                     "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (repo_key, issue_id or "#0", event_type, source, agent_type, title, actor, summary,
-                     json.dumps(payload or {}), "pending", "", _scene_id_for_event, _entity_type)
+                     _payload_json, "pending", "", _scene_id_for_event, _entity_type)
                 )
                 _rt_db.commit()
                 _seq = _dc.lastrowid or 0
@@ -3171,6 +3191,28 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             result["skipped"] = "duplicate_comment_delivery"
             return result
     seq = _seq
+    # Issue #4339 R2：seq==0 = 事件行不存在（payload 超限被拒 / 写失败），旧实现只对
+    # _seq<0 分流，seq==0 仍置 result.ok=True 并继续 pick_engine / 入队（event_seq=0），
+    # 形成「事件行不存在但任务照常入队」的孤儿任务，用户侧无感 —— 等于把静默丢失搬到
+    # 任务层。此处 fail-closed：不派发，落 event_skipped 审计并显式回 skipped。
+    if not seq:
+        from src.api.event_store import append_skipped_event as _append_skipped
+        from src.api.event_store import payload_size_exceeded as _payload_size_exceeded
+        _payload_bytes = len(json.dumps(payload or {}).encode("utf-8"))
+        _reason = ("event_payload_rejected" if _payload_size_exceeded(_payload_bytes)
+                   else "event_insert_failed")
+        _append_skipped(repo_key, event_type, _reason,
+                        detail=f"bytes={_payload_bytes}", issue_id=issue_id or "#0")
+        from src.kernel.repo_key import from_repo_key as _from_repo_key
+        result.update({"seq": 0, "event_type": event_type, "skill": agent_type,
+                       "backend": backend, "skill_name": skill_name,
+                       "repo_key": _from_repo_key(repo_key), "ok": False,
+                       "issue_id": issue_id, "repository": evt["repository"],
+                       "skipped": _reason})
+        log.error(f"Pipeline: event not stored (seq=0, {_reason}), dispatch aborted: "
+                  f"repo={repo_key}, type={event_type}, agent={agent_type}, "
+                  f"issue={issue_id or '#0'}, payload_bytes={_payload_bytes}")
+        return result
     # WAL checkpoint 在 db_lock 释放后执行（避免阻塞其他需要 db_lock 的操作）
     if seq and issue_id and agent_type and event_type != "a2a_event":
         try:

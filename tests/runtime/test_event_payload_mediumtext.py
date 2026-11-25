@@ -340,3 +340,148 @@ def test_payload_guard_thresholds_are_mediumtext_limits():
     assert es._MEDIUMTEXT_MAX_BYTES == 16_777_215
     assert es._PAYLOAD_WARN_BYTES == 1_048_576
     assert es._PAYLOAD_WARN_BYTES < es._MEDIUMTEXT_MAX_BYTES
+
+
+# ===== 5. R1/R2：两个 events 写入口在超限时都必须 fail-closed =====
+#
+# R1：`run_pipeline` 去重快路径（issue_id + agent_type 齐备时命中）用裸 INSERT
+#     直写 events，绕过了 event_store 里的字节守卫 —— 必须共用同一份判定。
+# R2：`append_event` 超限返回 0 与「瞬时写失败」不可区分，旧实现仍 `ok=True`
+#     继续 pick_engine / 入队（event_seq=0）→ 孤儿任务，必须 fail-closed 不派发。
+#
+# 覆盖边界（Optional 项）：>64KB roundtrip 断言跑在 SQLite（自身无 64KB 列上限），
+# 因此它回归的是「守卫/迁移不误杀、视图可解析」，**MySQL 侧截断回归由 DDL 文本断言
+# + `information_schema` 探测分支兜底**（真 MySQL 门禁需外部实例，见 PR 说明）。
+
+
+def _pipeline_repo() -> str:
+    """run_pipeline 场景的独立 repo_key（与上面的 REPO 同源，便于共用清理断言）。"""
+    return REPO
+
+
+@pytest.fixture()
+def pipeline_repo():
+    """run_pipeline 用例的库状态：清干净 events/event_skipped/守卫/任务，并装路由。"""
+    def _cleanup():
+        with db_lock:
+            c = db.cursor()
+            for sql in (
+                "DELETE FROM events WHERE repo_key=?",
+                "DELETE FROM event_skipped WHERE repo_key=?",
+                "DELETE FROM event_active_guard WHERE repo_key=?",
+                "DELETE FROM agent_tasks WHERE repo_key=?",
+            ):
+                c.execute(sql, (_pipeline_repo(),))
+            # issue_opened → vod（静态路由），去重快路径要求 issue_id + agent_type 齐备
+            c.execute("INSERT OR REPLACE INTO event_route_config (repo_key, event_type, skill) "
+                      "VALUES ('','issue_opened','issue')")
+            c.execute("INSERT OR REPLACE INTO agent_type "
+                      "(agent_type, display_name, enable, order_num, subscribe_events) "
+                      "VALUES ('issue','Issue Agent',1,2,'[\"issue_opened\"]')")
+            db.commit()
+
+    _cleanup()
+    yield _pipeline_repo()
+    _cleanup()
+
+
+def _run_pipeline(headers: dict, payload: dict) -> dict:
+    from src.domains.runtime.pipeline import event_pipeline as ep
+    return ep.run_pipeline(json.dumps(payload).encode(), headers, account="owner/repo",
+                           repo_key_override="test/issue4339-payload")
+
+
+def _count_guard_rows() -> int:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COUNT(*) FROM event_active_guard WHERE repo_key=?", (REPO,))
+        return int(c.fetchone()[0])
+
+
+def _count_tasks() -> int:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COUNT(*) FROM agent_tasks WHERE repo_key=?", (REPO,))
+        return int(c.fetchone()[0])
+
+
+def _skipped_reasons() -> list:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT reason FROM event_skipped WHERE repo_key=?", (REPO,))
+        return [r[0] for r in c.fetchall()]
+
+
+def test_pipeline_dedup_fast_path_rejects_oversized_payload(pipeline_repo, caplog):
+    """R1：去重快路径（裸 INSERT）也必须过同一份字节守卫。"""
+    huge = "x" * (es._MEDIUMTEXT_MAX_BYTES + 1_024)
+    payload = {"object_kind": "issue", "project": {"path_with_namespace": "owner/repo"},
+               "object_attributes": {"id": 4339, "iid": 4339, "title": "huge",
+                                     "action": "open", "description": huge},
+               "user": {"username": "alice"}}
+
+    with caplog.at_level(logging.ERROR):
+        result = _run_pipeline({"X-GitCode-Event": "issue_opened"}, payload)
+
+    assert result.get("ok") is False, result
+    assert result.get("skipped") == "event_payload_rejected", result
+    assert _count_events() == 0, "超限 payload 不得落库（含截断行）"
+    assert _count_tasks() == 0, "超限事件不得派发任务（孤儿任务）"
+    # 抢占的守卫行必须释放，否则同 (issue,agent) 的后续事件被永久挡掉
+    assert _count_guard_rows() == 0, "超限拒绝后残留 event_active_guard（后续事件被永久 dedup）"
+    assert "event_payload_rejected" in _skipped_reasons()
+    assert any(r.levelno == logging.ERROR and "event payload too large" in r.getMessage()
+               for r in caplog.records), "超限拒绝未留 ERROR"
+
+
+def test_pipeline_rejects_when_append_event_returns_zero(pipeline_repo, caplog):
+    """R2：append_event 返回 0（超限拒绝）→ fail-closed，不再 pick_engine / 入队。"""
+    huge = "x" * (es._MEDIUMTEXT_MAX_BYTES + 1_024)
+    payload = {"object_kind": "note", "project": {"path_with_namespace": "owner/repo"},
+               "object_attributes": {"id": 4339, "iid": 4339, "noteable_type": "Issue",
+                                     "note": huge},
+               "issue": {"iid": 4339, "number": 4339, "title": "T"},
+               "comment": {"body": huge, "user": {"username": "alice"}},
+               "user": {"username": "alice"}}
+
+    with caplog.at_level(logging.ERROR):
+        result = _run_pipeline({"X-GitCode-Event": "Note Hook"}, payload)
+
+    assert result.get("ok") is False, result
+    assert result.get("skipped") == "event_payload_rejected", result
+    assert result.get("seq") == 0
+    assert _count_events() == 0, "超限 payload 不得落库"
+    assert _count_tasks() == 0, "seq=0 时不得入队（否则形成 event_seq=0 的孤儿任务）"
+    assert "event_payload_rejected" in _skipped_reasons()
+
+
+# ===== 6. events 写入点唯一收口守卫 =====
+
+_EVENTS_INSERT_PATTERNS = (
+    "INSERT INTO events", "INSERT OR IGNORE INTO events", "REPLACE INTO events",
+)
+
+
+def test_every_events_write_point_carries_the_payload_guard():
+    """经验沉淀（Optional）：events 的每个写入口都必须接同一份字节守卫。
+
+    现状两个写入口：`event_store._insert_event_row` 与 `event_pipeline` 去重快路径的
+    裸 INSERT。守卫若只挂在一处，另一处仍会把 >16MB payload 交给 MySQL 静默截断。
+    本用例机械扫描 `src/` 下所有含 events INSERT 的模块，要求插入点之前存在
+    `if not payload_size_guard(` 调用——新增裸 INSERT 而漏接守卫时直接变红。
+    """
+    import pathlib
+    src_root = pathlib.Path(__file__).resolve().parents[2] / "src"
+    offenders = []
+    for path in sorted(src_root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for pat in _EVENTS_INSERT_PATTERNS:
+            insert_at = text.find(pat)
+            if insert_at == -1:
+                continue
+            guard_at = text.find("if not payload_size_guard(")
+            if guard_at == -1 or guard_at > insert_at:
+                offenders.append(
+                    f"{path.relative_to(src_root)}: {pat} 之前未调用 payload_size_guard")
+            break
+    assert not offenders, "events 写入口漏接 payload 字节守卫：\n" + "\n".join(offenders)

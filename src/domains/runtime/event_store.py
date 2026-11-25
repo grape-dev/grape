@@ -105,15 +105,28 @@ _MEDIUMTEXT_MAX_BYTES = 16_777_215
 _PAYLOAD_WARN_BYTES = 1_048_576
 
 
-def _payload_size_guard(payload_bytes: int, event_type: str, repo_key: str,
-                        issue_id: str) -> bool:
+def payload_size_exceeded(payload_bytes: int) -> bool:
+    """payload 字节数是否超过 MEDIUMTEXT 上限（纯判定，无副作用、不打日志）。
+
+    Issue #4339 R1：events 有两个写入口（本模块 `_insert_event_row` 与
+    `event_pipeline` 去重快路径的裸 INSERT），两处都必须调同一份判定；缺一处
+    就有超限 payload 被 MySQL 非严格 `sql_mode` 静默截断。
+    """
+    return payload_bytes > _MEDIUMTEXT_MAX_BYTES
+
+
+def payload_size_guard(payload_bytes: int, event_type: str, repo_key: str,
+                       issue_id: str) -> bool:
     """payload 字节数守卫：超 MEDIUMTEXT 上限 → ERROR 并拒绝写入（返回 False）。
 
     告警前缀固定为 `event payload too large` / `event payload large`，可与
     `event payload view: parse failed`（截断坏行的现象告警）分别 grep。
     拒绝写入而非截断：截断产生不可恢复的坏行，代价远高于「本次事件写失败」。
+
+    调用方约定（Issue #4339 R2）：返回 False 时必须 fail-closed —— 不写事件行、
+    不派发任务，落 `event_skipped`（reason=`event_payload_rejected`）留痕。
     """
-    if payload_bytes > _MEDIUMTEXT_MAX_BYTES:
+    if payload_size_exceeded(payload_bytes):
         log.error(
             f"event payload too large, INSERT rejected (never truncated): "
             f"bytes={payload_bytes} limit={_MEDIUMTEXT_MAX_BYTES} "
@@ -140,8 +153,8 @@ def _insert_event_row(c, repo_key: str, event_type: str, title: str, issue_id: s
     _org_id = get_org_id_by_repo_key(repo_key)
     _payload_json = json.dumps(payload or {})
     # Issue #4339：超 MEDIUMTEXT 上限直接拒绝（返回 0 = 既有写入失败语义），绝不截断落库。
-    if not _payload_size_guard(len(_payload_json.encode("utf-8")),
-                               event_type, repo_key, issue_id):
+    if not payload_size_guard(len(_payload_json.encode("utf-8")),
+                              event_type, repo_key, issue_id):
         return 0
     if idempotency_key:
         c.execute(
