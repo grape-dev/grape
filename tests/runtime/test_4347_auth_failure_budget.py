@@ -233,10 +233,10 @@ class TestSecureBudgetKey:
         assert _auth_failure_key(_fake_request("203.0.113.7", "1.1.1.1")) == "203.0.113.7"
 
     def test_trusted_proxy_accepts_xff(self, monkeypatch):
-        monkeypatch.setenv("TRUSTED_PROXY_IPS", "10.0.0.1")
-        assert _auth_failure_key(_fake_request("10.0.0.1", "198.51.100.4")) == "198.51.100.4"
+        monkeypatch.setenv("TRUSTED_PROXY_IPS", "198.51.100.10")
+        assert _auth_failure_key(_fake_request("198.51.100.10", "203.0.113.4")) == "203.0.113.4"
         # 非白名单对端即使带 XFF 也不采信
-        assert _auth_failure_key(_fake_request("10.0.0.2", "198.51.100.4")) == "10.0.0.2"
+        assert _auth_failure_key(_fake_request("198.51.100.11", "203.0.113.4")) == "198.51.100.11"
 
     def test_loopback_default_trusted(self):
         # 缺省信任本机回环（nginx 与 worker 同机部署的安全默认）
