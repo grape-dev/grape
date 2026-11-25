@@ -17,7 +17,7 @@ import os
 import sys
 import textwrap
 
-ROOT = os.path.join(os.path.dirname(__file__), "..")
+ROOT = os.path.join(os.path.dirname(__file__), "../..")
 sys.path.insert(0, ROOT)
 
 from src.domains.runtime.engine import engine_model

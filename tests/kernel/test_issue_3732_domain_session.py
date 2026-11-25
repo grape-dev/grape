@@ -95,7 +95,7 @@ def test_domain_engine_routes_to_dsn_db(monkeypatch):
 
     password = "pa@ss:w/rd#1"        # 全部是 URL 保留字符
     dsn = (f"mysql://u:{quote_plus(password)}"
-           "@db-host:3307/grape_prod_mgmt?charset=utf8mb4")
+           "@db-host:3307/grape_test_mgmt?charset=utf8mb4")
     monkeypatch.setenv("GRAPE_DSN_MGMT", dsn)
 
     from src.kernel import db_registry
@@ -104,7 +104,7 @@ def test_domain_engine_routes_to_dsn_db(monkeypatch):
     eng = engine_mod.get_domain_engine("mgmt")
     try:
         assert eng.url.drivername == "mysql+pymysql"
-        assert eng.url.database == "grape_prod_mgmt"
+        assert eng.url.database == "grape_test_mgmt"
         assert eng.url.host == "db-host"
         assert eng.url.port == 3307
         assert eng.url.password == password
@@ -218,7 +218,7 @@ def test_startup_check_flags_table_residency_mismatch(monkeypatch):
     """负向用例：DSN 指向的库缺本域关键表（external_identities）→ 启动告警。"""
     from src.kernel import db_registry
     monkeypatch.setenv("GRAPE_DSN_MGMT",
-                       "mysql://u:p@db-host:3307/grape_prod_mgmt")
+                       "mysql://u:p@db-host:3307/grape_test_mgmt")
     monkeypatch.setattr(db_registry, "new_connection",
                         lambda dom, autocommit=True: _fake_conn_factory(False))
     problems = db_registry.warn_domain_table_residency("mgmt")
@@ -229,7 +229,7 @@ def test_startup_check_flags_worker_missing_mgmt_dsn(monkeypatch):
     """负向用例：多库拓扑下 worker 缺 GRAPE_DSN_MGMT → 告警（1146 复发前兆）。"""
     from src.kernel import db_registry
     monkeypatch.setenv("GRAPE_DSN_RUNTIME",
-                       "mysql://u:p@db-host:3307/grape_prod_runtime")
+                       "mysql://u:p@db-host:3307/grape_test_runtime")
     monkeypatch.delenv("GRAPE_DSN_MGMT", raising=False)
     monkeypatch.setattr(db_registry, "new_connection",
                         lambda dom, autocommit=True: _fake_conn_factory(True))

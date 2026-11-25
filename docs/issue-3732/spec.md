@@ -4,7 +4,7 @@
 
 三库/四进程拓扑下，worker/event 进程的 mgmt 域 ORM 读路径复用进程全局 `get_engine()`
 （进程主库 = runtime 库），把 mgmt 域表 `external_identities` 的查询打到 runtime 库，
-MySQL 1146（`Table 'grape_prod_runtime.external_identities' doesn't exist`）被
+MySQL 1146（`Table 'grape_runtime.external_identities' doesn't exist`）被
 `except Exception → return []` 吞掉——「表查不到」被降级成「用户无任何第三方绑定」。
 7 天 6218 条 WARNING；repo_roles / token_resolver / mgmt user db 的凭据解析全部静默降级。
 

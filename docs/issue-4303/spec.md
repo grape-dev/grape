@@ -1,9 +1,9 @@
 # Issue #4303 需求文档（Spec）
 
 > 来源：VOD 收敛（评论 203553365）+ issue agent 深度可开发性分析（评论 203554049，评级 ready）。
-> 生产实例：2026-11-24 21:09:58 worker 停止 → 21:10:14 重启，21:12:35 首轮巡检
+> 生产实例（时间取量级表述）：worker 停止 → 十余秒后重启，首轮巡检在分钟级后恢复。
 > `sweeper: per-seq recovery failed, fallback bulk: not all arguments converted during string formatting`，
-> 9 个在途事件同秒被一刀切判 failed（8 个停留 failed；106798 需人工 redispatch 才恢复真实结论）。
+> 一批在途事件同秒被一刀切判 failed（多数停留 failed；个别需人工 redispatch 才恢复真实结论）。
 
 ## 1. 问题陈述
 

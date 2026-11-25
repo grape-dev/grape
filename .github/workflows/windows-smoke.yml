@@ -377,7 +377,7 @@ jobs:
         # test_issue_3826_count_no_fallback.py —— 三库拓扑缺 GRAPE_DSN_RUNTIME 时不得回落
         # mgmt 主库（DomainUnavailable）、COUNT 失败日志必须自带 route/target_db/pid/host，
         # 另含「代理只认 route_of」拓扑棘轮与全仓 COUNT 站点审计守门。旧实现的自有回落分支
-        # 是生产仍刷 `Table 'grape_prod_mgmt.issue' doesn't exist` 的代码侧根因，回退即复发。
+        # 是生产仍刷 `Table 'grape_mgmt.issue' doesn't exist` 的代码侧根因，回退即复发。
         env:
           GITCODE_API_TOKEN: test_token
         run: |

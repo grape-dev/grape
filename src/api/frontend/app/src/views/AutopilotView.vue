@@ -110,7 +110,7 @@
               <span
                 v-if="t.enabled && t.dispatchable === false"
                 class="apv-warn"
-                :title="t.dispatch_state_reason || tt('list.not_dispatchable')"
+                :title="dispatchReasonText(t.dispatch_state_reason, 'list')"
                 >⚠</span
               >
               <span v-if="t.enabled" class="apv-on">●</span>
@@ -172,7 +172,7 @@
           <span class="apv-blocked-ic">⚠</span>
           <div class="apv-blocked-txt">
             <b>{{ tt('detail.not_dispatchable_title') }}</b>
-            <span>{{ detail.dispatch_state_reason || tt('detail.not_dispatchable_desc') }}</span>
+            <span>{{ dispatchReasonText(detail.dispatch_state_reason, 'detail') }}</span>
           </div>
           <button class="bt bt-p bt-s" @click="editTask(detail.id)">
             {{ tt('detail.not_dispatchable_fix') }}
@@ -1087,6 +1087,19 @@ const rowMenu = reactive({ open: false, id: null, x: 0, y: 0 })
 // ═══ 工具 ═══
 const API = () => G.API
 const app = () => G.app
+// 后端 dispatch_state_reason 只下发稳定 code（D1：不下发用户可见文案）。
+// 已知 code → 语言包 key；未知/自由文本 → 回落该位置默认文案，避免直出非当前语言。
+const _DISPATCH_REASON_I18N = {
+  blocked_empty_instruction: { list: 'list.not_dispatchable',
+                               detail: 'detail.not_dispatchable_desc' },
+}
+
+function dispatchReasonText(code, where) {
+  const mapped = _DISPATCH_REASON_I18N[code] && _DISPATCH_REASON_I18N[code][where]
+  return tt(mapped || (where === 'list' ? 'list.not_dispatchable'
+                                        : 'detail.not_dispatchable_desc'))
+}
+
 function tt(key, vars) {
   return G.I18N.t('autopilot.' + key, vars)
 }
@@ -1808,10 +1821,10 @@ const EXEC_COLORS = {
   failed: '#dc3545',
   running: 'var(--a-text)',
   pending: 'var(--t3)',
-  retrying: '#e8a000',
+  retrying: 'var(--c-warning)',
   skipped: 'var(--t3)',
   dispatched: 'var(--a-text)',
-  cancelled: '#e8a000',
+  cancelled: 'var(--c-warning)',
 }
 function execIcon(st) {
   return EXEC_ICONS[st] || '•'
@@ -2178,7 +2191,7 @@ function sevIcon(sev) {
   return { high: '🔴', medium: '🟡', low: '🔵' }[sev] || '•'
 }
 function sevColor(sev) {
-  return { high: '#dc3545', medium: '#e8a000', low: 'var(--a-text)' }[sev] || 'var(--t3)'
+  return { high: '#dc3545', medium: 'var(--c-warning)', low: 'var(--a-text)' }[sev] || 'var(--t3)'
 }
 // 高级选项保存
 function saveAdvanced() {
@@ -2787,7 +2800,7 @@ onBeforeUnmount(function () {
 }
 /* Issue #3733：不可派发徽标（列表状态列） */
 .apv-warn {
-  color: #e8a000;
+  color: var(--c-warning);
   font-size: 11px;
   margin-right: 2px;
   cursor: help;
@@ -2799,14 +2812,14 @@ onBeforeUnmount(function () {
   gap: 10px;
   padding: 10px 12px;
   margin-bottom: 16px;
-  border: 1px solid #e8a000;
+  border: 1px solid var(--c-warning);
   border-radius: 8px;
-  background: rgba(232, 160, 0, 0.08);
+  background: color-mix(in srgb, var(--c-warning) 8%, transparent);
 }
 .apv-blocked-ic {
   font-size: 14px;
   line-height: 1.4;
-  color: #e8a000;
+  color: var(--c-warning);
   flex-shrink: 0;
 }
 .apv-blocked-txt {
@@ -3829,8 +3842,8 @@ onBeforeUnmount(function () {
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: rgba(232, 160, 0, 0.125);
-  color: #e8a000;
+  background: color-mix(in srgb, var(--c-warning) 12.5%, transparent);
+  color: var(--c-warning);
   vertical-align: middle;
 }
 .apv-dup-warn {
@@ -3840,8 +3853,8 @@ onBeforeUnmount(function () {
   margin-bottom: 12px;
   padding: 10px 12px;
   border-radius: 10px;
-  background: rgba(232, 160, 0, 0.08);
-  border: 1px solid rgba(232, 160, 0, 0.2);
+  background: color-mix(in srgb, var(--c-warning) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c-warning) 20%, transparent);
   font-size: 12px;
   color: var(--t2, #5b667b);
   line-height: 1.6;

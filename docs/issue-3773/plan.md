@@ -4,16 +4,16 @@
 
 | 证据 | 结论 |
 |------|------|
-| 告警全集落在 `host=ecs-grape-master-001, role=worker, unit=grape@worker`，其余三台为 0 | 单机现象，指向该 worker 的 `HERMES_HOME` |
+| 告警全集落在 `host=<host-a>, role=worker, unit=grape@worker`，其余主控为 0 | 单机现象，指向该 worker 的 `HERMES_HOME` |
 | `src/domains/runtime/agents/hermes_acp.py`：overlay 不可用/不可写时 `iso_home = src_home` 且 `_shared_home_mode = True`，state.db 为该 home 下单一文件 | 共享回退模式下所有会话共用一个 `state.db`，与 942MB 单文件一致 |
 | 同构 worker 实测：`~/.hermes/state.db` 756MB + `state.db-wal` 233MB，`sessions=6438`、`messages=147010` | 共享单文件模式在同一 worker 安装形态下可复现 |
 | 同构 worker 实测：`~/.cache/hermes-acp-homes/<cwd_hash>/state.db` 319 个，最大 43MB、多数 ≤7MB | per-issue 隔离模式存在，但单库体积远低于阈值 |
 
-**结论**：master-001 为**共享单文件**模式，清理作用于其 `HERMES_HOME/state.db`。实现同时兼容
+**结论**：<host> 为**共享单文件**模式，清理作用于其 `HERMES_HOME/state.db`。实现同时兼容
 per-issue 隔离模式：运行期 `check_state_db_size(iso_home)` 只清理当前会话库；运维脚本
 `discover_state_dbs()` 扫描 `HERMES_HOME/state.db` 与一层 `HERMES_HOME/*/state.db`，覆盖隔离模式。
 
-> 编码沙箱无法直接 SSH 到 master-001，取证链为「告警维度 + 引擎回退代码 + 同构 worker 实测样本」；
+> 编码沙箱无法直接 SSH 到 <host>，取证链为「告警维度 + 引擎回退代码 + 同构 worker 实测样本」；
 > 清理范围按模式自适应，两种模式下均安全。
 
 ## 2. 治理路线

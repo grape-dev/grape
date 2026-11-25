@@ -5643,7 +5643,7 @@ def _check_identity_domain() -> str:
 def _check_identity_relations(relation_kind=None) -> list[str]:
     """启动期自检：当前库是否具备身份域关系（基表或跨域视图）。
 
-    Issue #3897：`external_identities` 在生产 `grape_prod_runtime` 缺失（1146），
+    Issue #3897：`external_identities` 在生产 `grape_runtime` 缺失（1146），
     属于「代码已上线、跨域视图未补建」的 schema 漂移。迁移只会补 owner 基表，
     非 owner 库的视图由部署脚本 `scripts/domain_view_freshness.py --repair` 建
     （补建清单在 `scripts/view_create_missing_allowlist.txt`）。

@@ -1,6 +1,6 @@
 """Issue #4203：进程级内存指标（worker 主进程 + 引擎子进程 RSS + cgroup 限额）。
 
-背景：master-004 24h 内 4 次 OOM kill，杀进程前节点 MemAvailable 39.5% —— 进程/cgroup 级
+背景：某主控机 24h 内多次 OOM kill，杀进程前节点 MemAvailable 仍未耗尽（约剩四成）—— 进程/cgroup 级
 内存失控，但 /metrics 上没有任何进程级 RSS 序列，「看不见」也就无法设限与告警。
 
 本模块提供拉取时采样（on_metrics_scrape 钩子调用，无新链路）：

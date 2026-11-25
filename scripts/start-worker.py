@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Issue #4203：worker uvicorn launcher —— 预 bind socket 后再启动（先监听再 lifespan）。
 
-背景：master-004 OOM SIGKILL 后 systemd 重启 + uvicorn 启动共 12.1s，期间网关 502 共
-339 次。窗口构成 = RestartSec(5s) + uvicorn bind + lifespan 初始化。systemd 侧已把
+背景：OOM SIGKILL 后 systemd 重启 + uvicorn 启动共十余秒，期间网关 502 计数在数百
+量级。窗口构成 = RestartSec(5s) + uvicorn bind + lifespan 初始化。systemd 侧已把
 RestartSec 降到 1s；本脚本把「bind 端口」从 uvicorn 生命周期里提到前面——socket 先
 listen，uvicorn 直接在既有 socket 上 accept，lifespan 再慢端口也不再拒绝连接
 （kernel backlog 已就绪，连接排队等待 app 就绪）。

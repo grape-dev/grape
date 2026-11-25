@@ -13,10 +13,10 @@ def test_cross_engine_warning_fields_and_dedupe(caplog):
     with caplog.at_level(logging.WARNING, logger="devops-bot"):
         assert backend_health.note_cross_engine(
             "t_3928_cross", 17641, "codearts-cred0",
-            "hermes-worker-ecs-grape-wo-0001") is True
+            "hermes-worker-<host>") is True
         assert backend_health.note_cross_engine(
             "t_3928_cross", 17641, "codearts-cred0",
-            "hermes-worker-ecs-grape-wo-0001") is False
+            "hermes-worker-<host>") is False
     msgs = [r.getMessage() for r in caplog.records if "CROSS_ENGINE_EXECUTION" in r.getMessage()]
     assert len(msgs) == 1, "同一 task 只告警一次"
     msg = msgs[0]

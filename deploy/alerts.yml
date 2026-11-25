@@ -285,7 +285,7 @@ groups:
 
       # Issue #3772：no_progress 无进展检测扫描连续失败
       # 语义：扫描入口异常被吞后 return 0 = 本轮不检测；若只留 WARNING，检测停摆不可见
-      # （2026-11 实测 MySQLCompatCursor 缺迭代协议 → 4 台主控 243 条/小时恒失败）。
+      # （实测：MySQLCompatCursor 缺迭代协议时，多台主控每小时恒数十至数百条失败）。
       # 阈值：扫描周期 60s，5 分钟内累计 5 次失败 ≈ 连续停摆 5 个周期。
       # 排查：scheduler 日志 "no_progress: scan running tasks failed"；确认 DB 后端
       # cursor 迭代/上下文协议与 SQL 方言；修复后指标增量应归零。
@@ -298,8 +298,8 @@ groups:
           summary: "No-progress task scan is failing repeatedly"
           description: "The no_progress sweep has failed at least 5 times in 5 minutes, so stuck running tasks may never be auto-requeued. Check master scheduler logs for 'no_progress: scan running tasks failed', then verify the DB backend cursor iteration/context protocol and SQL dialect."
       # Issue #4203：内核 OOM killer 选中本机任一进程即 P1（critical，值班立即响应）。
-      # 语义：master-004 曾 24h 内 4 次 OOM kill，前 3 次选中引擎子进程（无外显），
-      # 第 4 次选中 worker 主进程才 339 次 502 + 终态/消息回执丢失。任何增量都说明
+      # 语义：<host> 曾 24h 内多次 OOM kill，前 3 次选中引擎子进程（无外显），
+      # 第 4 次选中 worker 主进程才 数百次 502 + 终态/消息回执丢失。任何增量都说明
       # 进程内存失控或 cgroup 限额(MemoryMax)生效，必须当场取证。
       # 排查：dmesg -T | grep -i -E "oom|killed process" 取 victim 名称与 total-vm/rss；
       # systemctl show grape-worker-server -p MemoryMax,MemoryHigh,MemoryAccounting；

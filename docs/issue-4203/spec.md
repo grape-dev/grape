@@ -4,9 +4,9 @@
 
 ## 1. 背景
 
-master-004 24h 内 4 次 OOM kill（10:25/10:49/11:17/11:39）；11:39 主进程被 SIGKILL 后
-systemd 重启 + uvicorn 启动共 12.1s，窗口内网关 502 共 339 次，其中 `tasks/complete` 3 次、
-`tasks/*/messages` 28 次回执丢失（任务可能卡 running）。被杀前节点 MemAvailable 39.5%，
+某主控机 24h 内多次 OOM kill（间隔分钟到小时量级）；最近一次主进程被 SIGKILL 后
+systemd 重启 + uvicorn 启动共十余秒，窗口内网关 502 计数在数百量级，其中 `tasks/complete` 3 次、
+`tasks/*/messages` 28 次回执丢失（任务可能卡 running）。被杀前节点 MemAvailable 约四成，
 属进程/cgroup 级内存失控而非整机耗尽。
 
 ## 2. 目标

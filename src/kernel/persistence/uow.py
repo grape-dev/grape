@@ -7,7 +7,7 @@
 - **域路由（Issue #3897 / #3732 同口径）**：`uow(domain="mgmt")` 绑该域引擎
   （`get_domain_engine`），而不是进程主库。三库拓扑下 worker/event 进程主库是
   runtime 库，identity 表（owner=mgmt）在那边只是跨域视图——固定绑主库会让每次
-  身份解析 1146（`Table 'grape_prod_runtime.external_identities' doesn't exist`）。
+  身份解析 1146（`Table 'grape_runtime.external_identities' doesn't exist`）。
   跨域表（mgmt/runtime/insight，归属见 configs/table_ownership.json）的 ORM 事务
   一律传 owner 域；`uow()` 无参语义不变（单库/本域进程零回归）。
 - Issue #3732 与 #3897 收敛到同一处实现：本模块只保留 `uow(domain)`（含

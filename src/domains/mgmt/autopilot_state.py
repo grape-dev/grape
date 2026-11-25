@@ -17,10 +17,11 @@ AUTOPILOT_STATE_OK = ""
 # 已启用但不可派发：指令为空（trim 后为空串）
 AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION = "blocked_empty_instruction"
 
-# 原因文案：直接进任务页/接口出参，禁止编造指令内容（id=6 的指令需业务方提供）
-AUTOPILOT_EMPTY_INSTRUCTION_REASON = (
-    "任务指令为空：已启用但不可派发，补齐巡检指令后将自动恢复按 cron 派发"
-)
+# 原因出参：**稳定 code，不是给用户看的文案**（D1 国际化守卫）——
+# 后端一律不下发中文串，界面按 code 取语言包（shell/locales/{zh,en}/autopilot.json
+# 的 list.not_dispatchable / detail.not_dispatchable_desc）。历史库里若有自由文本，
+# 界面回落到语言包默认文案，不做机器翻译。
+AUTOPILOT_EMPTY_INSTRUCTION_REASON = AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION
 
 
 def reason_for_state(state: str) -> str:
