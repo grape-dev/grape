@@ -3409,6 +3409,9 @@ def _build_cascade_terminal_update(cols: set, values: dict):
         ("failure_info", "failure_info=?", True, values.get("failure_info")),
     )
     _sets, _params = [], []
+    if values.get("failure_info") is not None:
+        _specs = _specs + (("failure_info", "failure_info=?", True,
+                            values.get("failure_info")),)
     for _col, _frag, _has_param, _val in _specs:
         if _known and _col not in _known:
             continue
@@ -3586,8 +3589,13 @@ def _cascade_event_terminal_impl(cursor, event_seq: int, status: str, exit_code:
 #: 事件「仍活跃」的判定口径（未终态 = 级联收敛还没成功过）
 _EVENT_ACTIVE_STATUSES = ("pending", "running", "dispatched")
 
+#: `reconverge_terminal_gaps` 单次扫描上限（PR #2157 复审 C3 数值证据门）：
+#: 每次扫全库且逐个事件重放幂等收敛，单进程一次处理 200 条已远大于生产存量
+#: （1054 期间累计未收敛事件 < 50 条）；超出部分由下一轮调用继续，不丢数据。
+RECONVERGE_SCAN_LIMIT = 200
 
-def reconverge_terminal_gaps(seqs=None, limit: int = 200) -> dict:
+
+def reconverge_terminal_gaps(seqs=None, limit: int = RECONVERGE_SCAN_LIMIT) -> dict:
     """Issue #3877 存量补偿入口：任务已终态但事件仍活跃 → 幂等重跑一次收敛。
 
     生产 1054 期间（seq 90081 / 94533 / 95284 等）事件卡在 running：任务早已终态，

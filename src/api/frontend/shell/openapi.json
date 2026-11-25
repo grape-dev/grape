@@ -36255,9 +36255,7 @@
   },
   "x-changelog": {
     "version": "2.3.0a1",
-    "added": [
-      "/api/repos/{owner}/{repo_name}/bot-token"
-    ],
+    "added": [],
     "removed": [],
     "deprecated": [
       "/api/dashboard/efficiency"
@@ -36299,7 +36297,7 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "e4886293da",
-  "x-generated-at": "2026-11-25T05:15:25.061724+00:00",
+  "x-source-commit": "c275ccd3d",
+  "x-generated-at": "2026-11-25T05:22:55.590610+00:00",
   "tags": []
 }

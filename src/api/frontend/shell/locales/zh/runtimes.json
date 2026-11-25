@@ -128,7 +128,10 @@
     "platform_disabled_tip": "关联的沙箱平台已禁用：不再新建沙箱，启用请在平台详情操作",
     "cred_id_tip": "凭据 ID——同机多实例时机器侧服务名为 sandbox-worker-<实例ID>-<凭据ID>，可用 systemctl 管理",
     "roles_disabled": "已停用",
-    "roles_disabled_tip": "该引擎的角色标签已全部停用（enabled=0），当前不会被任何任务选中；打开「角色标签」勾选并保存即可重新启用"
+    "roles_disabled_tip": "该引擎的角色标签已全部停用（enabled=0），当前不会被任何任务选中；打开「角色标签」勾选并保存即可重新启用",
+    "engine_uid": "引擎 UID",
+    "engine_uid_stale": "上报 UID 失效",
+    "engine_uid_stale_tip": "引擎上报的 engine_uid 未命中平台记录（近期失效上报：{{uids}}）。重新注册引擎可回填新 UID。"
   },
   "empty": {
     "no_engines": "暂无引擎",

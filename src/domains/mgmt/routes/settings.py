@@ -1153,6 +1153,19 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     from src.domains.mgmt.user import db as user_db
     from src.domains.runtime.public import instance_name
     from src.kernel.session_manager import db, db_lock
+    # Issue #4349：engine_uid 比对结果（DB 行 uid vs 引擎上报 uid）的 stale 报告源
+    # ——v2 claim/heartbeat 解析失效时的进程内 TTL 注册表（runtime 域 stale_uid）。
+    from src.domains.runtime.engine import stale_uid as _stale_uid
+    _stale_reps_cache: dict = {}
+
+    def _stale_reps_for(cid: int) -> list:
+        """同凭据多引擎行共享一次快照（列表页 N 引擎 × 1 次注册表扫描）。"""
+        if cid not in _stale_reps_cache:
+            try:
+                _stale_reps_cache[cid] = _stale_uid.reports_for_credential(cid)
+            except Exception:
+                _stale_reps_cache[cid] = []
+        return _stale_reps_cache[cid]
 
     uid = str(user.get("id") or "")
     uname = user.get("username") or ""
@@ -1271,6 +1284,15 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             rt["repo_key"] = from_repo_key(cred.get("repo_key", ""))
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
         rt["spec"] = cred.get("spec") or ""
+        # Issue #4349：engine_uid 比对结果——DB 行 engine_uid vs 引擎上报 uid。
+        # stale 报告来自 v2 claim/heartbeat 解析失效时的进程内 TTL 注册表；
+        # 报告尽力关联的 runtime 行（claim/heartbeat 回退 id）标 stale，无报告
+        # 或未关联到本行 → matched。详情端点（get_agent_runtime_detail）复用
+        # 本函数，前端引擎详情弹窗据此展示 stale 标记（RuntimesView.vue）。
+        rt["engine_uid_stale_reports"] = _stale_reps_for(cid)
+        rt["engine_uid_status"] = ("stale" if any(
+            rt.get("id") in (rep.get("runtime_ids") or [])
+            for rep in rt["engine_uid_stale_reports"]) else "matched")
         # Issue #2133：spawn_failed 时间窗降级 / 场景解绑恢复入口（前端 degraded 高亮 + 一键加回）
         rt["spawn_fail_degraded"] = bool(rt.get("spawn_fail_degraded_at"))
         rt["detached_from_scenes"] = bool(rt.get("detached_from_scenes_at"))

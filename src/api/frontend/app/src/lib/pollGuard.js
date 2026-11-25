@@ -49,12 +49,15 @@ export function pollIntervalFor(action) {
 export const SESSION_EXPIRED_EVENT = 'grape:session-expired'
 export const SESSION_RESTORED_EVENT = 'grape:session-restored'
 
-/** 高频轮询的降频步长：显式值优先（5s→15s / 2s→10s / 3s→10s），缺省按 base 三倍放大。 */
+/** 缺省降频倍数（PR #2157 复审 C3 数值证据门）：无显式 degradeIntervalMs 时按 base × 3 放大。 */
+export const DEGRADE_FACTOR = 3
+
+/** 高频轮询的降频步长：显式值优先（5s→15s / 2s→10s / 3s→10s），缺省按 base × DEGRADE_FACTOR。 */
 export function degradeIntervalFor(baseMs, degradeMs) {
   const base = Number(baseMs) || POLL_INTERVAL_MS
   const coded = Number(degradeMs) || 0
   if (coded > base) return coded
-  return base * 3
+  return base * DEGRADE_FACTOR
 }
 
 function _noop() {}

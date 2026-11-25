@@ -94,12 +94,17 @@ def _norm_stage(stage) -> str:
     return s if s in FAIL_STAGES else "update"
 
 
+#: 缺列标签最大长度（PR #2157 复审 C3 数值证据门）：Prometheus label 值越长基数越大，
+#: cascade 五列全缺时拼接约 90 字符，96 覆盖实际取值且留一点余量后即截断保基数可控。
+MISSING_LABEL_MAX_CHARS = 96
+
+
 def missing_label(columns: Iterable[str] | None) -> str:
     """缺列标签值：列名按固定顺序拼串（空 → ``-``，超长截断防标签爆炸）。"""
     _cols = sorted({str(c).strip() for c in (columns or ()) if str(c).strip()})
     if not _cols:
         return "-"
-    return ",".join(_cols)[:96]
+    return ",".join(_cols)[:MISSING_LABEL_MAX_CHARS]
 
 
 def observe_failed(reason, stage: str = "update") -> dict:

@@ -4733,7 +4733,7 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
     - mgmt（单库/不筛域）：分类字典表必须存在，且一级活跃必须恰好 KEEP_L1_IDS；
     - mgmt（单库/不筛域）：autopilot_tasks 状态三列的 COLUMN_DEFAULT 必须是空串
       （`autopilot_dispatch_state.state_column_defaults_converged`）。加这一项的
-      原因：202611240011 的判据在 PR #2157 前几版里把 NULL 与 '' 折成同一态，
+      原因：autopilot 状态列默认值迁移（现 202611250007）的判据在 PR #2157 前几版里把 NULL 与 '' 折成同一态，
       迁移空转却盖章（假绿），那些「已盖章」的库启动时不会再跑 fn——只有把同一
       后置校验挂到台账之外的核对点，旧判据盖章的库才会在启动日志暴露漂移；
       SQLite 侧列定义本身带 DEFAULT ''，该函数直接通过（N/A）。
@@ -4775,7 +4775,7 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
                 failures.append(f"mgmt organization 仓库创建选项列后置校验失败: {e}")
             try:
                 # PR #2157 复审 Required：台账之外再核一次状态三列默认值。旧判据
-                # （把 COLUMN_DEFAULT NULL 当已收敛）盖章的库不会重跑 202611240011，
+                # （把 COLUMN_DEFAULT NULL 当已收敛）盖章的库不会重跑 202611250007，
                 # 只有这里能让「已盖章但目标未到位」在启动日志暴露。
                 from src.domains.mgmt.migrations.autopilot_dispatch_state import (
                     state_column_defaults_converged,
@@ -4791,6 +4791,16 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
                 verify_skill_classification_columns(conn=conn)
             except Exception as e:  # noqa: BLE001
                 failures.append(f"runtime skill 列后置校验失败: {e}")
+        if dom in ("", "insight"):
+            try:
+                # PR #2157 复审 R1：台账已盖章但目标缺失的存量库（表只在 _NEW_TABLES
+                # 登记过、建表迁移从未跑）不会重跑索引迁移，只有这里能让漂移进启动日志。
+                from src.domains.insight.observability.webhook_rejects import (
+                    verify_time_index as verify_webhook_rejects_index,
+                )
+                verify_webhook_rejects_index()
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"insight obs_webhook_rejects 表/时间窗索引后置校验失败: {e}")
     if failures:
         msg = "迁移目标后置校验失败（台账与目标不一致，需按域重跑）: " + "; ".join(failures)
         log.error(msg)
@@ -4798,7 +4808,7 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
             raise RuntimeError(msg)
     else:
         log.info("迁移目标后置校验通过（分类一级集合 / skill 分类列 / organization 仓库列"
-                 " / autopilot 状态列默认值）")
+                 " / autopilot 状态列默认值 / obs_webhook_rejects 时间窗索引）")
     return failures
 
 
@@ -9965,7 +9975,7 @@ register_migration(
 )
 
 
-def _migration_202611240011_autopilot_state_column_defaults() -> None:
+def _migration_202611250007_autopilot_state_column_defaults() -> None:
     """存量库修列：三列 TEXT NOT NULL 无默认 → VARCHAR(255) NOT NULL DEFAULT ''。
 
     2026-11-25 部署验证实测：`TEXT NOT NULL DEFAULT ''` 在 MySQL 8.0 落地为
@@ -9980,7 +9990,7 @@ def _migration_202611240011_autopilot_state_column_defaults() -> None:
     ensure_state_column_defaults()
 
 
-def _postcheck_202611240011_autopilot_state_column_defaults() -> None:
+def _postcheck_202611250007_autopilot_state_column_defaults() -> None:
     """盖章前校验三列默认值确已收敛为空串（Issue #3648 第 6 条约定）。"""
     from src.domains.mgmt.migrations.autopilot_dispatch_state import (
         state_column_defaults_converged,
@@ -9990,12 +10000,12 @@ def _postcheck_202611240011_autopilot_state_column_defaults() -> None:
 
 
 register_migration(
-    version="202611240011",
+    version="202611250007",
     name="autopilot-state-column-defaults",
     kind="cleanup",
     domains=("mgmt",),
-    fn=_migration_202611240011_autopilot_state_column_defaults,
-    post_check=_postcheck_202611240011_autopilot_state_column_defaults,
+    fn=_migration_202611250007_autopilot_state_column_defaults,
+    post_check=_postcheck_202611250007_autopilot_state_column_defaults,
 )
 
 
@@ -12173,16 +12183,17 @@ register_migration(
 # skill_category（is_active=1）；15 条种子里没有 content-generation，内容生成类
 # 技能每轮判未命中、category_id 恒 0（原实现还逐技能刷一条 WARNING）。
 # SQL 住属主域 migrations 下（跨域守卫 P0-2），这里只做注册引导。号段核对（提交前）：
-# 源码 register_migration 与各目标库 grape_t_schema_migrations 均未占用 202611240012
-# （当前最大 202611240011）。字面量登记 version/name/kind，供
-# tests/api/test_migration_track_guard.py 解析。
+# 基线 arch-weekly-11 已用 202611240011（#3564 引擎优先级）/202611240012（#4063
+# review 点快照列），本迁移与 autopilot 状态列默认值改取 202611250007/008——同号
+# 异名会让台账按 version 判「已执行」永久跳过（PR #2157 复审 C1）。字面量登记
+# version/name/kind，供 tests/api/test_migration_track_guard.py 解析。
 
 from src.domains.mgmt.migrations.skill_category_content_generation_seed import (
     seed_content_generation_category as _fn_seed_content_generation_category,
     verify_content_generation_category as _post_content_generation_category,
 )
 register_migration(
-    version="202611240012",
+    version="202611250008",
     name="skill-category-seed-content-generation",
     kind="backfill",
     fn=_fn_seed_content_generation_category,
@@ -12822,57 +12833,37 @@ register_migration(
 )
 
 
-# ===== Issue #3750：obs_webhook_rejects(created_at, repo_key) 时间窗索引 =====
+# ===== Issue #3750：obs_webhook_rejects 建表 + (created_at, repo_key) 时间窗索引 =====
 # 该索引此前只写在**冻结老轨** `_create_indexes()` 里：存量库已盖 legacy-stamp
 # 202610300001，启动时不跑老轨，于是 #3750 的「按时间窗计数」（告警求值 + 14 天
 # 留存清理都是 `WHERE created_at >= ?`）在生产实际仍是全表扫 —— 正是
 # tests/api/test_migration_track_guard.py::test_legacy_index_ddl_is_frozen 恒红的
-# 原因（该守卫禁止往老轨新增索引）。改注册式迁移后，存量库下次启动即补齐并盖章
-# （先探测再建，幂等；三库模式下切到 insight 域连接）。
-# 版本号 202611250006：202611250001..005 已被本批迁移占用（见上面各条注释）。
-_OBS_WEBHOOK_REJECTS_TIME_INDEX = "idx_obs_webhook_rejects_time_repo"
+# 原因（该守卫禁止往老轨新增索引）。
+#
+# 两条注册式迁移（PR #2157 复审 C2，缺一不可）：
+#   · 202611240016 create-obs-webhook-rejects-table —— 建表。此前本表只登记在
+#     `_NEW_TABLES`（:643），而 `_create_tables()` 只在新装库首跑，存量库根本不跑，
+#     于是索引迁移每次 1146「no such table」、永远盖不上章，写侧只剩 WARNING 丢行
+#     （webhook_rejects._write_rows）。版本号取 202611240016（基线已占 001..015，
+#     且必须排在 202611250006 之前，否则首次启动建索引仍撞缺表）。
+#   · 202611250006 obs-webhook-rejects-time-repo-index —— 补索引。fn 自己再判一次表
+#     在位（台账已盖章/建表被跳过的库也能补齐），post_check 复核表 + 索引。
+# SQL 住属主域（insight）：`webhook_rejects.ensure_table / ensure_time_index / verify_*`。
+from src.domains.insight.observability.webhook_rejects import (  # noqa: E402
+    ensure_table as _fn_obs_webhook_rejects_table,
+    verify_table as _postcheck_obs_webhook_rejects_table,
+    ensure_time_index as _fn_obs_webhook_rejects_time_index,
+    verify_time_index as _postcheck_obs_webhook_rejects_time_index,
+)
 
-
-def _fn_obs_webhook_rejects_time_index() -> None:
-    """Issue #3750：补 webhook 验签拒绝台账的时间窗索引（幂等）。"""
-    from src.kernel.session_manager import db as _db, db_lock
-
-    conn = _migration_conn("insight", default=_db)
-    with (db_lock if conn is _db else nullcontext()):
-        c = conn.cursor()
-        if _index_present(c, "obs_webhook_rejects", _OBS_WEBHOOK_REJECTS_TIME_INDEX):
-            return
-        if _mysql_backend():
-            # repo_key / created_at 是 TEXT，MySQL 建索引必须带前缀（1170）；迁移走
-            # db_registry._CompatCursor，mysql_compat「自动补 (191)」的特判不生效。
-            ddl = (f"CREATE INDEX {_OBS_WEBHOOK_REJECTS_TIME_INDEX} "
-                   "ON obs_webhook_rejects(created_at(191), repo_key(191))")
-        else:
-            ddl = (f"CREATE INDEX {_OBS_WEBHOOK_REJECTS_TIME_INDEX} "
-                   "ON obs_webhook_rejects(created_at, repo_key)")
-        try:
-            c.execute(ddl)
-        except Exception as e:  # noqa: BLE001
-            if "1061" in str(e) or "already exists" in str(e).lower():
-                log.info(f"{_OBS_WEBHOOK_REJECTS_TIME_INDEX} 已存在（1061），视为建成")
-            else:
-                conn.rollback()
-                raise
-        conn.commit()
-
-
-def _postcheck_obs_webhook_rejects_time_index() -> None:
-    """post_check：索引在位才盖章（不在位 raise，不盖章、下次启动重试）。"""
-    from src.kernel.session_manager import db as _db, db_lock
-
-    conn = _migration_conn("insight", default=_db)
-    with (db_lock if conn is _db else nullcontext()):
-        c = conn.cursor()
-        if not _index_present(c, "obs_webhook_rejects",
-                              _OBS_WEBHOOK_REJECTS_TIME_INDEX):
-            raise RuntimeError(
-                f"{_OBS_WEBHOOK_REJECTS_TIME_INDEX} 缺失（索引未建成，不盖章，下次启动重试）")
-
+register_migration(
+    version="202611240016",
+    name="create-obs-webhook-rejects-table",
+    kind="safe",
+    domains=("insight",),
+    fn=_fn_obs_webhook_rejects_table,
+    post_check=_postcheck_obs_webhook_rejects_table,
+)
 
 register_migration(
     version="202611250006",
@@ -12885,9 +12876,7 @@ register_migration(
 
 
 register_migration(
-    # 版本号避让（合并方改号）：202611240012 已被本分支 #3798 技能分类补种占用并盖章，
-    # 撞号会被判「已执行」永久跳过 → 顺延取未占用的 202611240017。
-    version="202611240017",
+    version="202611240012",
     name="issue-review-point-snapshot-columns",
     kind="safe",
     domains=("runtime",),
@@ -12930,15 +12919,13 @@ def _postcheck_agent_tasks_engine_priorities() -> None:
             return
         if not _uc_has_column(c, "agent_tasks", "engine_priorities"):
             raise RuntimeError(
-                "202611240016 post_check 未收敛：agent_tasks 缺列 engine_priorities"
+                "202611240011 post_check 未收敛：agent_tasks 缺列 engine_priorities"
                 "（不盖章，下次启动重试）")
-    log.info("202611240016 post_check 通过：agent_tasks.engine_priorities 在位")
+    log.info("202611240011 post_check 通过：agent_tasks.engine_priorities 在位")
 
 
 register_migration(
-    # 版本号避让（合并方改号）：202611240011 已被本分支 #4262 autopilot 默认值收敛占用
-    # 并盖章，撞号会被判「已执行」永久跳过 → 顺延取未占用的 202611240016。
-    version="202611240016",
+    version="202611240011",
     name="issue3564-agent-tasks-engine-priorities",
     kind="safe",
     fn=_fn_add_agent_tasks_engine_priorities,

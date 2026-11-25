@@ -1045,7 +1045,8 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
             pool_engine_uids="", engine_uid=None, engine_name_snapshot="",
             # Issue #1208：direct/failed 快照行无 selector 语义（列覆盖契约，值为空）
             pool_selector="",
-# Issue #3790：来源随失败快照落库（scene_missing 可筛；未传保持历史空串语义）
+            # Issue #3790：来源随失败快照落库（scene_missing 可筛；未传保持历史空串语义）
+            # Issue #3564：engine_priorities 由失败快照列清单覆盖（引擎优先级与失败无关，值空）
             pool_engine_source=pool_engine_source or "", engine_priorities="",
             status="failed", stream_ended=1, self_reported=0,
             exit_code=1, result_text="", errors=_reason, stderr="",

@@ -1,7 +1,7 @@
 {
   "contract_version": "2.3.0a1",
-  "endpoint_count": 402,
-  "min_endpoint_count": 361,
+  "endpoint_count": 403,
+  "min_endpoint_count": 362,
   "groups": [
     "a2a",
     "agents",
@@ -36,6 +36,6 @@
     "task",
     "tasks"
   ],
-  "change_reason": "Issue #3759: add POST /api/repos/{owner}/{repo}/vcs-health/reset (endpoints 401->402, min_endpoint_count 360->361); the same re-baseline also absorbs two pre-existing, unrelated drifts: runtime_tags_set description update and HeartbeatBody.metrics made nullable (neither is part of this issue)",
-  "source_commit": "c3e24efc3"
+  "change_reason": "merge origin/arch-weekly-11 into PR #2157: +1 endpoint from the baseline branch (premerge 402 + base 1), groups unchanged",
+  "source_commit": "c275ccd3d"
 }

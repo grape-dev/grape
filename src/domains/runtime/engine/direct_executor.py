@@ -450,13 +450,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         # Issue #1858：direct 执行同样注入三面基址（与 enqueue/重派/worker 同源）。
         **resolve_task_server_env(runtime_id),
     }
-    # Issue #94（weekly-09）：direct 分支 exec_account 可能带平台前缀全名（gitcode:<owner>/<repo>，
-    # 来自 local_claimer task.account），naive split 会得到 gitcode:<owner> → git-repo/repos 404。
-    # 统一用 split_owner_repo 剥前缀，与入队（484/2829/3134）口径一致，REPO_OWNER/REPO_NAME 无前缀。
-    from src.kernel.repo_key import split_owner_repo as _sor_env
-    _repo_owner_env, _repo_name_env = _sor_env(exec_account or repository)
-    env_extra["REPO_OWNER"] = _repo_owner_env
-    env_extra["REPO_NAME"] = _repo_name_env
+    # Issue #94（weekly-09）的「exec_account 带平台前缀全名，naive split 会得到
+    # gitcode:<owner>」问题已由上面的 derive_repo_identity 统一覆盖（它与入队
+    # 484/2829/3134 同一入口、同样剥 provider 前缀）。**不要**再在此处用
+    # `split_owner_repo(exec_account or repository)` 覆盖 REPO_OWNER/REPO_NAME——
+    # 那会把触发人账号（exec_account）当成仓库 owner（Issue #1660 回归，反馈 2874）；
+    # 该覆盖块由 #2157 合并基线时带入，已按 #1660 口径删除。
     # base 侧 #3482-rebase 移植：env 供 agent 复述/脱敏定位（与 worker 口径一致）
     env_extra["REPO_KEY"] = repo_key or repository
 

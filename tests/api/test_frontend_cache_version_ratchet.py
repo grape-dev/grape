@@ -19,15 +19,15 @@ APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend"
 # 页面 → {模块: 冻结版本}（2026-11-13 缓存版本回填/统一后快照）
 FROZEN = {
     'index.html': {
-        'account-view.js': '69',
-        'agent-view.js': '52',
+        'account-view.js': '70',
+        'agent-view.js': '53',
         'all-views.css': '85',
         'api.js': '39',
         'app.css': '11',
         'app.js': '311',
         'auth.css': '1',
         'auto-recovery.js': '2',
-        'autopilot-view.js': '74',
+        'autopilot-view.js': '75',
         'chat-view.js': '63',
         'dashboard-view.js': '94',
         'deeplink.js': '1',
@@ -36,7 +36,7 @@ FROZEN = {
         'feedback-dialog.js': '50',
         'host-status.js': '1',
         'im-channel.js': '57',
-        'issues-view.js': '74',
+        'issues-view.js': '75',
         'knowledge-view.js': '49',
         'login-view.js': '2',
         'my-feedback-detail.js': '50',
@@ -59,7 +59,7 @@ FROZEN = {
     },
     'admin.html': {
         'admin-view.css': '3',
-        'admin-view.js': '53',
+        'admin-view.js': '54',
         'pwd-blocklist.js': '3',
         'tokens.css': '2',
     },

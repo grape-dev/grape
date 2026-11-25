@@ -753,8 +753,6 @@ def merge_event_payload(seq: int, extra: dict) -> bool:
             except Exception:
                 pass
             return False
-
-
 # ====== Issue #3444：评论→Issue 事件内容去重 ======
 # 背景：同一评论重复落库时评论 id 不同（两个评论 id，已脱敏），既有
 # `comment:<id>` 幂等键无法判重，两个 issue 处理事件并行派发。

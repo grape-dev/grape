@@ -72,7 +72,7 @@ class TestSkillCategoryTable:
         with db_lock:
             c = db.cursor()
             c.execute("SELECT COUNT(*) FROM skill_category")
-            # 15 条老种子 + Issue #3798 迁移 202611240012 补种的 content-generation
+            # 15 条老种子 + Issue #3798 迁移 202611250008 补种的 content-generation
             assert c.fetchone()[0] == 16
 
     def test_seed_data(self):

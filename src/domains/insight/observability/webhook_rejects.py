@@ -296,3 +296,96 @@ def maybe_cleanup(interval: int = CLEANUP_INTERVAL_SEC, days: int = RETENTION_DA
     except Exception as e:  # noqa: BLE001 - 清理失败不影响主链路
         log.warning(f"obs webhook rejects cleanup failed: {e}")
         return 0
+
+# ===== 迁移实现（Issue #3750 / PR #2157 复审 C2）：建表 + 时间窗索引 =====
+# 为什么在这里：表归 insight 域（DDL 见 `schema_ddl._OBS_WEBHOOK_REJECTS_DDL`），
+# 建表/建索引语句若写在 `src/api/db_setup.py` 会被 tests/arch/test_foreign_table_refs.py
+# 判成 api 层新增跨域引用；注册（register_migration）仍由 db_setup 做，本模块只导出实现。
+#
+# 事故形态（PR #2157 复审 C2）：obs_webhook_rejects 此前只登记在 `_NEW_TABLES`，
+# 而 `_create_tables()` 只在新装库首跑——存量库启动不跑它，于是 202611250006 的
+# `CREATE INDEX` 每次都 1146（no such table），失败不盖章、每次启动重试，写侧也只剩
+# 「obs webhook rejects ingest failed」WARNING 丢诊断行。
+
+TABLE = "obs_webhook_rejects"
+TIME_INDEX = "idx_obs_webhook_rejects_time_repo"
+#: MySQL 索引前缀长度：repo_key / created_at 是 TEXT，不带前缀会 1170。
+_MYSQL_INDEX_PREFIX = 191
+
+
+def _migration_conn():
+    """迁移专用连接（三库模式切 insight 域，单库回落进程库）。"""
+    from src.api import db_setup as ds
+    from src.kernel.session_manager import db as _db
+
+    return ds._migration_conn("insight", default=_db)
+
+
+def ensure_table(conn: Any = None) -> bool:
+    """建表（缺失才建；幂等）。返回 True=本次新建，False=已在位。
+
+    不依赖 `_create_tables()`（存量库不跑）——注册式迁移自己建，才盖得上章。
+    """
+    from src.api import db_setup as ds
+    from src.domains.insight.schema_ddl import _OBS_WEBHOOK_REJECTS_DDL
+
+    target = conn if conn is not None else _migration_conn()
+    c = target.cursor()
+    if ds._table_present(c, TABLE):
+        return False
+    c.execute(_OBS_WEBHOOK_REJECTS_DDL)
+    target.commit()
+    return True
+
+
+def verify_table(conn: Any = None) -> None:
+    """后置校验：表在位才揭章；缺失 raise（不盖章，下次启动重试）。"""
+    from src.api import db_setup as ds
+
+    target = conn if conn is not None else _migration_conn()
+    if not ds._table_present(target.cursor(), TABLE):
+        raise RuntimeError(f"202611240016 post_check 未收敛：{TABLE} 缺失（不盖章，下次启动重试）")
+    log.info(f"202611240016 post_check 通过：{TABLE} 在位")
+
+
+def ensure_time_index(conn: Any = None) -> bool:
+    """补 `(created_at, repo_key)` 时间窗索引（幂等）。返回 True=本次新建。
+
+    先判表在位、缺失则先建：存量库台账可能已按「同号不同名」/历史版本盖过索引迁移章，
+    表却因为没登记注册式建表而从来不存在——不先建表就只能 1146 失败、永远盖不上章。
+    """
+    from src.api import db_setup as ds
+
+    target = conn if conn is not None else _migration_conn()
+    ensure_table(target)
+    c = target.cursor()
+    if ds._index_present(c, TABLE, TIME_INDEX):
+        return False
+    if ds._mysql_backend():
+        ddl = (f"CREATE INDEX {TIME_INDEX} ON {TABLE}"
+               f"(created_at({_MYSQL_INDEX_PREFIX}), repo_key({_MYSQL_INDEX_PREFIX}))")
+    else:
+        ddl = f"CREATE INDEX {TIME_INDEX} ON {TABLE}(created_at, repo_key)"
+    try:
+        c.execute(ddl)
+    except Exception as e:  # noqa: BLE001 - 1061 = 并发建好，视为建成
+        if "1061" in str(e) or "already exists" in str(e).lower():
+            log.info(f"{TIME_INDEX} 已存在（1061），视为建成")
+        else:
+            target.rollback()
+            raise
+    target.commit()
+    return True
+
+
+def verify_time_index(conn: Any = None) -> None:
+    """后置校验：表 + 时间窗索引都在位才盖章（PR #2157 复审 R1：台账已盖章但目标缺失的库）。"""
+    from src.api import db_setup as ds
+
+    target = conn if conn is not None else _migration_conn()
+    c = target.cursor()
+    if not ds._table_present(c, TABLE):
+        raise RuntimeError(f"202611250006 post_check 未收敛：{TABLE} 缺失（不盖章，下次启动重试）")
+    if not ds._index_present(c, TABLE, TIME_INDEX):
+        raise RuntimeError(
+            f"202611250006 post_check 未收敛：{TIME_INDEX} 缺失（索引未建成，不盖章，下次启动重试）")

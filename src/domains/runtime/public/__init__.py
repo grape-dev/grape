@@ -67,6 +67,9 @@ _RUNTIME_COLS = (
     "last_seen_at", "local_skills", "skill_scan_result", "agent_tags", "host_name",
     "max_concurrent", "scene_tags", "alias", "worker_version", "org_id",
     "spawn_fail_degraded_at", "detached_from_scenes_at", "probe_spawn_fail_count",
+    # Issue #4349：/runtimes 详情需透出 DB 行 engine_uid（与 _rows_to_runtimes
+    # r[26] 既有口径对齐；此前两路 SELECT 均缺列，出口恒空串）。
+    "engine_uid",
 )
 
 
@@ -3198,13 +3201,13 @@ _ANY_QUERIES: dict[str, str] = {
         "updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, "
         "skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, "
         "worker_version, org_id, spawn_fail_degraded_at, detached_from_scenes_at, "
-        "probe_spawn_fail_count FROM agent_runtimes ORDER BY name"),
+        "probe_spawn_fail_count, engine_uid FROM agent_runtimes ORDER BY name"),
     "runtimes_by_scope": (
         "SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, "
         "updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, "
         "skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, "
         "worker_version, org_id, spawn_fail_degraded_at, detached_from_scenes_at, "
-        "probe_spawn_fail_count FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') "
+        "probe_spawn_fail_count, engine_uid FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') "
         "ORDER BY name"),
     "runtime_id_local_direct": (
         "SELECT id FROM agent_runtimes WHERE lower(name)=? AND credential_id=0 AND installed=1 "

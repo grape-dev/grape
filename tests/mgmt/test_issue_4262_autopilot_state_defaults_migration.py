@@ -1,4 +1,4 @@
-"""Issue #4262 / PR #2157 门禁复审 BLOCKED：迁移 202611240011 三态判据（假绿修复）。
+"""Issue #4262 / PR #2157 门禁复审 BLOCKED：迁移 202611250007 三态判据（假绿修复；原号 202611240011 与基线 #3564 引擎优先级撞号）。
 
 事故（复审 Required）
 --------------------
@@ -6,7 +6,7 @@
 information_schema 的 ``COLUMN_DEFAULT`` 的 **NULL**（= 列无默认值，待修）与 **''**
 （= 已修）压成同一态：MySQL 存量库（#3733 首版 TEXT 落地成 ``NOT NULL DEFAULT NULL``）
 与新装库（CREATE TABLE 走 mysql_compat 的表达式默认值）上一条 MODIFY 都不发，
-迁移 202611240011 因约定「fn 正常返回 = 盖章」被盖死（假绿），strict 模式下不显式
+迁移 202611250007 因约定「fn 正常返回 = 盖章」被盖死（假绿），strict 模式下不显式
 给值的 INSERT 依旧 1364；post_check 用的是同一个糊掉的判据，也跟着放行。
 
 覆盖（三态分别驱动 ensure 与 post_check）
@@ -24,7 +24,7 @@ import pytest
 
 from src.domains.mgmt.migrations import autopilot_dispatch_state as mig
 
-MIG_VERSION = "202611240011"
+MIG_VERSION = "202611250007"
 MIG_NAME = "autopilot-state-column-defaults"
 COLS = tuple(col for col, _ddl in mig.STATE_COLUMNS)
 DDL_BY_COL = dict(mig.STATE_COLUMNS)
@@ -264,7 +264,7 @@ def test_length_probe_falls_back_to_sqlite_length(mysql_info):
 
 
 def test_verify_migration_targets_exposes_state_default_drift(monkeypatch, tmp_path):
-    """旧判据盖章的库不会再跑 202611240011：启动核对必须自己把漂移暴露出来。"""
+    """旧判据盖章的库不会再跑 202611250007：启动核对必须自己把漂移暴露出来。"""
     ds = _db_setup()
     # 其余两处 mgmt 目标校验置为通过，隔离出「状态列默认值」这一条
     monkeypatch.setattr(_module("src.domains.mgmt.migrations.category_collapse_dict"),
