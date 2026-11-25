@@ -1013,11 +1013,51 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                         log.warning(f"Exec agent: token expired during direct exec (error_code={_pipeline_error_code}), repo={repo_key}")
                 except Exception as _pe:
                     log.warning(f"Exec agent: post-exec 401 detect failed: {_pe}")
+    # Issue #4440：Coding 交付核实（direct 收尾路径）——成功终态写入前按原需求
+    # 核实托管平台关联 PR，与远程 Worker 收尾（service.complete_task）共用同一
+    # 入口 verify_coding_delivery（禁止两套逻辑分叉）。无 PR / 查询失败 →
+    # new_status 改判 failed、result_text 前缀「Coding 未交付」+ 原因，成功路径
+    # 钩子（auto-advance/回帖/pending_review）因 status!=completed 全部不触发。
+    # skill 未命中核实清单的工作流 applies=False 直接放行，行为零改动。
+    _dv_failed = False
+    if (new_status == "completed" and agent_type == "coding" and issue_id
+            and not evt.get("_pr_sub_pr_number")):
+        try:
+            from src.domains.runtime.engine.delivery_verify import (
+                DELIVERY_NOT_DELIVERED_PREFIX, verify_coding_delivery)
+            _dv = verify_coding_delivery(repo_key, issue_id, "coding", skill_name)
+            if not _dv["delivered"]:
+                _dv_failed = True
+                new_status = "failed"
+                _dv_msg = f"⚠️ {DELIVERY_NOT_DELIVERED_PREFIX}：{_dv['reason']}"
+                result_text = (f"{_dv_msg}\n{result_text}" if (result_text or "").strip()
+                               else _dv_msg)
+                log.warning(f"Exec agent: seq={seq} coding delivery unverified "
+                            f"(code={_dv['code']}), demoting to failed")
+                try:
+                    from src.domains.runtime.engine.transient_retry import _append_task_error
+                    from src.domains.runtime.engine.delivery_verify import DELIVERY_UNVERIFIED_ERROR_CODE
+                    if task_id:
+                        _append_task_error(task_id, {
+                            "error_code": DELIVERY_UNVERIFIED_ERROR_CODE,
+                            "code": _dv.get("code") or "",
+                            "message": _dv.get("reason") or "",
+                            "skill": skill_name or ""})
+                except Exception as _dve:
+                    log.warning(f"Exec agent: delivery error record failed for seq={seq}: {_dve}")
+        except Exception as _dv_crash:
+            # fail-closed：核实链路自身异常同样按未交付处理，不静默放行
+            _dv_failed = True
+            new_status = "failed"
+            result_text = (f"⚠️ Coding 未交付：交付核实异常：{str(_dv_crash)[:200]}\n"
+                           f"{result_text or ''}").strip()
+            log.warning(f"Exec agent: seq={seq} delivery verify crashed: {_dv_crash}")
     # Issue #403：瞬时上游抖动自动重试（判定层收口，direct 执行路径）。
     # new_status 判定完成后、终态写入（任务+事件）之前拦截：可重试（瞬时分类
     # ∧ 无写操作证据 ∧ attempts 未耗尽）则退避 requeue 并跳过终态写入。
+    # 交付核实未通过（#4440）不是上游抖动，不进瞬时重试，直接判死留痕。
     _retry_info = {}
-    if new_status == "failed" and task_id:
+    if new_status == "failed" and task_id and not _dv_failed:
         try:
             from src.domains.runtime.engine.transient_retry import retry_transient_task
             _err_txt = " ".join(str(e) for e in (_exec_done_errors or [])) + " " + str(_exec_done_stderr or "")

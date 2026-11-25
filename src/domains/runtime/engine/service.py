@@ -5093,12 +5093,37 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
             _bh_done.note_task_success(int(task.get("runtime_id") or 0))
         except Exception as _bhe:
             log.debug(f"complete_task: backend success hook failed: {_bhe}")
+    # Issue #4440：Coding 交付核实（远程 Worker 收尾路径）——成功记录前按原需求
+    # 核实托管平台关联 PR；无 PR / 查询失败改记「Coding 未交付」（exit_code=1，
+    # 状态非成功 → 下游自动推进/回帖等成功钩子全部不触发）。direct 收尾路径在
+    # direct_executor 同位置调用同一入口，禁止两套逻辑分叉。其他 Coding 工作流
+    # （skill 未命中核实清单）applies=False 直接放行，行为零改动。
+    _dv_result = None
+    if (task and exit_code == 0 and (task.get("agent_type") or "") == "coding"
+            and task.get("issue_id")):
+        try:
+            from src.domains.runtime.engine.delivery_verify import verify_coding_delivery
+            _dv_result = verify_coding_delivery(
+                task.get("repo_key") or "", task.get("issue_id") or "",
+                "coding", task.get("skill") or "")
+        except Exception as _dve:
+            # fail-closed：核实链路自身异常同样按未交付处理，不静默放行
+            from src.domains.runtime.engine.delivery_verify import (
+                DELIVERY_NOT_DELIVERED_PREFIX)
+            _dv_result = {"applies": True, "delivered": False, "code": "pr_query_failed",
+                          "reason": f"交付核实异常：{str(_dve)[:200]}", "prs": []}
+            log.warning(f"complete_task: delivery verify crashed for {task_id}: {_dve}")
+        if _dv_result is not None and not _dv_result["delivered"]:
+            exit_code = 1
+            log.warning(f"Task {task_id}: coding delivery unverified "
+                        f"(code={_dv_result['code']}), overriding exit_code to 1")
     # Issue #403：瞬时上游抖动自动重试（判定层收口，worker 完成上报路径）。
     # 仅拦 exit_code!=0 的失败；可重试（瞬时分类 ∧ 无写操作/结构化产出证据 ∧
     # attempts 未耗尽）则退避 requeue 并跳过本函数全部终态写入。放在 event_seq
     # 分支之外：无关联事件的任务同样适用；「exit!=0 但结构化产出」由闸门放行
     # （不重试，走既有 override-to-completed 路径）。
-    if exit_code != 0:
+    # 交付核实未通过（#4440）不是上游抖动，不进瞬时重试，直接判死留痕。
+    if exit_code != 0 and not (_dv_result is not None and not _dv_result["delivered"]):
         try:
             from src.domains.runtime.engine.transient_retry import retry_transient_task
             if retry_transient_task(task_id, exit_code, "",
@@ -5115,7 +5140,10 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
             output = parse_agent_output_json(result_text or "")
             # 结构化产出修复：exit_code 非 0 但有完整结构化输出（actions+conclusion）
             # → hermes ACP 进程被 SIGTERM 清理后 proc.returncode=-15，任务实际已完成
-            if exit_code != 0 and output and output.get("actions") and output.get("conclusion"):
+            # Issue #4440：交付核实未通过的覆盖不适用——结构化自述不是 PR 交付证据。
+            if (exit_code != 0 and output and output.get("actions")
+                    and output.get("conclusion")
+                    and not (_dv_result is not None and not _dv_result["delivered"])):
                 log.info(f"Task {task_id}: exit_code {exit_code} but has structured output, overriding to 0")
                 exit_code = 0
             # 业务失败检测：进程退出码=0 但业务实际失败 → 覆盖 exit_code
@@ -5148,6 +5176,13 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
             if _premature:
                 # 事件列表/详情直接看到「没走到收尾」，不必翻完整 result_text
                 _result_show = f"⚠️ {_pm} 疑似提前结束（未走到收尾）：{_result_show}"
+            # Issue #4440：交付核实未通过 → 事件 result 前缀「Coding 未交付」+ 原因，
+            # 用户在事件列表/详情直接看到未交付结论（不翻完整 result_text）。
+            _dv_failed = bool(_dv_result is not None and not _dv_result["delivered"])
+            if _dv_failed:
+                from src.domains.runtime.engine.delivery_verify import DELIVERY_NOT_DELIVERED_PREFIX
+                _result_show = (f"⚠️ {DELIVERY_NOT_DELIVERED_PREFIX}："
+                                f"{_dv_result['reason']}｜{_result_show}")
             _failure_info = None
             if status == "failed":
                 from src.domains.runtime.agents.failure_info import failure_info_for_exit
@@ -5175,9 +5210,17 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
             log.warning(f"complete_task finalize failed: {e}")
     # 疑似提前结束：标记落到 agent_tasks.errors（任务详情可见）；状态仍是 completed。
     # 非疑似场景不传 errors，避免覆盖 fail 路径写下的真实错误信息。
-    _err_kw = ({"errors": json.dumps(
-        [f"{_pm} 未检测到收尾记录（actions/conclusion），疑似提前结束；工作可能未完成"],
-        ensure_ascii=False)} if _premature else {})
+    _err_list = ([f"{_pm} 未检测到收尾记录（actions/conclusion），疑似提前结束；工作可能未完成"]
+                 if _premature else [])
+    # Issue #4440：交付核实未通过 → 结构化错误码 + 原因落 agent_tasks.errors，
+    # 任务详情可见且机器可判（不与瞬时重试码混淆）。
+    if _dv_result is not None and not _dv_result["delivered"]:
+        from src.domains.runtime.engine.delivery_verify import DELIVERY_UNVERIFIED_ERROR_CODE
+        _err_list.append({"error_code": DELIVERY_UNVERIFIED_ERROR_CODE,
+                          "code": _dv_result.get("code") or "",
+                          "message": _dv_result.get("reason") or "",
+                          "skill": (task or {}).get("skill") or ""})
+    _err_kw = ({"errors": json.dumps(_err_list, ensure_ascii=False)} if _err_list else {})
     update_task_status(task_id, "completed" if exit_code == 0 else "failed",
                        exit_code=exit_code, result_text=result_text or "",
                        usage_json=json.dumps(usage or {}), **_err_kw)
