@@ -1557,6 +1557,8 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     pool_engine_source（local-claimer 设计）：pool_engine_ids 的来源标记——
     'scene' = 用户在场景里显式绑定（白名单全灭时保持 failed，Issue #253 硬约束）；
     'auto'  = 引擎自动选择/兜底产生的绑定（全灭时可降级放行全站，可审计）；
+    'directed' = engine_config.runtime_id 显式定向（Issue #2791，pool 收敛为单元素）；
+    'scene_missing' = 场景未在仓内 scene pool 登记（Issue #3790，跳过全局模板回退）；
     ''      = 未标记（历史任务，按 scene 对待——保守不降级）。
     """
     if not agent_session_id:

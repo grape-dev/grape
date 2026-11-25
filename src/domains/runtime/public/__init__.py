@@ -7375,11 +7375,16 @@ def get_scene_engine_selector(scene_id: str, agent_type: str, repo_key: str = ""
 
 
 def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "",
-                              user_id: int = 0, issue_creator: str = "") -> str | None:
-    """限定广播引擎列表（JSON 字符串，供 pool_engine_ids 使用）。"""
+                              user_id: int = 0, issue_creator: str = "",
+                              source_out: dict | None = None) -> str | None:
+    """限定广播引擎列表（JSON 字符串，供 pool_engine_ids 使用）。
+
+    Issue #3790：source_out（可选出参）透传 engine_select 的来源上抛契约，
+    场景未在仓内 scene pool 登记时写入 pool_engine_source=scene_missing。
+    """
     from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids as _impl
 
-    return _impl(scene_id, agent_type, repo_key, user_id, issue_creator)
+    return _impl(scene_id, agent_type, repo_key, user_id, issue_creator, source_out)
 
 
 def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
