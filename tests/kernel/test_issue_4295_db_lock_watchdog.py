@@ -57,6 +57,24 @@ def _clean_state(monkeypatch):
     request_id_var.set("-")
 
 
+@pytest.fixture
+def quiesced_watchdog():
+    """显式 ``watchdog_scan()`` 断言专用：先把后台看门狗停掉。
+
+    ``DB_LOCK_WATCHDOG_S=3600`` 只决定**下一轮** sleep 的长度：线程此刻可能正卡在上一轮
+    的 ``_WATCHDOG_STOP.wait(period)`` 里（前一个用例把周期设成 0.05/1s），醒来即用当前
+    阈值扫描并抢先上报，命中记录被 ``_WATCHDOG_REPORTED`` 去重 → 用例自己的扫描拿到空
+    ``hits``（偶发红灯）。停线程是唯一确定的做法，退出时按原状恢复。
+    """
+    was_running = dlm.watchdog_running()
+    dlm.stop_watchdog()
+    try:
+        yield
+    finally:
+        if was_running:
+            dlm.start_watchdog()
+
+
 def _hold_lock(lock, hold_s: float, name: str = "bg-slow-holder"):
     """持锁线程在**拷贝的请求上下文**里跑：owner 标签取到请求路径（与生产同形态）。"""
     ready = threading.Event()
@@ -74,7 +92,7 @@ def _hold_lock(lock, hold_s: float, name: str = "bg-slow-holder"):
     return t, release
 
 
-def test_scan_reports_slow_holder_with_holder_thread_stack(monkeypatch):
+def test_scan_reports_slow_holder_with_holder_thread_stack(monkeypatch, quiesced_watchdog):
     fake = _FakeLog()
     monkeypatch.setattr(dlm, "_log", lambda: fake)
     path_var.set("/api/issues/acme/demo")
@@ -97,7 +115,7 @@ def test_scan_reports_slow_holder_with_holder_thread_stack(monkeypatch):
     assert any("db_lock watchdog" in m and "holder_stack" in m for m in fake.errors)
 
 
-def test_scan_dedupes_same_owner_within_window(monkeypatch):
+def test_scan_dedupes_same_owner_within_window(monkeypatch, quiesced_watchdog):
     monkeypatch.setattr(dlm, "_log", lambda: _FakeLog())
     path_var.set("/api/issues/acme/demo")
 
@@ -136,7 +154,7 @@ def test_scan_ignores_short_holds():
         assert dlm.watchdog_scan() == []
 
 
-def test_scan_never_blocks_on_a_held_lock(monkeypatch):
+def test_scan_never_blocks_on_a_held_lock(monkeypatch, quiesced_watchdog):
     """看门狗不得获取 db_lock：持有者持锁期间扫描必须在毫秒级返回。"""
     monkeypatch.setattr(dlm, "_log", lambda: _FakeLog())
     path_var.set("/api/issues/acme/demo")
@@ -155,7 +173,7 @@ def test_scan_never_blocks_on_a_held_lock(monkeypatch):
     assert elapsed < 0.3, f"看门狗阻塞了 {elapsed:.3f}s，说明它拿了锁"
 
 
-def test_scan_reports_metric_per_owner(monkeypatch):
+def test_scan_reports_metric_per_owner(monkeypatch, quiesced_watchdog):
     from prometheus_client import CollectorRegistry
 
     registry = CollectorRegistry()
