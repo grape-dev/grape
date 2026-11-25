@@ -274,6 +274,36 @@ def test_timeout_error_log_dedup_can_be_disabled(monkeypatch):
     assert len(timeouts) == 2, f"去重关闭后每次超时都应打 ERROR：{timeouts}"
 
 
+def test_timed_out_wait_enters_the_wait_histogram(monkeypatch):
+    """超预算的等待必须进 ``grape_db_lock_wait_seconds``（验收口径是 1h 累计等待）。
+
+    过去 ``_WAIT.observe`` 只在 ``_on_acquired`` 里调用：每次被改成 503 的等待（都
+    ≥预算）既不进直方图、也不进任何时长统计，指标系统性低估拥塞。spec §4 的
+    「1h 累计等待 ≤1,000s」正是读这条直方图。
+    """
+    from prometheus_client import CollectorRegistry
+
+    registry = CollectorRegistry()
+    dlm.install(registry)
+    monkeypatch.setattr(dlm, "_log", lambda: _FakeLog())
+    monkeypatch.setenv(dlm.ACQUIRE_TIMEOUT_ENV, "0.1")
+
+    lock = dlm.TrackedRLock(bound_in_request=True)
+    holder = _hold_lock(lock, 1.0)
+    # 持锁方自己的 acquisition 也会 observe 一次，因此用增量判定而非绝对值
+    before = registry.get_sample_value("grape_db_lock_wait_seconds_count") or 0.0
+    try:
+        _timeout_once(lock)
+    finally:
+        holder.join(5)
+
+    count = registry.get_sample_value("grape_db_lock_wait_seconds_count") or 0.0
+    assert count == before + 1.0, (
+        f"超时等待必须计入等锁直方图（before={before} after={count}）")
+    waited_sum = registry.get_sample_value("grape_db_lock_wait_seconds_sum") or 0.0
+    assert waited_sum >= 0.1, f"记录的等待时长不得小于预算（实际 {waited_sum:.3f}s）"
+
+
 def test_non_blocking_acquire_is_never_bounded(monkeypatch):
     """``acquire(blocking=False)`` 不能被套上 timeout（threading 会抛 ValueError）。"""
     monkeypatch.setenv(dlm.ACQUIRE_TIMEOUT_ENV, "0.05")

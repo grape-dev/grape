@@ -424,6 +424,11 @@ class TrackedRLock:
         指标逐次累加（拥塞窗口的真实次数必须保留）；ERROR 日志按 owner
         ``DB_LOCK_TIMEOUT_LOG_DEDUP_S``（默认 60s）去重，与看门狗口径一致——
         648 次 499 的窗口里同一 owner 反复超时不至于把日志刷爆。
+
+        等待时长同样进 ``grape_db_lock_wait_seconds``：spec §4 用「1h 累计等待
+        ≤1,000s」做上线验收，而被改成 503 的等待（每次都 ≥预算）若只在
+        ``_on_acquired`` 里 observe，等于把最长的那些等待整体漏掉，指标会系统性
+        低估拥塞（Issue #4295 第 2 轮复审 Optional）。
         """
         owner = _owner_key()
         if _TIMEOUTS is not None:
@@ -431,6 +436,11 @@ class TrackedRLock:
                 _TIMEOUTS.labels(owner=owner).inc()
             except Exception as _me:  # pragma: no cover - 指标绝不阻断主流程
                 _dbg.debug("db_lock timeout metric failed: %s", _me)
+        if _WAIT is not None:
+            try:
+                _WAIT.observe(waited)
+            except Exception as _me:  # pragma: no cover - 同上
+                _dbg.debug("db_lock wait metric failed: %s", _me)
         now = time.perf_counter()
         dedup_s = _env_float(TIMEOUT_LOG_DEDUP_ENV, 60.0)
         with _TIMEOUT_REPORTED_LOCK:
