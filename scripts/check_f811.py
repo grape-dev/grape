@@ -12,6 +12,9 @@
 「反正有基线」的垃圾桶（与 `check_async_blocking.py` / `check_undefined_names.py` 同款口径）。
 
 ruff 不可用时**显式失败**，不伪装成通过——门禁静默降级正是 Issue #4158 要修的病症。
+同理 `ruff` 退出码在 (0, 1) 但 stdout 为空 / 非 JSON（例如 `python -m ruff` 缺模块时
+rc=1、stderr=`No module named ruff`）也不得解析成「0 处命中」，一律 FAIL。
+（PR #2077 合入后 DevOps 复核发现的本地假绿即此路径。）
 
 用法：
     python3 scripts/check_f811.py                  # 校验（CI / 本地）
@@ -22,6 +25,7 @@ ruff 不可用时**显式失败**，不伪装成通过——门禁静默降级�
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import subprocess
 import sys
@@ -42,8 +46,25 @@ def _key(hit: dict) -> str:
     return f"{hit['file']}:{hit['line']}"
 
 
+def _ruff_available() -> bool:
+    """当前解释器是否装有 ruff。
+
+    门禁用 `sys.executable -m ruff` 调用，可用性判定必须与调用解释器同源：
+    `python -m ruff` 缺模块时 rc=1、stdout 为空、stderr=`No module named ruff`，
+    旧实现把 rc=1 当「有命中」再把空 stdout 解析成 0 处 → 打印「当前 0 / 基线 72」
+    并 exit 0（假绿）。这里先实查，缺工具直接 FAIL。
+    """
+    return importlib.util.find_spec("ruff") is not None
+
+
 def collect(target: str) -> list[dict]:
     """调用 ruff 收集 F811 命中；执行失败/输出不可解析一律抛错（显式失败）。"""
+    if not _ruff_available():
+        raise RuntimeError(
+            "ruff 不可用（当前解释器未安装）→ 门禁显式失败，不跳过；"
+            f"修复：{sys.executable} -m pip install -e '.[dev]'"
+            "（或 pip install 'ruff>=0.6,<0.18'）"
+        )
     cmd = [sys.executable, "-m", "ruff", "check", "--select", "F811",
            "--output-format", "json", "--no-cache", target]
     try:
@@ -53,10 +74,21 @@ def collect(target: str) -> list[dict]:
     # ruff: 0 = 无命中，1 = 有命中；其它退出码是执行错误
     if proc.returncode not in (0, 1):
         raise RuntimeError(f"ruff 执行失败 rc={proc.returncode}: {proc.stderr.strip()[:400]}")
+    stdout = (proc.stdout or "").strip()
+    # rc 在 (0, 1) 却没有 JSON：工具崩了（如缺模块 / 被环境拦截），绝不能当成「0 处命中」。
+    if not stdout:
+        raise RuntimeError(
+            f"ruff 无 JSON 输出（rc={proc.returncode}）→ 门禁显式失败，不伪装成 0 处命中；"
+            f"stderr: {proc.stderr.strip()[:400] or '<空>'}"
+        )
     try:
-        rows = json.loads(proc.stdout or "[]")
+        rows = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"ruff 输出不是 JSON（{exc}）: {proc.stdout.strip()[:200]}") from exc
+        raise RuntimeError(f"ruff 输出不是 JSON（{exc}）: {stdout[:200]}") from exc
+    if not isinstance(rows, list):
+        raise RuntimeError(  # noqa: TRY004 - 与 collect() 的 RuntimeError 契约一致（main 统一转 rc=1）
+            f"ruff 输出不是 JSON 数组（{type(rows).__name__}）: {stdout[:200]}"
+        )
 
     hits: list[dict] = []
     for row in rows:
