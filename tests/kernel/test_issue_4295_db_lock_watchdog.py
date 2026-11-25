@@ -115,6 +115,21 @@ def test_scan_dedupes_same_owner_within_window(monkeypatch):
     assert second == [], "同 owner 在去重窗口内不得重复上报（防日志风暴）"
 
 
+def test_scan_trims_dedup_table_even_when_dedup_is_disabled(monkeypatch):
+    """``DB_LOCK_WATCHDOG_DEDUP_S=0``（关闭去重）时去重表仍要裁剪。
+
+    与超时日志路径（``_on_budget_exhausted`` 恒按 ``max(dedup_s, 60)`` 裁剪）同口径：
+    过去只在 ``dedup_s > 0`` 时裁剪，关闭去重后这张表在常驻进程里只增不减。
+    """
+    monkeypatch.setattr(dlm, "_log", lambda: _FakeLog())
+    monkeypatch.setenv(dlm.WATCHDOG_DEDUP_ENV, "0")
+    with dlm._WATCHDOG_REPORTED_LOCK:
+        dlm._WATCHDOG_REPORTED["bg:stale-owner"] = 0.0  # 很久以前的旧记录
+    assert dlm.watchdog_scan(now=10_000.0) == []  # 无持有者 → 无上报，只裁剪
+    assert "bg:stale-owner" not in dlm._WATCHDOG_REPORTED, (
+        f"去重关闭时仍应裁掉过期条目，实际残留 {sorted(dlm._WATCHDOG_REPORTED)}")
+
+
 def test_scan_ignores_short_holds():
     lock = dlm.TrackedRLock(bound_in_request=True)
     with lock:
@@ -245,3 +260,47 @@ def test_watchdog_restarts_in_fork_child_after_preload():
     assert payload == b"11", (
         f"子进程应重启看门狗并清空父进程持锁状态（第1位=watchdog_running，第2位=snapshot 为空），"
         f"实际 {payload!r}")
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="需要 POSIX fork")
+def test_fork_under_lock_is_reported_before_state_is_reset(monkeypatch):
+    """fork 发生在他人持锁期间 → 子进程必须先打 ERROR 再清状态（复审 Optional）。
+
+    边界：``reset_after_fork`` 只复位埋点状态，**不重建** ``TrackedRLock._lock``——那把
+    RLock 的持有线程在子进程里已不存在，子进程首次 db_lock 访问可能永久阻塞。若此时
+    ``_STATE`` 被直接清空，刚重启的看门狗看不到任何条目，这种死锁比改造前更不可见。
+    因此清空前必须留下 fork-under-lock 的现场（owner#rid）。
+    """
+    fake = _FakeLog()
+    monkeypatch.setattr(dlm, "_log", lambda: fake)  # fork 后子进程继承同一对象
+    path_var.set("/api/issues/acme/demo")
+
+    lock = dlm.TrackedRLock(bound_in_request=True)
+    holder, release = _hold_lock(lock, 5.0)  # 持锁期间 fork
+    try:
+        assert dlm.snapshot(), "fork 前应有持锁条目（否则本用例不成立）"
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # 子进程
+            try:
+                reported = any("fork under lock" in m and "/api/issues/" in m
+                               for m in fake.errors)
+                clean = dlm.snapshot() == []
+                os.write(w, (b"1" if reported else b"0") + (b"1" if clean else b"0"))
+            finally:
+                os._exit(0)
+
+        os.close(w)
+        payload = b""
+        try:
+            readable, _, _ = select.select([r], [], [], 10)
+            payload = os.read(r, 2) if readable else b""
+        finally:
+            os.close(r)
+            os.waitpid(pid, 0)
+    finally:
+        release.set()
+        holder.join(5)
+
+    assert payload == b"11", (
+        "子进程应先 ERROR 记录 fork-under-lock 现场、再清空埋点状态"
+        f"（第1位=ERROR 已打，第2位=snapshot 已清空），实际 {payload!r}")

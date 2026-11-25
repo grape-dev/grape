@@ -167,6 +167,36 @@ _STATE_GUARD = threading.Lock()
 _CHILD_CACHE: dict[str, tuple] = {}
 
 
+def _report_fork_under_lock() -> None:
+    """fork 发生在他人持锁期间：清状态**之前**先留一条证据（Issue #4295 复审 Optional）。
+
+    边界：本模块只复位**埋点状态**，不重建 ``TrackedRLock._lock``——那把 RLock 的持有
+    线程在子进程里已不存在，子进程首次 db_lock 访问可能永久阻塞。若直接把 ``_STATE``
+    清空，刚重启的看门狗看不到任何条目，这种死锁比改造前更不可见；因此清空前把继承
+    到的持有者打一条 ERROR，留下 fork-under-lock 的现场（owner#rid）。
+
+    这里直接读 ``_STATE`` 而**不取** ``_STATE_GUARD``：fork 瞬间这把内部小锁可能正被
+    （子进程里已不存在的）线程持有，取它就是死锁；子进程单线程，读字典是安全的。
+    """
+    try:
+        holders = [f"{v.get('owner')}#{v.get('rid')}" for v in _STATE.values()
+                   if v.get("depth", 0) > 0]
+    except Exception:  # pragma: no cover - 复位路径绝不抛
+        return
+    if not holders:
+        return
+    try:
+        _log().error(
+            "db_lock fork under lock: child inherited %d held entry(s) (%s); "
+            "state reset but the underlying RLock is NOT rebuilt, first db access "
+            "may block forever",
+            len(holders), ", ".join(holders),
+            extra={"db_lock_fork_holders": len(holders)},
+        )
+    except Exception as _le:  # pragma: no cover
+        _dbg.debug("db_lock fork-under-lock log failed: %s", _le)
+
+
 def reset_after_fork() -> None:
     """fork 子进程复位（线程不跨 fork，父进程的线程对象/持锁状态在子进程里全是死对象）。
 
@@ -174,9 +204,13 @@ def reset_after_fork() -> None:
     线程对象仍指向父进程那个已消失的线程，``watchdog_running()``/``start_watchdog()``
     的幂等判断失真，子进程静默无看门狗。守护锁也一并重建——fork 时若有线程正持有
     这把内部小锁，子进程里将永远无法再获取。
+
+    **不复位底层 ``TrackedRLock._lock``**（边界）：它不属于埋点状态，重建会换掉调用方
+    已注入的锁对象。fork-under-lock 的现场由 ``_report_fork_under_lock`` 先记 ERROR。
     """
     global _STATE_GUARD, _CHILD_CACHE, _WATCHDOG_THREAD, _WATCHDOG_START_LOCK
     global _WATCHDOG_REPORTED_LOCK, _TIMEOUT_REPORTED_LOCK
+    _report_fork_under_lock()
     _STATE.clear()
     _CHILD_CACHE = {}
     _STATE_GUARD = threading.Lock()
@@ -593,11 +627,13 @@ def watchdog_scan(now: float | None = None) -> list[dict]:
             )
         except Exception as _le:  # pragma: no cover
             _dbg.debug("db_lock watchdog log failed: %s", _le)
-    if dedup_s > 0:
-        with _WATCHDOG_REPORTED_LOCK:
-            stale = [k for k, ts in _WATCHDOG_REPORTED.items() if (now - ts) >= dedup_s]
-            for key in stale:
-                _WATCHDOG_REPORTED.pop(key, None)
+    # 去重表裁剪：与超时日志路径（``_on_budget_exhausted``）同口径恒定裁剪。
+    # 只在 ``dedup_s > 0`` 时才裁剪的话，``DB_LOCK_WATCHDOG_DEDUP_S=0``（关闭去重）
+    # 下这张表只增不减（owner 基数有界，影响小，但两条路径口径必须一致）。
+    with _WATCHDOG_REPORTED_LOCK:
+        stale = [k for k, ts in _WATCHDOG_REPORTED.items() if (now - ts) >= max(dedup_s, 60.0)]
+        for key in stale:
+            _WATCHDOG_REPORTED.pop(key, None)
     return hits
 
 
