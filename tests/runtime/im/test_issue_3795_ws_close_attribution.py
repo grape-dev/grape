@@ -130,7 +130,7 @@ class WsClosedChannel(Channel):
         return SendResult(ok=False)
 
 
-class LeakedCloseChannel(Channel):
+class RawCloseChannel(Channel):
     """适配器没归一 → 裸 websockets ConnectionClosedError 泄漏到 Supervisor。"""
 
     attempts = 0
@@ -282,10 +282,10 @@ async def test_supervisor_ws_closed_is_warning_with_close_attribution(captured, 
 
 async def test_supervisor_leaked_connection_closed_is_not_unexpected_crash(captured, delays):
     """适配器未归一的裸 ConnectionClosedError（非 OSError 族）→ 同样 WARNING + 关闭码。"""
-    LeakedCloseChannel.attempts = 0
+    RawCloseChannel.attempts = 0
     metrics = EngineMetrics()
 
-    await _run(LeakedCloseChannel, attempts=2, metrics=metrics)
+    await _run(RawCloseChannel, attempts=2, metrics=metrics)
 
     assert "channel crashed (unexpected)" not in captured.text(logging.DEBUG)
     assert "ws closed code=1006" in captured.text(logging.WARNING)
