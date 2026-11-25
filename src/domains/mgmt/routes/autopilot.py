@@ -488,12 +488,19 @@ def list_tasks(
                 log.warning(f"list_tasks: uid->id hints resolve failed: {_ue}")
         if _all_eids:
             # 卡点④：按任务仓库分组取提示（引擎审计全局、任务提示只看本仓库场景）
+            # Issue #3909：返回 {hints, degraded, reason}——降级按仓库分组记录，
+            # 任务上带 engine_detached_degraded，前端不再把「查询失败」画成「无解绑」
             _hints_by_repo = {}
+            _degraded_repos = set()
             _repos = {t.get("repo_key") or "" for t in tasks}
             for _rk in _repos:
-                _hints_by_repo[_rk] = {h["runtime_id"]: h for h in get_detached_engine_hints(runtime_ids=list(_all_eids), repo_key=_rk)}
+                _res = get_detached_engine_hints(runtime_ids=list(_all_eids), repo_key=_rk)
+                _hints_by_repo[_rk] = {h["runtime_id"]: h for h in (_res.get("hints") or [])}
+                if _res.get("degraded"):
+                    _degraded_repos.add(_rk)
             for t in tasks:
-                _hint_map = _hints_by_repo.get(t.get("repo_key") or "", {})
+                _rk_t = t.get("repo_key") or ""
+                _hint_map = _hints_by_repo.get(_rk_t, {})
                 _hints = [ _hint_map[int(_eid)] for _eid in (t.get("engine_runtime_ids") or [])
                            if int(_eid) in _hint_map ]
                 if _hints:
@@ -501,8 +508,12 @@ def list_tasks(
                         "engines": [f"{h['runtime_name']}#{h['runtime_id']}" for h in _hints],
                         "detached_at": _hints[0]["detached_at"],
                     }
+                if _rk_t in _degraded_repos:
+                    t["engine_detached_degraded"] = True
     except Exception as _he:
         log.warning(f"list_tasks: engine_detached hints failed: {_he}")
+        for _t in tasks:
+            _t["engine_detached_degraded"] = True
     return {"tasks": tasks}
 
 @router.get("/tasks/{task_id}")
@@ -536,7 +547,11 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
                 pass
         _eids = [int(x) for x in (task.get("engine_runtime_ids") or [])]
         if _eids:
-            _hints = get_detached_engine_hints(runtime_ids=_eids, repo_key=task.get("repo_key") or "")
+            # Issue #3909：{hints, degraded, reason}——降级时前端渲染「解绑信息暂不可用」
+            _res = get_detached_engine_hints(runtime_ids=_eids, repo_key=task.get("repo_key") or "")
+            _hints = _res.get("hints") or []
+            if _res.get("degraded"):
+                task["engine_detached_degraded"] = True
             if _hints:
                 task["engine_detached"] = {
                     "engines": [f"{h['runtime_name']}#{h['runtime_id']}" for h in _hints],
@@ -544,6 +559,7 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
                 }
     except Exception as _he:
         log.warning(f"get_task: engine_detached hints failed: {_he}")
+        task["engine_detached_degraded"] = True
     return task
 
 @router.post("/tasks")

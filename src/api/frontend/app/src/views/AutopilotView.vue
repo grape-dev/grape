@@ -1735,8 +1735,18 @@ const engineNamesText = computed(() => {
 })
 const engineDetachedHtml = computed(() => {
   const t = detail.value
-  if (!t || !t.engine_detached || !t.engine_detached.engines || !t.engine_detached.engines.length)
-    return ''
+  if (!t) return ''
+  const hasHints = !!(t.engine_detached && t.engine_detached.engines && t.engine_detached.engines.length)
+  // Issue #3909：解绑提示查询失败 → 显式降级文案（不与「无解绑」同形）
+  if (!hasHints && !t.engine_detached_degraded) return ''
+  if (!hasHints) {
+    return (
+      '<div class="apv-detach">' +
+      esc(tt('detail.engine_detached_unavailable') ||
+        '解绑信息暂不可用（引擎解绑记录查询失败），请稍后重试。') +
+      '</div>'
+    )
+  }
   return (
     '<div class="apv-detach">' +
     (tt('detail.engine_detached_hint') || '绑定的引擎 ') +

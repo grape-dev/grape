@@ -588,6 +588,33 @@ def host_label() -> str:
         return ""
 
 
+def conn_facts(domain: str) -> str:
+    """日志用连接事实串：`route` / `target_db` / `pid` / `host`（脱敏，Issue #3909）。
+
+    为什么需要：跨域读失败时驱动异常文本里的 schema 名（如
+    `grape_prod_mgmt.scene_engine_detach_log`）是线上唯一线索，而「旧进程未重启」与
+    「新代码仍打 mgmt 库」两种根因的日志完全同形，验收无法分流。补上路由判定与目标库名后，
+    单行日志即可回答「这台主机、这个进程连的是哪个库」。
+
+    脱敏硬约束：只取路由判定与 DSN 的库名（`database_of`），绝不输出完整 DSN / 账号 / 口令。
+    """
+    route, target_db = "unknown", "-"
+    try:
+        route = route_of(domain)
+    except DomainUnavailable:
+        # 三库拓扑缺 GRAPE_DSN_<DOMAIN>：连目标都没有——这本身就是结论（不是回落主库）
+        route = "unavailable"
+    except Exception as _e:  # noqa: BLE001 - 仅日志字段
+        log.debug(f"route_of({domain!r}) failed while building conn facts: {_e}")
+    else:
+        if route == "domain":
+            target_db = database_of(domain) or "-"
+        else:  # local：进程主库（单库拓扑或本域进程）
+            target_db = os.environ.get("DEVOPS_DB_NAME", "").strip() or "(process main)"
+    return (f"route={route} target_db={target_db} "
+            f"pid={os.getpid()} host={host_label() or '-'}")
+
+
 @contextmanager
 def cursor_for(domain: str, write: bool = False):
     """按 route_of 取游标：域连接（未提交由连接自身 autocommit）或主库（带进程锁）。

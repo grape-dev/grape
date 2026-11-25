@@ -7414,8 +7414,12 @@ def cleanup_scene_engine_bindings(rid_list: list, commit: bool = True) -> int:
 
 
 def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = None,
-                              repo_key: str = "") -> list:
-    """查询场景/引擎的被解绑提示信息。"""
+                              repo_key: str = "") -> dict:
+    """查询场景/引擎的被解绑提示信息（Issue #3909：返回 {hints, degraded, reason}）。
+
+    表归 runtime 域，本包装层只做转发；实现内部按域取连接（`cursor_for("runtime")`），
+    失败显式降级，不再把「查询失败」吞成空列表。
+    """
     from src.domains.runtime.engine.engine_select import get_detached_engine_hints as _impl
 
     return _impl(scene_row_id, runtime_ids, repo_key)

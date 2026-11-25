@@ -1908,46 +1908,77 @@ def _engine_uid_by_rid(c, runtime_id) -> str:
         return ""
 
 
+def _runtime_conn_facts() -> str:
+    """解绑提示读失败日志附带的连接事实（`route`/`target_db`/`pid`/`host`，脱敏）。
+
+    Issue #3909：与 #2016/#3826/#3865 同口径——单行日志即可区分「旧进程未重启」与
+    「新代码仍打 mgmt 库」；实现收在 `db_registry.conn_facts`（只输出库名，不出 DSN）。
+    """
+    from src.kernel import db_registry
+    return db_registry.conn_facts("runtime")
+
+
 def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = None,
-                              repo_key: str = "") -> list:
+                              repo_key: str = "") -> dict:
     """查询场景/引擎的被解绑提示信息（引擎绑定真实性同步 §4.3/§5.1b 前端数据源）。
 
     - scene_row_id 非空：查该场景的未重绑（rebound_at 空）解绑记录 → detached_engines
     - runtime_ids 非空：查这些引擎的未重绑解绑记录 → autopilot 任务 engine_detached 提示。
       卡点④修复：必须传 repo_key（任务所属仓库）——引擎审计是全局的，任务提示只关心
       「本仓库场景」的解绑记录，否则其他仓库同引擎的审计会误报到无关任务上。
-    返回 [{scene_row_id, scene_id, node_tag, runtime_id, runtime_name, detached_at, affected_autopilot_tasks}]
+
+    Issue #3909：`scene_engine_detach_log` / `agent_runtimes` 都归 **runtime 域**
+    （`configs/table_ownership.json`），本函数却被 mgmt 进程（主库=`grape_prod_mgmt`）调用，
+    直连进程主库在线上恒 1146 并被吞成空列表 → 「查询失败」与「无解绑」同形。现在按域取连接
+    （`db_registry.cursor_for("runtime")`，单库/测试拓扑回落进程主库），并把失败显式降级。
+
+    返回 `{"hints": [...], "degraded": bool, "reason": ""|"domain"|"query"}`：
+    - `degraded=False`：`hints` 就是事实（可能为空 = 确实无解绑）；
+    - `degraded=True`：本域不可用（`reason="domain"`）或查询失败（`reason="query"`），
+      调用方**不得**把空列表渲染成「无解绑」。
+
+    每个 hint：`{scene_row_id, scene_id, node_tag, runtime_id, runtime_name, engine_uid,
+    detached_at, affected_autopilot_tasks}`。
     """
-    from src.kernel.session_manager import db, db_lock
-    out = []
-    with db_lock:
-        c = db.cursor()
-        try:
+    from src.kernel import db_registry
+    out: list = []
+
+    def _degraded(reason: str, exc: Exception) -> dict:
+        log.warning(
+            f"get_detached_engine_hints: degraded ({reason}) {_runtime_conn_facts()} "
+            f"scene_row_id={scene_row_id} runtime_ids={len(runtime_ids or [])} "
+            f"repo_key={repo_key or '-'}: {exc}")
+        return {"hints": out, "degraded": True, "reason": reason}
+
+    if not scene_row_id and not runtime_ids:
+        return {"hints": out, "degraded": False, "reason": ""}
+    _rids: list = list(runtime_ids or [])
+
+    try:
+        with db_registry.cursor_for("runtime") as c:
             if scene_row_id:
                 c.execute(
                     "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
                     "detached_at, affected_autopilot_tasks "
                     "FROM scene_engine_detach_log WHERE scene_row_id=? AND (rebound_at='' OR rebound_at IS NULL)",
                     (scene_row_id,))
-            elif runtime_ids:
-                _ph = ",".join("?" * len(runtime_ids))
-                if repo_key:
-                    # 卡点④：按仓库过滤（autopilot 任务提示语义 = 本仓库场景受影响）
-                    c.execute(
-                        "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
-                        "detached_at, affected_autopilot_tasks "
-                        f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) AND repo_key=? "
-                        "AND (rebound_at='' OR rebound_at IS NULL)",
-                        (*runtime_ids, repo_key))
-                else:
-                    c.execute(
-                        "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
-                        "detached_at, affected_autopilot_tasks "
-                        f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) "
-                        "AND (rebound_at='' OR rebound_at IS NULL)",
-                        tuple(runtime_ids))
+            elif repo_key:
+                # 卡点④：按仓库过滤（autopilot 任务提示语义 = 本仓库场景受影响）
+                _ph = ",".join("?" * len(_rids))
+                c.execute(
+                    "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
+                    "detached_at, affected_autopilot_tasks "
+                    f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) AND repo_key=? "
+                    "AND (rebound_at='' OR rebound_at IS NULL)",
+                    (*_rids, repo_key))
             else:
-                return out
+                _ph = ",".join("?" * len(_rids))
+                c.execute(
+                    "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
+                    "detached_at, affected_autopilot_tasks "
+                    f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) "
+                    "AND (rebound_at='' OR rebound_at IS NULL)",
+                    tuple(_rids))
             import json as _json
             for r in c.fetchall():
                 try:
@@ -1961,9 +1992,11 @@ def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = 
                     "engine_uid": _engine_uid_by_rid(c, r[3]),
                     "detached_at": r[5] or "", "affected_autopilot_tasks": _aff or [],
                 })
-        except Exception as e:
-            log.warning(f"get_detached_engine_hints: query failed: {e}")
-    return out
+    except db_registry.DomainUnavailable as e:
+        return _degraded("domain", e)
+    except Exception as e:
+        return _degraded("query", e)
+    return {"hints": out, "degraded": False, "reason": ""}
 
 def _detach_dead_engine_bindings() -> dict:
     """引擎绑定真实性同步核心：离线超阈值的引擎，真实清理场景绑定 + 审计留痕。

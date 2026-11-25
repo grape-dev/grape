@@ -3100,7 +3100,15 @@ function openEngineModal(agentType) {
         const mine = hints.filter(function (h) {
           return !h.node_tag || h.node_tag === agentType
         })
-        if (!mine.length) return
+        // Issue #3909：解绑提示查询失败（runtime 域不可达）→ 显式降级文案，
+        // 不与「没有引擎被解绑」同形
+        if (!mine.length) {
+          if (d.detached_engines_degraded) {
+            engineDetachHint.value =
+              '<div class="dbv-detach">' + t('dv2.stale_unavailable') + '</div>'
+          }
+          return
+        }
         const names = mine.map(function (h) {
           return (h.runtime_name || 'engine') + '#' + h.runtime_id
         })
