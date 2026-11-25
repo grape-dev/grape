@@ -36574,16 +36574,14 @@
       "/api/engines/meta",
       "/api/skills/by-id/{skill_id}/ai-fill",
       "/api/skills/by-id/{skill_id}/content",
-      "/api/skills/by-id/{skill_id}/convert"
-    ],
+      "/api/skills/by-id/{skill_id}/convert"    ],
     "removed": [],
     "deprecated": [
       "/api/dashboard/efficiency"
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 407,
-  "x-groups": [
+  "x-endpoint-count": 407,  "x-groups": [
     "a2a",
     "agents",
     "auth",
