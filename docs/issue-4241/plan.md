@@ -1,6 +1,6 @@
 # Plan: Issue #4241 实现方案
 
-目标基线 `arch-weekly-11-ljt`；开发分支 `feat/issue-4241`。核心思路：**把「实际注册的 hook 地址」落盘**，托管状态改为
+目标基线 `arch-weekly-11-ljt`；开发分支 `feat/issue-4241-ljt`（PR #2267 head）。核心思路：**把「实际注册的 hook 地址」落盘**，托管状态改为
 「落盘地址 vs 当前权威 `webhook_url` 前缀比对」，零远程调用即可发现漂移。
 
 ## 改动清单
@@ -22,6 +22,8 @@
 - `list_managed_repos`：权威地址取一次 → 逐行 `webhook_state_for_row`；输出 `webhook_ok`（ok/unknown 为 true）、
   `webhook_stale`、`webhook_state`。
 - `_filter_repos`（`/repos/member`，仓库大厅/ReposView 数据源）：托管行补 `webhook_state`（零远程前缀比对）。
+  **值域契约**：`ok` / `stale` / `absent` / `unknown`，未托管行为 `""`；前端一律按 `'stale'` 比较，
+  与 dashboard 的 `host_status='webhook_stale'`（带 `webhook_` 前缀）分属两个字段，不可混用。
 - 托管/建仓/修复成功路径回写实际注册地址：`create_new_repo`（复用/新建 hook 两分支）、`host_repo` GitHub 分支、`host_repo`
   其它方言分支（复用/新建两分支）、`repair_host`（`_db_kwargs` 增 `webhook_url`）。
 

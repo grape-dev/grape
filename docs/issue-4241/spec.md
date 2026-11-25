@@ -47,6 +47,9 @@
 5. 接口输出：`/repos/managed` 的 `webhook_ok` = state in (ok, unknown)（存量行不因新增判据变 false），`webhook_stale` 仅 stale 为 true；
    `_check_host_status` 同口径返回 `webhook_stale`（该状态无更具体的 partial/bot_missing 诊断时才接管），修复回写后自动清空。
 6. 前端：hostBanner 增加 stale 横幅（文案 `dv2.host_webhook_stale`，复用 repairHost）；仓库卡三态徽标 + `repair-host` 一键修复后静默刷新列表。
+   两个字段不可混用：`/repos/member` 的 `webhook_state` 值域为 `ok/stale/absent/unknown`（前端按 `'stale'` 比较），
+   dashboard 的 `host_status` 才是 `webhook_stale`（横幅分支）。
+7. 双源告警：meta 与 `configs/server-config.json` 并存且取值不同时，首个读取点输出一次 WARN（运行时以 Admin 控制台为准）。
 
 ## 关键设计决策
 | 决策 | 选项 | 选择 | 理由 |
