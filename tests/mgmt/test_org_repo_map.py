@@ -527,3 +527,68 @@ def test_content_branch_migrates_legacy_and_keeps_context_and_map(monkeypatch, t
         check=True, capture_output=True, text=True).stdout
     assert "org-context/repo-map/repo-map-summary.md" in tree
     assert "org-context/repo-map/README.md" in tree
+
+
+def test_recall_regression_baseline_positive_and_negative():
+    """B2 最小召回回归基线：正例必须命中，反例不得扩散。"""
+    from src.domains.mgmt import org_repo_map as mod
+    from src.domains.mgmt.user.db import add_managed_repo
+
+    org = _seed()
+    user_key = "gitcode:map-org/user-service"
+    add_managed_repo(user_key, "map-org", "user-service", webhook_id=2, org_id=org["id"])
+
+    mod.save_ai_result(org["id"], REPO_KEY, {
+        "schema_version": 3,
+        "repo_key": REPO_KEY,
+        "full_name": "map-org/order-service",
+        "purpose": "订单域主服务，负责下单、状态机与履约",
+        "core_functions": [{
+            "name": "订单履约",
+            "description": "支付成功后推进订单状态并触发发货",
+            "keywords": ["订单状态", "支付回调"],
+            "task_examples": ["支付成功后推进订单状态并触发发货", "订单状态机增加取消分支"],
+            "not_for": ["用户登录失败排查", "线上告警统计与故障恢复"],
+            "owned_entities": ["订单", "订单状态"],
+        }],
+        "core_responsibilities": {"role": "订单域主服务", "owns": ["订单状态流转"],
+                                  "not_owns": ["用户登录"]},
+        "routing": {"include_keywords": ["订单", "履约", "支付回调"],
+                    "exclude_keywords": ["用户登录", "线上告警"]},
+        "keywords": ["下单", "履约"],
+        "confidence": 0.9,
+    }, triggered_by="test")
+    mod.save_ai_result(org["id"], user_key, {
+        "schema_version": 3,
+        "repo_key": user_key,
+        "full_name": "map-org/user-service",
+        "purpose": "用户与认证服务",
+        "core_functions": [{
+            "name": "用户登录",
+            "description": "用户认证与登录会话",
+            "keywords": ["用户", "登录"],
+            "task_examples": ["用户登录失败排查", "登录态过期处理"],
+            "not_for": ["订单状态流转"],
+            "owned_entities": ["用户", "登录会话"],
+        }],
+        "core_responsibilities": {"role": "用户域服务", "owns": ["登录认证"],
+                                  "not_owns": ["订单履约"]},
+        "routing": {"include_keywords": ["用户", "登录", "认证"],
+                    "exclude_keywords": ["订单"]},
+        "keywords": ["用户", "登录"],
+        "confidence": 0.9,
+    }, triggered_by="test")
+
+    # precision@1：每条正例的首选仓必须是标注目标仓。
+    positives = {
+        "支付回调后订单一直没有发货": REPO_KEY,
+        "用户登录失败排查": user_key,
+    }
+    for query, expected in positives.items():
+        result = mod.recall_targets(org["id"], query, limit=3)
+        assert result["targets"][:1] == [expected], (query, result)
+
+    # 反例：not_for/负向词命中时不得扩散到无关仓。
+    negative = mod.recall_targets(org["id"], "统计线上告警并做故障恢复", limit=3)
+    assert negative["targets"] == []
+    assert negative["needs_review"] is True

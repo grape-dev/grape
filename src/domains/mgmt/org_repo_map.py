@@ -26,6 +26,10 @@ from src.domains.mgmt.user.org_db import (
 )
 from src.kernel.config import log
 from src.kernel.repo_key import parse_repo_key, workspace_repo_dir
+from src.domains.mgmt.org_repo_map_present import (
+    _core_functions, _core_responsibilities, _other_capabilities,
+    _presentation_fields)
+from src.domains.mgmt.org_repo_map_routing import score_candidate
 
 _ORG_LOCKS: dict[str, threading.Lock] = {}
 
@@ -226,157 +230,6 @@ def mark_ai_status(org_id: str, repo_key: str, status: str, *,
         db.commit()
 
 
-def _text_list(value, limit: int = 0) -> list[str]:
-    """把字符串/数组（含 {name, description} 对象）归一成去重的短文本列表。"""
-    if isinstance(value, str):
-        raw = [value]
-    elif isinstance(value, (list, tuple)):
-        raw = list(value)
-    else:
-        raw = []
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in raw:
-        if isinstance(item, dict):
-            text = str(item.get("name") or item.get("title")
-                       or item.get("description") or "").strip()
-        else:
-            text = str(item or "").strip()
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(text)
-        if limit and len(out) >= limit:
-            break
-    return out
-
-
-def _core_functions(result: dict) -> list[dict]:
-    """核心功能：优先 schema v3，其次兼容 v2 capabilities / v1 features。
-
-    除名称/描述外，保留路由判别字段：典型任务、不适用任务、拥有实体、变更类型。
-    这些字段不进入人类可读正文，但决定「任务该派给哪个仓」。
-    """
-    out: list[dict] = []
-
-    def _append(item, name: str, desc: str) -> None:
-        if not name:
-            return
-        out.append({
-            "name": name[:80],
-            "description": desc[:240],
-            "keywords": _text_list(item.get("keywords"), limit=12)
-                        if isinstance(item, dict) else [],
-            "task_examples": _text_list(
-                item.get("task_examples") or item.get("examples"), limit=6)
-                             if isinstance(item, dict) else [],
-            "not_for": _text_list(
-                item.get("not_for") or item.get("anti_examples"), limit=5)
-                       if isinstance(item, dict) else [],
-            "owned_entities": _text_list(
-                item.get("owned_entities") or item.get("entities"), limit=8)
-                              if isinstance(item, dict) else [],
-            "change_types": _text_list(item.get("change_types"), limit=6)
-                            if isinstance(item, dict) else [],
-        })
-
-    raw = result.get("core_functions")
-    if isinstance(raw, list):
-        for item in raw:
-            if isinstance(item, dict):
-                name = str(item.get("name") or item.get("title") or "").strip()
-                desc = str(item.get("description") or item.get("summary") or "").strip()
-            else:
-                name, desc = str(item or "").strip(), ""
-            _append(item, name, desc)
-    if not out:
-        for item in (result.get("capabilities") or []):
-            if isinstance(item, dict):
-                name = str(item.get("name") or item.get("title") or "").strip()
-                desc = str(item.get("description") or item.get("summary") or "").strip()
-                _append(item, name, desc)
-    if not out:
-        for name in _text_list(result.get("features"), limit=6):
-            _append({}, name, "")
-    return out[:6]
-
-
-def _core_responsibilities(result: dict) -> dict:
-    """核心职责：组织角色 + 负责 / 不负责边界；兼容 v1 只有 not_owns。"""
-    raw = result.get("core_responsibilities")
-    role = ""
-    owns: list[str] = []
-    not_owns: list[str] = []
-    if isinstance(raw, dict):
-        role = str(raw.get("role") or raw.get("summary") or "").strip()
-        owns = _text_list(raw.get("owns") or raw.get("responsible_for"), limit=8)
-        not_owns = _text_list(raw.get("not_owns") or raw.get("does_not_own"), limit=8)
-    if not not_owns:
-        not_owns = _text_list(result.get("not_owns"), limit=8)
-    return {"role": role[:300], "owns": owns, "not_owns": not_owns}
-
-
-def _other_capabilities(result: dict, core: list[dict]) -> list[str]:
-    """其他能力的概括列表：只保留名称，不展开接口/文件。"""
-    out = _text_list(result.get("other_capabilities"), limit=10)
-    if out:
-        return out
-    core_names = {str(x.get("name") or "").strip().lower() for x in core}
-    out = []
-    seen = set(core_names)
-    for item in (result.get("capabilities") or []):
-        if isinstance(item, dict):
-            name = str(item.get("name") or item.get("title") or "").strip()
-        else:
-            name = str(item or "").strip()
-        if not name or name.lower() in seen:
-            continue
-        seen.add(name.lower())
-        out.append(name)
-        if len(out) >= 10:
-            break
-    if len(out) < 10:
-        for name in _text_list(result.get("features")):
-            if name.lower() in seen:
-                continue
-            seen.add(name.lower())
-            out.append(name)
-            if len(out) >= 10:
-                break
-    return out
-
-
-def _routing_profile(result: dict) -> dict:
-    """任务路由判别字段：正向/负向关键词与典型请求，供召回与下派使用。"""
-    raw = result.get("routing")
-    if not isinstance(raw, dict):
-        raw = {}
-    return {
-        "include_keywords": _text_list(
-            raw.get("include_keywords") or result.get("include_keywords"), limit=20),
-        "exclude_keywords": _text_list(
-            raw.get("exclude_keywords") or result.get("exclude_keywords"), limit=20),
-        "typical_requests": _text_list(
-            raw.get("typical_requests") or raw.get("task_examples"), limit=10),
-    }
-
-
-def _presentation_fields(result: dict) -> dict:
-    """面向前端/摘要的结构化展示字段（不含接口与文件路径）。"""
-    if not isinstance(result, dict):
-        return {}
-    core = _core_functions(result)
-    return {
-        "core_functions": core,
-        "core_responsibilities": _core_responsibilities(result),
-        "other_capabilities": _other_capabilities(result, core),
-        "routing": _routing_profile(result),
-    }
-
-
 def _render_ai_summary(result: dict) -> str:
     """把 AI 结构化结果渲染成组织仓库分支上的 Markdown。
 
@@ -512,7 +365,21 @@ def save_ai_result(org_id: str, repo_key: str, result: dict, *,
     return get_map(str(org_id), str(repo_key))
 
 
-def analysis_context(org_id: str, repo_key: str, *, max_chars: int = 80000) -> dict:
+# 上下文预算（B2）。来源：当前分析质量与 prompt 容量的历史实现，尚无独立基线。
+# <undecided: 需要分析质量/截断回归后确认>。
+_CTX_MAX_CHARS = 80000
+_CTX_FIELD_BUDGET = {
+    "description": 2000,
+    "repo_map_doc": 18000,
+    "capabilities": 18000,
+    "graph": 18000,
+    "readme": 18000,
+    "org_context": 8000,
+}
+
+
+def analysis_context(org_id: str, repo_key: str, *,
+                     max_chars: int = _CTX_MAX_CHARS) -> dict:
     """构建给 AI 分析引擎的上下文包（不暴露平台 token）。"""
     org = get_org(str(org_id)) or {}
     row = None
@@ -538,14 +405,7 @@ def analysis_context(org_id: str, repo_key: str, *, max_chars: int = 80000) -> d
     }
     # 按证据优先级分配预算：代码生成物优先，README 兜底，避免单个大 README
     # 把 capabilities/graph 挤掉（分析变浅的常见原因）。
-    field_caps = {
-        "description": 2000,
-        "repo_map_doc": 18000,
-        "capabilities": 18000,
-        "graph": 18000,
-        "readme": 18000,
-        "org_context": 8000,
-    }
+    field_caps = dict(_CTX_FIELD_BUDGET)
     total = 0
     for k in ("description", "repo_map_doc", "capabilities", "graph", "readme", "org_context"):
         val = str(bundle.get(k) or "")
@@ -1467,30 +1327,6 @@ def _query_tokens(query: str) -> list[str]:
     return result[:_MAX_QUERY_TOKENS]
 
 
-def _value_hit(token: str, values) -> tuple[int, str]:
-    """token 与一组候选值的匹配：精确 3 分，包含 2 分。"""
-    for value in values:
-        v = str(value or "").strip().lower()
-        if not v:
-            continue
-        if token == v:
-            return 3, v
-        if len(token) >= 2 and (token in v or (len(v) >= 2 and v in token)):
-            return 2, v
-    return 0, ""
-
-
-def _phrase_hit(tokens: list[str], text: str) -> int:
-    """任务示例/反例与需求的短语命中分：奖励更长、更多的词命中。"""
-    body = str(text or "").strip().lower()
-    if not body:
-        return 0
-    hits = [t for t in tokens if len(t) >= 2 and t in body]
-    if not hits:
-        return 0
-    return min(8, max(len(t) for t in hits) + len(hits) // 2)
-
-
 def recall_targets(org_id: str, query: str, *, limit: int = 3) -> dict:
     """按仓库地图召回目标仓库（全自动派发用）。
 
@@ -1517,135 +1353,15 @@ def recall_targets(org_id: str, query: str, *, limit: int = 3) -> dict:
         key = str(row.get("repo_key") or "")
         if not key or row.get("is_org_repo"):
             continue
-        m = maps.get(key) or {}
-        if not m:
+        mapped = maps.get(key) or {}
+        if not mapped:
             continue
-        purpose = str(m.get("purpose") or "").lower()
-        domains = [str(x) for x in (m.get("domains") or [])]
-        keywords = [str(x) for x in (m.get("keywords") or [])]
-        interfaces = [str(x) for x in (m.get("interfaces") or [])]
-        not_owns = " ".join(str(x) for x in (m.get("not_owns") or [])).lower()
-        ai = ai_profiles.get(key) or {}
-        core = ai.get("core_functions") or []
-        routing = ai.get("routing") or {}
-        _provider, _owner, name = parse_repo_key(key)
-        short = str(name or "").lower()
-        full = str(row.get("full_name") or m.get("full_name") or "").lower()
-        score = 0
-        matched: list[str] = []
-        excluded: list[str] = []
-        matched_capability = ""
-        matched_examples: list[str] = []
-        for token in tokens:
-            # not_owns 是软边界：命中“不负责”的词做降权而不是整仓排除。多域需求
-            # 经常同时提到“用户登录”和“库存锁定”，不能因为库存仓不负责登录就把
-            # 它整体排除；只有当正向得分为 0 时它才会因低于阈值落选。
-            if len(token) >= 3 and token in not_owns:
-                if token not in excluded:
-                    excluded.append(token)
-                    score -= 2
-                continue
-            hit = 0
-            for values, weight in ((keywords, 3), (domains, 2), (interfaces, 4)):
-                s, v = _value_hit(token, values)
-                if s:
-                    hit = max(hit, s * weight)
-                    if v not in matched:
-                        matched.append(v)
-            if token in purpose:
-                hit = max(hit, 1)
-                if token not in matched:
-                    matched.append(token)
-            # 需求文本直接点名仓库（owner/repo 或 repo 名）时强命中。
-            if token in short or (len(short) >= 2 and short in token) or token in full:
-                hit = max(hit, 10)
-                if key not in matched:
-                    matched.append(key)
-            score += hit
-
-        # 能力卡判别：把 task_examples / not_for / owned_entities 纳入召回。
-        # 目标不是「关键词出现过」，而是「这个任务像不像该仓的核心能力」。
-        best_cap_score = 0
-        best_cap_examples: list[str] = []
-        best_cap_excluded: list[str] = []
-        for fn in core:
-            if not isinstance(fn, dict):
-                continue
-            terms = ([fn.get("name")] + list(fn.get("keywords") or [])
-                     + list(fn.get("owned_entities") or []))
-            cap_score = 0
-            cap_terms: list[str] = []
-            cap_examples: list[str] = []
-            cap_excluded: list[str] = []
-            for token in tokens:
-                s, v = _value_hit(token, terms)
-                if s:
-                    cap_score += s * 2
-                    cap_terms.append(v)
-            for example in (fn.get("task_examples") or []):
-                hit = _phrase_hit(tokens, example)
-                if hit:
-                    cap_score += hit
-                    cap_examples.append(example)
-            for anti in (fn.get("not_for") or []):
-                hit = _phrase_hit(tokens, anti)
-                if hit:
-                    cap_score -= hit
-                    cap_excluded.append(anti)
-            if cap_score > best_cap_score:
-                best_cap_score = cap_score
-                matched_capability = str(fn.get("name") or "")
-                best_cap_examples = cap_examples[:3]
-                best_cap_excluded = cap_excluded[:3]
-                for v in cap_terms:
-                    if v not in matched:
-                        matched.append(v)
-        score += best_cap_score
-        for example in best_cap_examples:
-            if example not in matched_examples:
-                matched_examples.append(example)
-        for anti in best_cap_excluded:
-            if anti not in excluded:
-                excluded.append(anti)
-
-        for token in tokens:
-            s, v = _value_hit(token, routing.get("include_keywords") or [])
-            if s:
-                score += s * 2
-                if v not in matched:
-                    matched.append(v)
-            s, v = _value_hit(token, routing.get("exclude_keywords") or [])
-            if s:
-                score -= s * 2
-                if v not in excluded:
-                    excluded.append(v)
-        for example in (routing.get("typical_requests") or []):
-            hit = _phrase_hit(tokens, example)
-            if hit:
-                score += hit // 2
-                if example not in matched_examples:
-                    matched_examples.append(example)
-
-        if score < _MIN_RECALL_SCORE:
-            continue
-        reason = "命中：" + ", ".join(dict.fromkeys(matched))[:200]
-        if matched_capability:
-            reason += f"；最匹配能力：{matched_capability}"[:320]
-        if excluded:
-            reason += "；排除项降权：" + ", ".join(dict.fromkeys(excluded))[:120]
-        candidates.append({
-            "repo_key": key,
-            "full_name": row.get("full_name") or m.get("full_name") or "",
-            "score": score,
-            "reason": reason,
-            "confidence": round(min(0.95, 0.45 + score / 40.0), 2),
-            "purpose": m.get("purpose") or "",
-            "matched": list(dict.fromkeys(matched)),
-            "matched_capability": matched_capability,
-            "task_examples": matched_examples[:3],
-            "core_functions": [str(x.get("name") or "") for x in core
-                               if isinstance(x, dict) and str(x.get("name") or "")][:6],
-        })
+        candidate = score_candidate(
+            key=key, row=row, mapped=mapped,
+            ai=ai_profiles.get(key) or {},
+            tokens=tokens, min_score=_MIN_RECALL_SCORE)
+        if candidate:
+            candidates.append(candidate)
     candidates.sort(key=lambda x: (-x["score"], -(x.get("confidence") or 0),
                                    x["repo_key"]))
     selected = candidates[:limit]
