@@ -36,6 +36,6 @@
     "task",
     "tasks"
   ],
-  "change_reason": "Issue #3759: add POST /api/repos/{owner}/{repo}/vcs-health/reset (ops entry to clear repo-level VCS missing breaker)",
-  "source_commit": "0fc4c9600"
+  "change_reason": "Issue #3759: add POST /api/repos/{owner}/{repo}/vcs-health/reset (endpoints 401->402, min_endpoint_count 360->361); the same re-baseline also absorbs two pre-existing, unrelated drifts: runtime_tags_set description update and HeartbeatBody.metrics made nullable (neither is part of this issue)",
+  "source_commit": "c3e24efc3"
 }

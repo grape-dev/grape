@@ -36163,9 +36163,7 @@
   },
   "x-changelog": {
     "version": "2.3.0a1",
-    "added": [
-      "/api/repos/{owner}/{repo}/vcs-health/reset"
-    ],
+    "added": [],
     "removed": [],
     "deprecated": [
       "/api/dashboard/efficiency"
@@ -36207,8 +36205,8 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "0fc4c9600",
-  "x-generated-at": "2026-11-25T02:00:39.401650+00:00",
-  "change_reason": "Issue #3759: add POST /api/repos/{owner}/{repo}/vcs-health/reset (ops entry to clear repo-level VCS missing breaker)",
-  "updated_at": "2026-11-25T02:00:39.405115+00:00"
+  "x-source-commit": "c3e24efc3",
+  "x-generated-at": "2026-11-25T02:30:07.531783+00:00",
+  "change_reason": "Issue #3759: add POST /api/repos/{owner}/{repo}/vcs-health/reset (endpoints 401->402, min_endpoint_count 360->361); the same re-baseline also absorbs two pre-existing, unrelated drifts: runtime_tags_set description update and HeartbeatBody.metrics made nullable (neither is part of this issue)",
+  "updated_at": "2026-11-25T02:30:07.536096+00:00"
 }

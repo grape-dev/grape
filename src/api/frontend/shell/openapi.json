@@ -1307,6 +1307,68 @@
         "x-token-scope": "dual"
       }
     },
+    "/api/repos/{owner}/{repo}/vcs-health/reset": {
+      "post": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "Reset repo VCS breaker",
+        "description": "Issue #3759: clears the repo-level VCS missing breaker (`vcs_status`/`vcs_fail_count`/probe ledger). Use after rebinding the provider or confirming the upstream repository exists again; the next issue read re-probes upstream. Idempotent.",
+        "operationId": "repos_vcs_health_reset",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Owner"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/repos/{provider}/connection": {
       "get": {
         "tags": [
@@ -36108,7 +36170,7 @@
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 401,
+  "x-endpoint-count": 402,
   "x-groups": [
     "a2a",
     "agents",
@@ -36143,7 +36205,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "d459941951",
-  "x-generated-at": "2026-11-25T01:57:21.148268+00:00",
-  "tags": []
+  "x-source-commit": "c3e24efc3",
+  "x-generated-at": "2026-11-25T02:30:22.649220+00:00"
 }
