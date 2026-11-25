@@ -3127,6 +3127,15 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
             from src.domains.insight.public import upsert_repo_credential_value as _rc_upsert
             _rc_upsert(repo_key, "workflows_write", "true" if _wf_cap else "false",
                        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+            # Issue #4301 review F1/C3: the capability decides whether a later template push
+            # keeps or deletes .github/workflows, so the change needs an audit row of its own
+            # (the bind audit sits on the other endpoint). Token value never logged.
+            from src.domains.mgmt.auth.audit import log_audit as _log_audit
+            _log_audit("repo_workflows_capability_set",
+                       user_id=str((user or {}).get("id") or ""),
+                       operator_id=str((user or {}).get("id") or ""),
+                       detail={"repo_key": repo_key, "cred_type": "workflows_write",
+                               "capability": bool(_wf_cap), "source": "repos_bot_token"})
         except Exception as _wfe:
             log.warning(f"set_repo_bot_token: persist workflows_write failed: {_wfe}")
 

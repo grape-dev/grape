@@ -1069,6 +1069,13 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
                 from src.domains.insight.public import upsert_repo_credential_value as _rc_upsert
                 _rc_upsert(repo_key, "workflows_write", "true" if _wf_cap else "false",
                            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+                # Issue #4301 review F1/C3: same audit as the /repos/bot-token entry (see there).
+                from src.domains.mgmt.auth.audit import log_audit as _log_audit
+                _log_audit("repo_workflows_capability_set",
+                           user_id=str((user or {}).get("id") or ""),
+                           operator_id=str((user or {}).get("id") or ""),
+                           detail={"repo_key": repo_key, "cred_type": "workflows_write",
+                                   "capability": bool(_wf_cap), "source": "settings_gitcode_repo"})
             except Exception as _wfe:
                 _log.warning(f"settings: persist workflows_write failed: {_wfe}")
     else:

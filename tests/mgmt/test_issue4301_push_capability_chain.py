@@ -333,8 +333,63 @@ def test_platform_bot_persists_capability_meta(monkeypatch):
     try:
         assert get_meta_value("global_bot_github_workflows_write") == "false", resp
         assert any("workflow" in w for w in (resp.get("scope_warnings") or [])), resp
+        rows = _audit_rows("admin_repo_platform_bot_bind", "github")
+        assert rows, "平台级 Bot 置位必须落审计行（未登记事件名会让 log_audit 直接 return）"
+        assert "tok_bot_plat" not in str(rows[0][0]), "审计不得记录令牌"
     finally:
         set_meta_value_safe.set_meta_value("global_bot_github_workflows_write", "")
+
+
+# ── 6. audit coverage for the capability writes (review F1 / C3) ─────
+
+def _audit_rows(event_type: str, needle: str):
+    from src.kernel.session_manager import db, db_lock
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT detail FROM audit_logs WHERE event_type=? AND detail LIKE ? "
+                  "ORDER BY seq DESC", (event_type, f"%{needle}%"))
+        return c.fetchall()
+
+
+def test_capability_audit_event_names_are_registered():
+    """log_audit on an unregistered event only logs a warning and returns (audit.py), so a
+    call site that names a missing event writes nothing -- the exact gap review F1 raised."""
+    from src.domains.mgmt.auth.audit import EVENT_TYPES
+
+    assert {"repo_workflows_capability_set", "admin_repo_platform_bot_bind"} <= EVENT_TYPES
+
+
+def test_every_wiring_entry_uses_a_registered_event():
+    """Static guard: all three write sites must name the registered event, so a rename in one
+    place (or a copy-pasted new name) cannot silently turn the audit into a no-op again."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    expect = {
+        "src/domains/mgmt/routes/repos.py": ("repo_workflows_capability_set", "repos_bot_token"),
+        "src/domains/mgmt/routes/settings.py": ("repo_workflows_capability_set", "settings_gitcode_repo"),
+        "src/domains/mgmt/admin/repo_platform_routes.py": ("admin_repo_platform_bot_bind", None),
+    }
+    for rel, (event, source) in expect.items():
+        text = (root / rel).read_text(encoding="utf-8")
+        assert f'log_audit("{event}"' in text, f"{rel} 未使用已登记事件 {event}"
+        if source:
+            assert f'"source": "{source}"' in text, f"{rel} 缺少 source 归因"
+
+
+def test_settings_fast_path_wiring_leaves_audit_row(monkeypatch):
+    rk = f"github:{NS}/reponame"
+    _seed_repo(rk, host_user_id="")
+    try:
+        _put_repo_bot(monkeypatch, "repo, workflow")
+        rows = _audit_rows("repo_workflows_capability_set", rk)
+        assert rows, "已知能力落键必须留审计行（能力=true 时否则会静默删模板工作流）"
+        detail = str(rows[0][0])
+        assert "workflows_write" in detail and "settings_gitcode_repo" in detail, detail
+        assert "tok_bot_1" not in detail, "审计不得记录令牌"
+    finally:
+        _clean(rk)
 
 
 # ── 5. verify_token_with_scopes reuses the single /user reply ────────
