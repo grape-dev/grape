@@ -698,3 +698,44 @@ def test_business_layer_has_no_platform_card_fields(rel):
     source = (Path(ROOT) / rel).read_text(encoding="utf-8")
     matches = _PLATFORM_FIELD_RE.findall(source)
     assert not matches, f"{rel} 泄漏平台卡片字段：{sorted(set(matches))}"
+
+
+# ---------------------------------------------------------------- url 动作（跳转按钮）
+
+def test_feishu_v1_url_action_renders_jump_button():
+    """跳转型动作（查看 Issue）必须渲染成顶层 url 的跳转按钮。
+
+    回归：v1 渲染器曾把 url 动作也渲染成 value 回调按钮，链接整个丢掉 →
+    飞书里点「查看 Issue」不跳转，只回一个没人处理的 cmd（待审核/待澄清通知卡实障）。
+    """
+    card = Card(title="❓ 需求待澄清", tone=Tone.WARNING, blocks=(
+        text_block("请补充信息"),
+        row_block(Action(id="open-issue", label="🔗 查看 Issue",
+                         url="https://gitcode.com/grape-dev/grape/issues/123")),
+    ))
+    btn = FeishuCardRenderer().render(card).payload["elements"][1]["actions"][0]
+    assert btn["url"] == "https://gitcode.com/grape-dev/grape/issues/123"
+    assert "value" not in btn
+
+
+def test_feishu_v2_url_action_renders_open_url_behavior():
+    card = Card(title="t", form="v2", blocks=(
+        button_block(Action(id="open-issue", label="查看 Issue", url="https://example.com/i/1")),
+    ))
+    btn = FeishuCardRenderer().render(card).payload["body"]["elements"][0]
+    assert btn["behaviors"] == [{"type": "open_url", "default_url": "https://example.com/i/1"}]
+
+
+def test_pending_review_notify_card_keeps_issue_link():
+    """待审核/待澄清通知卡的「查看 Issue」在飞书渲染结果里必须带链接。"""
+    from src.domains.runtime.im.notify import build_cards_from_payload
+
+    card, _ = build_cards_from_payload({
+        "text": "请审核确认交付结果", "repo_key": "gitcode:grape-dev/grape",
+        "issue_number": 123, "kind": "pending_review", "conv_id": "conv-1"})
+    els = FeishuCardRenderer().render(card).payload["elements"]
+    btns = [b for el in els if el.get("tag") == "action" for b in el["actions"]]
+    issue_btn = [b for b in btns if "查看 Issue" in b["text"]["content"]]
+    assert issue_btn, "通知卡必须还带查看 Issue 按钮"
+    assert issue_btn[0].get("url") == "https://gitcode.com/grape-dev/grape/issues/123"
+    assert "value" not in issue_btn[0]

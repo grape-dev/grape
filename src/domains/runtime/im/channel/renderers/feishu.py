@@ -81,8 +81,13 @@ class FeishuCardRenderer(CardRenderer):
         btn: dict[str, Any] = {
             "tag": "button",
             "text": _plain(action.label or action.id),
-            "value": _value_dict(action),
         }
+        if action.url:
+            # 跳转按钮：v1 的链接必须放在顶层 url。带 value 但没 url 会被飞书当成回调按钮，
+            # 点下去只回一个没人处理的 cmd（「查看 Issue 不跳转」就是这个形态）。
+            btn["url"] = action.url
+        else:
+            btn["value"] = _value_dict(action)
         if action.style == ButtonStyle.PRIMARY:
             btn["type"] = "primary"
         elif action.style == ButtonStyle.DANGER:
@@ -132,8 +137,12 @@ class FeishuCardRenderer(CardRenderer):
         btn: dict[str, Any] = {
             "tag": "button",
             "text": _plain(action.label or action.id),
-            "behaviors": [{"type": "callback", "value": _value_dict(action)}],
         }
+        if action.url:
+            # schema 2.0 的跳转是 open_url 行为，不是 callback（callback 点了只能回载荷给服务端）
+            btn["behaviors"] = [{"type": "open_url", "default_url": action.url}]
+        else:
+            btn["behaviors"] = [{"type": "callback", "value": _value_dict(action)}]
         if action.style == ButtonStyle.PRIMARY:
             btn["type"] = "primary"
         elif action.style == ButtonStyle.DANGER:
