@@ -25,8 +25,11 @@
   </p>
 
   <p>
-    <a href="https://railway.com/deploy/grape-ai-native-devops"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="30"></a>
+    <a href="https://railway.com/deploy/grape-ai-native-devops"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="30"></a>&nbsp;&nbsp;
+    <a href="https://www.grapedev.cn/devspace"><img src="assets/deploy-on-ai-devspace.png" alt="Deploy on AI DevSpace" height="30"></a>
   </p>
+
+  <p><small style="color:#6a737d"><strong>AI DevSpace</strong> &mdash; one-click deploy on <strong>Huawei Cloud</strong> (China-first access &middot; zero cross-border latency &middot; enterprise isolation). Prefer global SaaS? Use <strong>Railway</strong>.</small></p>
 
   <p>
     <a href="https://www.grapedev.cn/community.html?cat=join" title="Join the community"><img src="assets/community/feishu.svg" width="18" height="18" alt="Feishu">&nbsp;Feishu</a> ·
