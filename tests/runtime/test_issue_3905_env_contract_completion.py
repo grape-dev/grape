@@ -99,9 +99,10 @@ def test_create_failed_task_snapshot_carries_issue_and_pr_env():
     with patch("src.kernel.prompt_builder.build_devops_agent_prompt", return_value=""):
         ep._create_failed_task(REPO, 9302, "coding", "", "i3905skill", skill_path="",
                                skill_id=0,
-                               evt={"type": "issue_opened", "issue_id": "#3905",
+                               evt={"type": "pr_review", "issue_id": "#3905",
                                     "actor": "alice",
-                                    "repository": "owner/test-3905-envcontract"},
+                                    "repository": "owner/test-3905-envcontract",
+                                    "payload": {"pr_number": "2170"}},
                                issue_id="#3905", runtime_id=0)
     with db_lock:
         row = db.cursor().execute(
@@ -110,8 +111,34 @@ def test_create_failed_task_snapshot_carries_issue_and_pr_env():
     assert row is not None, "失败快照必须落库（重派唯一参数来源）"
     env = decrypt_env_extra(row[0])
     assert env.get("ISSUE_NUMBER") == "3905"
+    assert env.get("PR_NUMBER") == "2170", "失败快照必须带 PR 号（重派侧 PR_NUMBER 的唯一来源）"
     assert env.get("ACCOUNT") == "alice"
     assert env.get("REPO_KEY") == REPO
+
+
+def test_create_failed_task_survives_env_assembly_failure():
+    """PR #2170 复审 Optional：build_task_env 装配抛异常时仍须落失败快照。
+
+    失败快照是重派唯一参数来源，装配异常吞掉整行 → 重派命中「无关联任务」；
+    降级为最小可解析子集（repo 标识 + ACCOUNT + Issue/PR 编号）即满足重派前置。
+    """
+    with patch("src.kernel.prompt_builder.build_devops_agent_prompt", return_value=""), \
+            patch.object(ep, "build_task_env", side_effect=RuntimeError("boom")):
+        ep._create_failed_task(REPO, 9304, "coding", "", "i3905skill", skill_path="",
+                               skill_id=0,
+                               evt={"type": "issue_opened", "issue_id": "#3905",
+                                    "actor": "alice",
+                                    "repository": "owner/test-3905-envcontract"},
+                               issue_id="#3905", runtime_id=0)
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT env_extra FROM agent_tasks WHERE repo_key=? AND event_seq=9304",
+            (REPO,)).fetchone()
+    assert row is not None, "装配异常不得丢失败快照（重派唯一环境来源）"
+    env = decrypt_env_extra(row[0])
+    assert env.get("REPO_KEY") == REPO
+    assert env.get("ISSUE_NUMBER") == "3905"
+    assert env.get("ACCOUNT") == "alice"
 
 
 # ---------- 2) 验收：无 ISSUE_NUMBER 的 issue 任务，四变量最终齐备 ----------
@@ -200,14 +227,62 @@ def test_scheduler_autopilot_account_falls_back_to_owner():
 
 
 def test_scheduler_autopilot_evt_carries_event_type_for_owner_fallback():
-    """源码契约：scheduler 传给 direct 派发的 evt 必须带 autopilot 事件类型，
-    否则 _dispatch_ident → resolve_actor_account 自动判定为「不回退属主」。"""
+    """源码契约：autopilot direct 派发传给 _create_direct_task 的 evt 必须带事件类型，
+    否则 _dispatch_ident → resolve_actor_account 自动判定为「不回退属主」。
+
+    守卫必须落在**真实调用点** `_execute_autopilot_direct`（PR #2170 复审 Required：
+    原守卫断言 `_execute_autopilot_agent`，那里只是构造 evt，传参在 direct 侧 →
+    假绿）。同时要求快照 evt 携带本次执行真实的 env_extra。
+    """
     import inspect
-    src = inspect.getsource(sch._execute_autopilot_agent)
-    assert '"type": "autopilot_event"' in src
-    assert "_resolve_autopilot_account" in src
-    assert "task_creator_account" in src
-    assert "ACCOUNT_MISSING" in src
+    src = inspect.getsource(sch._execute_autopilot_direct)
+    assert "evt=None" in src, "direct 侧必须保留 typed evt 形参（复用 agent 侧构造的 evt）"
+    assert "autopilot_event" in src, "direct 派发的 evt 必须显式带 autopilot 事件类型"
+    assert '"_env_extra"' in src, "快照 evt 必须附本次执行的真实 env_extra"
+    assert "_dispatch_evt" in src
+    # autopilot 账户解析仍在 agent 侧（创建者 → 属主兜底）单一实现
+    _agent_src = inspect.getsource(sch._execute_autopilot_agent)
+    assert "_resolve_autopilot_account" in _agent_src
+    assert "task_creator_account" in inspect.getsource(sch._resolve_autopilot_account)
+    assert "ACCOUNT_MISSING" in inspect.getsource(sch._resolve_autopilot_account)
+
+
+def test_scheduler_autopilot_direct_passes_typed_evt_and_env_extra(monkeypatch):
+    """行为契约（PR #2170 复审 Required）：autopilot direct 建任务时传入的 evt
+    必须让 resolve_actor_account 走「仓库属主回退」，且快照带上现场 ACCOUNT /
+    GRAPE_WORK_BRANCH——否则 autopilot direct 快照 ACCOUNT 仍为空（重派读侧 degraded）。
+    """
+    _seed_session()
+    captured = {}
+
+    def _fake_create_direct_task(repo_key, seq, agent_type, backend, skill_name,
+                               skill_path, engine_id, evt, issue_id="", skill_id=0,
+                               skip_event_config=False):
+        captured["evt"] = evt
+        return ""
+
+    monkeypatch.setattr(sch, "_skip_autopilot_for_takeover", lambda *a, **k: False)
+    monkeypatch.setattr(sch, "_update_execution_result", lambda *a, **k: None)
+    monkeypatch.setattr(ep, "_create_direct_task", _fake_create_direct_task)
+    monkeypatch.setattr(ep, "_get_issue_creator", lambda *a, **k: "")
+
+    env_extra = {"ACCOUNT": "owner", "GRAPE_WORK_BRANCH": "arch-weekly-11-ljt",
+                 "REPO_KEY": REPO, "EMPTY_ONE": ""}
+    sch._execute_autopilot_direct(
+        REPO, {"id": 7}, 42, "issue", "i3905skill", "", "", "", "/tmp/i3905-ws", "prompt",
+        "", "[Autopilot:issue]", env_extra, "owner/test-3905-envcontract",
+        {"type": "autopilot_event", "repo_key": REPO, "issue_id": "", "payload": {}})
+
+    evt = captured["evt"]
+    assert evt.get("type") == "autopilot_event", "direct 建任务 evt 必须带事件类型"
+    assert evt["_env_extra"]["ACCOUNT"] == "owner"
+    assert evt["_env_extra"]["GRAPE_WORK_BRANCH"] == "arch-weekly-11-ljt"
+    assert "EMPTY_ONE" not in evt["_env_extra"], "空值不得覆盖快照侧解析结果"
+    # 行为闭环：该 evt 经 _dispatch_ident 的账号解析链能回退到仓库属主
+    assert ep.resolve_actor_account(evt, REPO) == "owner"
+    # 事件类型缺失即降级（回归对照，证明上面的断言不是恒真）
+    assert ep.resolve_actor_account(
+        {"repo_key": REPO, "issue_id": "", "payload": {}}, REPO) == ""
 
 
 # ---------- 4) ACP 白名单补 GRAPE_ISSUE_ID ----------
@@ -289,6 +364,50 @@ def test_single_partial_missing_does_not_raise_streak_alert(monkeypatch):
             event_type="issue_opened", repo_key=REPO,
             label="[Agent:issue|repo:owner/test-3905|engine:hermes-1] ", backend_name="hermes")
     assert not errors, "三变量齐备时不应触发连续全缺告警"
+
+
+def test_autopilot_task_does_not_reset_issue_streak(monkeypatch):
+    """PR #2170 复审 Optional：autopilot 任务不得把 issue 侧连续全缺计数清零。
+
+    autopilot/chat 本无 ISSUE 变量（full_missing 恒 false），此前任一条即把进程级
+    单计数归零，混合流量下「连续 N 次全缺」可能永不触发。
+    """
+    monkeypatch.setattr(ex, "RUNTIME_CONTRACT_STREAK_ALERT", 2)
+    ex.reset_runtime_env_contract_streak()
+    errors = []
+    with patch.object(ex.log, "warning"), \
+            patch.object(ex.log, "error", lambda msg, *a, **k: errors.append(msg)):
+        ex._apply_runtime_env_contract(
+            {}, event_type="issue_opened", repo_key="",
+            label="[Agent:issue|repo:owner/test-3905|engine:hermes-1] ", backend_name="hermes")
+        ex._apply_runtime_env_contract(
+            {}, event_type="autopilot_event", repo_key="",
+            label="[Autopilot:issue|repo:owner/test-3905|engine:hermes-1] ",
+            backend_name="hermes")
+        ex._apply_runtime_env_contract(
+            {}, event_type="issue_opened", repo_key="",
+            label="[Agent:issue|repo:owner/test-3905|engine:hermes-1] ", backend_name="hermes")
+    assert errors, "非 issue 域任务不得稀释 issue 侧连续全缺计数"
+
+
+def test_contract_streak_isolated_per_backend_and_agent_type(monkeypatch):
+    """PR #2170 复审 Optional：连续计数按 (backend, agent_type) 分桶，互不清零。"""
+    monkeypatch.setattr(ex, "RUNTIME_CONTRACT_STREAK_ALERT", 2)
+    ex.reset_runtime_env_contract_streak()
+    errors = []
+    with patch.object(ex.log, "warning"), \
+            patch.object(ex.log, "error", lambda msg, *a, **k: errors.append(msg)):
+        ex._apply_runtime_env_contract(
+            {}, event_type="issue_opened", repo_key="",
+            label="[Agent:issue|repo:owner/test-3905|engine:hermes-1] ", backend_name="hermes")
+        # 另一 backend + agent_type 的部分缺失任务（full_missing=false）不得清零 hermes/issue
+        ex._apply_runtime_env_contract(
+            {"ACCOUNT": "alice"}, event_type="issue_opened", repo_key="",
+            label="[Agent:qa|repo:owner/test-3905|engine:codex-1] ", backend_name="codex")
+        ex._apply_runtime_env_contract(
+            {}, event_type="issue_opened", repo_key="",
+            label="[Agent:issue|repo:owner/test-3905|engine:hermes-1] ", backend_name="hermes")
+    assert errors, "其他 backend/agent_type 的任务不得清零本桶连续全缺计数"
 
 
 def test_alerts_rule_and_metric_name_are_published():

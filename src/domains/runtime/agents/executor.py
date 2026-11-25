@@ -1016,14 +1016,14 @@ _RUNTIME_CONTRACT_ISSUE_VARS = ("ACCOUNT", "GRAPE_ISSUE_ID", "GRAPE_WORK_BRANCH"
 # 连续 N 次全缺说明派发侧整条链路丢 env（正是 #3905 的生产形态），必须升级为 ERROR。
 RUNTIME_CONTRACT_STREAK_ALERT = int(os.environ.get("GRAPE_ENV_CONTRACT_STREAK_ALERT", "10") or 10)
 
-_contract_streak = {"count": 0}
+_contract_streak: dict = {}
 _contract_streak_lock = threading.Lock()
 
 
 def reset_runtime_env_contract_streak() -> None:
     """清空连续全缺计数（测试 seam / 进程内告警重置）。"""
     with _contract_streak_lock:
-        _contract_streak["count"] = 0
+        _contract_streak.clear()
 
 
 def _runtime_agent_type(label: str) -> str:
@@ -1044,8 +1044,16 @@ def _runtime_agent_type(label: str) -> str:
     return "unknown"
 
 
-def _record_contract_missing(missing: list, backend_name: str, label: str) -> None:
-    """Issue #3905：契约缺失结构化计数 + 连续全缺升级告警（观测不得拖垮任务）。"""
+def _record_contract_missing(missing: list, backend_name: str, label: str,
+                             issue_scoped: bool = True) -> None:
+    """Issue #3905：契约缺失结构化计数 + 连续全缺升级告警（观测不得拖垮任务）。
+
+    ``issue_scoped``（PR #2170 复审 Optional）：只有 Issue 域任务参与「连续全缺」计数。
+    autopilot / chat 任务本就没有 ISSUE 变量，此前任一条非 issue 任务以
+    ``full_missing=false`` 就把进程级单计数清零、且跨 backend/agent_type 混合累计，
+    混合流量下「连续 N 次三变量全缺」可能永不触发。改为按 ``(backend, agent_type)``
+    分桶、非 issue 域直接跳过。
+    """
     agent_type = _runtime_agent_type(label)
     try:
         from src.domains.insight.observability import record_runtime_env_contract_missing
@@ -1053,13 +1061,16 @@ def _record_contract_missing(missing: list, backend_name: str, label: str) -> No
             record_runtime_env_contract_missing(backend_name, agent_type, _name)
     except Exception as _obs_e:  # noqa: BLE001 - 指标失败只降级 debug
         log.debug(f"runtime env contract metric forward failed: {_obs_e}")
+    if not issue_scoped:
+        return
     full_missing = all(name in missing for name in _RUNTIME_CONTRACT_ISSUE_VARS)
+    key = (backend_name or "", agent_type)
     with _contract_streak_lock:
         if full_missing:
-            _contract_streak["count"] += 1
+            _contract_streak[key] = _contract_streak.get(key, 0) + 1
         else:
-            _contract_streak["count"] = 0
-        streak = _contract_streak["count"]
+            _contract_streak[key] = 0
+        streak = _contract_streak[key]
     limit = max(1, RUNTIME_CONTRACT_STREAK_ALERT)
     if full_missing and streak >= limit and streak % limit == 0:
         log.error(f"{label}runtime env contract missing on {streak} consecutive tasks: "
@@ -1130,14 +1141,16 @@ def _apply_runtime_env_contract(env: dict, *, event_type: str = "", account: str
         except Exception as exc:
             log.warning(f"{label}runtime env contract: GRAPE_WORK_BRANCH resolve failed "
                         f"(backend={backend_name or '-'}): {exc}")
-    missing = [name for name in _runtime_contract_scope(env, event_type)
-               if not (env.get(name) or "").strip()]
+    _scope = _runtime_contract_scope(env, event_type)
+    missing = [name for name in _scope if not (env.get(name) or "").strip()]
     if missing:
         log.warning(f"{label}runtime env contract missing: {','.join(missing)} "
                     f"(backend={backend_name or '-'}); task continues with degraded env")
         # Issue #3905：单行 WARNING 无法聚合/告警 → 结构化计数（backend/agent_type/var）
         # + 连续三变量全缺升级 ERROR（派发侧整链丢 env 的确定性信号）。
-        _record_contract_missing(missing, backend_name, label)
+        # 连续计数只统计 Issue 域任务（autopilot/chat 无 ISSUE 变量，不得稀释告警）。
+        _record_contract_missing(missing, backend_name, label,
+                                 issue_scoped=(_scope == _RUNTIME_CONTRACT_ENV))
     return env
 
 

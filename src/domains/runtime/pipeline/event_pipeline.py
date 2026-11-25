@@ -919,13 +919,34 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     # 契约三变量必然回落为空。改为与 build_task_env（重派/对话入队同源）组装，
     # 再按事件补 Issue/PR 编号与内部卡片 id，快照字段只增不减。
     _resolved_account = resolve_actor_account(evt, repo_key)
-    env_extra = build_task_env(repo_key, agent_type, issue_id,
-                               runtime_id=runtime_id or 0,
-                               account=_resolved_account,
-                               suppress_account_alerts=True)
-    if repo_key:
-        env_extra.setdefault("REPO_KEY", repo_key)
-    _inject_issue_pr_env(env_extra, evt, repo_key)
+    # Issue #3905（PR #2170 复审 Optional）：装配异常必须兜底——失败快照是重派/接管的
+    # 唯一 env 来源，装配抛异常会让整行失败快照丢失，重派随后命中「无关联任务」。
+    # 与 _create_direct_task 同口径：装配失败降级不阻断落库，先退到最小可解析子集
+    # （repo 标识 + 已解析账号 + Issue/PR 编号），保住重派侧的契约前置。
+    env_extra = {}
+    try:
+        env_extra = build_task_env(repo_key, agent_type, issue_id,
+                                   runtime_id=runtime_id or 0,
+                                   account=_resolved_account,
+                                   suppress_account_alerts=True)
+        if repo_key:
+            env_extra.setdefault("REPO_KEY", repo_key)
+        _inject_issue_pr_env(env_extra, evt, repo_key)
+    except Exception as _env_e:  # noqa: BLE001 - 装配失败不得丢失败快照
+        log.warning(f"create_failed_task: env snapshot assemble failed seq={seq}: {_env_e}")
+        env_extra = {}
+        try:
+            from src.kernel.repo_key import derive_repo_identity
+            _full_name, _repo_owner, _repo_name = derive_repo_identity(repo_key, repo_key)
+            env_extra = {"REPO_FULL_NAME": _full_name or repo_key,
+                         "REPO_OWNER": _repo_owner, "REPO_NAME": _repo_name}
+            if repo_key:
+                env_extra["REPO_KEY"] = repo_key
+            if _resolved_account:
+                env_extra["ACCOUNT"] = _resolved_account
+            _inject_issue_pr_env(env_extra, evt, repo_key)
+        except Exception as _min_e:  # noqa: BLE001 - 降级再失败只丢扩展项
+            log.warning(f"create_failed_task: degraded env snapshot failed seq={seq}: {_min_e}")
 
     # repo_gitcode_token（按 provider 分流，用户 token 写空由运行时实时获取）
 

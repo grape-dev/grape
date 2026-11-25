@@ -765,10 +765,25 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     # _create_direct_task 抛 RepoDispatchBusyError（瞬态）——与 REMOTE 入队同口径
     # 落 skipped + error_code，交给 _execute_task 瞬态通道（不消耗 attempt /
     # 超预算 requeue 下一 tick），不再「创建任务记录失败」记 failed（撞锁即判死）。
+    # Issue #3905（PR #2170 复审 Required）：传给 _create_direct_task 的 evt 必须带
+    # autopilot 事件类型——_create_direct_task → _dispatch_ident → resolve_actor_account
+    # 靠 evt["type"] 判定 allow_owner_fallback（仅 autopilot* 自动放行「仓库属主回退」，
+    # event_pipeline.resolve_actor_account:246-247）；传无 type 的字面 evt 会让 direct
+    # 快照的 ACCOUNT 恒空（重派/接管读侧仍 degraded）。
+    # 复用 _execute_autopilot_agent 已构造的 typed evt（含物化写入的 SKILL_CONSISTENCY_KEY /
+    # _skill_materialize），并附本次执行真实的 env_extra：快照 = 现场 env，杜绝第二套解析。
+    _dispatch_evt = dict(evt) if isinstance(evt, dict) else {}
+    _dispatch_evt.setdefault("type", "autopilot_event")
+    _dispatch_evt.setdefault("repo_key", repo_key)
+    _dispatch_evt.setdefault("issue_id", "")
+    _dispatch_evt.setdefault("payload", {})
+    # 空值不覆盖 build_task_env 的解析结果（ACCOUNT 两条链同源，空即真不可得）
+    _dispatch_evt["_env_extra"] = {k: v for k, v in (env_extra or {}).items()
+                                   if str(v or "").strip()}
     try:
         task_id = _create_direct_task(
             repo_key, _autopilot_event_seq(exec_id), agent_type, backend, skill_name,
-            "", engine_id, {"repo_key": repo_key, "issue_id": "", "payload": {}},
+            "", engine_id, _dispatch_evt,
             issue_id=_autopilot_issue_ref(task.get("id")), skill_id=0, skip_event_config=True,
         )
     except Exception as _dt_e:
