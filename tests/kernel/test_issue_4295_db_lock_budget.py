@@ -36,7 +36,7 @@ class _FakeLog:
 def _clean_state():
     dlm._STATE.clear()
     dlm._CHILD_CACHE.clear()
-    dlm._BUDGET_OVERRIDE.set(0.0)
+    dlm._BUDGET_OVERRIDE.set(None)
     with dlm._TIMEOUT_REPORTED_LOCK:
         dlm._TIMEOUT_REPORTED.clear()
     path_var.set("")
@@ -44,7 +44,7 @@ def _clean_state():
     yield
     dlm._STATE.clear()
     dlm._CHILD_CACHE.clear()
-    dlm._BUDGET_OVERRIDE.set(0.0)
+    dlm._BUDGET_OVERRIDE.set(None)
     with dlm._TIMEOUT_REPORTED_LOCK:
         dlm._TIMEOUT_REPORTED.clear()
     path_var.set("")
@@ -148,6 +148,34 @@ def test_foreground_lock_budget_override_without_request_path(monkeypatch):
     monkeypatch.setenv(dlm.ACQUIRE_TIMEOUT_ENV, "0")
     path_var.set("")
     with dlm.foreground_lock_budget(0.25):
+        assert dlm.acquire_budget_s() == pytest.approx(0.25)
+    assert dlm.acquire_budget_s() == 0.0
+
+
+def test_foreground_lock_budget_zero_disables_inside_request_context(monkeypatch):
+    """显式 0 = 关闭预算（区别于 None=继承）：长任务端点包一层即可豁免 5s 上限。"""
+    monkeypatch.setenv(dlm.ACQUIRE_TIMEOUT_ENV, "5")
+    path_var.set("/api/issues/acme/demo")
+    assert dlm.acquire_budget_s() == pytest.approx(5.0)
+
+    with dlm.foreground_lock_budget(0):
+        assert dlm.acquire_budget_s() == 0.0
+        lock = dlm.TrackedRLock(bound_in_request=True)
+        holder = _hold_lock(lock, 0.3)
+        with lock:  # 关闭期间是无界等锁：持锁 0.3s 也能等到，而不是抛 LockAcquireTimeout
+            pass
+        holder.join(5)
+
+    assert dlm.acquire_budget_s() == pytest.approx(5.0), "退出上下文后应恢复继承预算"
+
+
+def test_foreground_lock_budget_none_inherits_current_budget(monkeypatch):
+    """``seconds=None`` 是继承而非覆盖：嵌套时不把外层预算改回 env/path 判定。"""
+    monkeypatch.setenv(dlm.ACQUIRE_TIMEOUT_ENV, "5")
+    path_var.set("")
+    with dlm.foreground_lock_budget(0.25):
+        with dlm.foreground_lock_budget():
+            assert dlm.acquire_budget_s() == pytest.approx(0.25)
         assert dlm.acquire_budget_s() == pytest.approx(0.25)
     assert dlm.acquire_budget_s() == 0.0
 

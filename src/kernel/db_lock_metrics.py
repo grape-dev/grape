@@ -109,20 +109,24 @@ def _request_path() -> str:
         return ""
 
 
-# 显式预算覆盖（仅 foreground_lock_budget 使用）：0 = 未覆盖
-_BUDGET_OVERRIDE: contextvars.ContextVar = contextvars.ContextVar("db_lock_budget_override", default=0.0)
+# 显式预算覆盖（仅 foreground_lock_budget 使用）：None = 未覆盖（继承 env + path_var 判定），
+# 0 = 显式关闭本段预算（即使当前处于 HTTP 请求上下文）。
+_BUDGET_OVERRIDE: contextvars.ContextVar = contextvars.ContextVar(
+    "db_lock_budget_override", default=None)
 
 
 def acquire_budget_s() -> float:
     """当前线程的等锁预算（秒）；0 = 无界等锁（旧语义）。
 
-    只有**前台 HTTP 请求**线程（``path_var`` 非空）受预算约束：后台 sweeper /
-    refresh / 批处理没有请求上下文，保持原来的无界行为，避免把长任务打成 503。
-    ``foreground_lock_budget()`` 可显式覆盖（测试/无请求上下文的前台入口）。
+    只有**HTTP 请求线程**（``path_var`` 非空，由 ``src/api/server_common.py`` 对所有
+    HTTP 请求设置，含内部触发的长任务端点）受预算约束：后台 sweeper / refresh /
+    批处理没有请求上下文，保持原来的无界行为，避免把长任务打成 503。
+    ``foreground_lock_budget()`` 可显式覆盖（测试/无请求上下文的前台入口），
+    传 0 即在该段内**关闭**预算（区分 None=继承 与 0=关闭）。
     """
     override = _BUDGET_OVERRIDE.get()
-    if override and override > 0:
-        return float(override)
+    if override is not None:
+        return max(0.0, float(override))
     budget = _env_float(ACQUIRE_TIMEOUT_ENV, _ACQUIRE_TIMEOUT_DEFAULT_S)
     if budget <= 0:
         return 0.0
@@ -133,13 +137,16 @@ def acquire_budget_s() -> float:
 def foreground_lock_budget(seconds: float | None = None):
     """显式声明"这段代码属于前台路径"（无请求上下文的线程里也可用）。
 
-    仅用于测试与极少数无 path_var 的前台入口；常规 HTTP 请求靠 ``path_var`` 自动判定，
-    不需要本上下文。
+    - ``seconds=None``（默认）：继承当前预算，不做覆盖；
+    - 正数：在本段内用该预算；
+    - ``0``：在本段内关闭预算（长任务端点里包一层即可豁免 5s 上限）。
+
+    仅用于测试与极少数无 path_var 的前台入口；常规 HTTP 请求靠 ``path_var`` 自动判定。
     """
-    budget = acquire_budget_s() if seconds is None else float(seconds)
-    if budget <= 0:
-        yield 0.0
+    if seconds is None:
+        yield acquire_budget_s()
         return
+    budget = max(0.0, float(seconds))
     tok = _BUDGET_OVERRIDE.set(budget)
     try:
         yield budget
