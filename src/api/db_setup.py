@@ -3374,15 +3374,16 @@ def _postcheck_autopilot_executions_table() -> None:
         c = conn.cursor()
         if not _base_table_present(c, "autopilot_executions"):
             raise RuntimeError(
-                "202611240003 post_check 未收敛：runtime owner 库缺 autopilot_executions "
+                "202611240010 post_check 未收敛：runtime owner 库缺 autopilot_executions "
                 "基表（_owned_skip 跳过 / 回落进程库未命中），不盖章，待 owner 进程重试")
 
 
 register_migration(
     # R3 换号：基线已发布最大号为 202611230012（tests/arch/test_migration_version_integrity.py
     # 强制新增迁移必须大于该值），早前顺延到的 202611230006 落在历史区间内会被门禁拦下；
-    # 202611240001/002 已用，顺延到未占用的 202611240003（名字/语义不变，仍只登记 runtime 域）。
-    version="202611240003",
+    # 202611240001..009 均已被占用（含基线侧 #3349 的 202611240003 与 autopilot-task-dispatch-state
+    # 的 202611240007），顺延到未占用的 202611240010（名字/语义不变，仍只登记 runtime 域）。
+    version="202611240010",
     name="create-autopilot-executions-table",
     kind="safe",
     domains=("runtime",),
@@ -12360,7 +12361,7 @@ def stamp_repo_bot_credential_backfill() -> dict:
 # circuit_open_until/circuit_fail_count/circuit_half_open。新装库由
 # runtime schema_ddl 直接带列，本迁移只服务存量库；列在位才盖章。
 # 版本号避让：基线上 202611240001（#4066）、202611240002（#3789）、
-# 202611240003（#3763 autopilot_executions 补建）、202611240004（#3846 沙箱表）、
+# 202611240010（#3763 autopilot_executions 补建）、202611240004（#3846 沙箱表）、
 # 202611240005（#3731 convert_fail_count）与 202611240006（#3773 ACP 指标列）
 # 已占用，本迁移顺延取 202611240008（register_migration 撞号守卫：同号会被判
 # 「已执行」永久跳过）。
