@@ -4339,21 +4339,29 @@ def _rollback_auto_advance_stage(seq: int) -> None:
     一旦该下游 A2A 事件最终 failed，就应把 stage 退回原节点，避免「stage 指向
     从未运行的下游」的静默断链。仅当事件携带 auto-advance `stage_guard`，且当前
     stage 仍等于 `guard.to` 时回滚（幂等：stage 已被其它路径推进/收敛则不动）。
+
+    Issue #4375：events 归 runtime 域，原实现用 `session_manager.db` 直查 —— 三库
+    拓扑下 mgmt 进程解析到 mgmt 库，恒 `1146 Table 'grape_prod_mgmt.events' doesn't
+    exist` 且被 `except` 吞成 WARNING，回滚永不执行。现改走 runtime 域 public 只读口
+    （`event_routing_payload`，游标由 `db_registry.cursor_for("runtime")` 路由），
+    失败升 ERROR 并带连接事实串，便于分流「旧进程未重启」与「仍打错库」。
     """
     if not seq:
         return
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT repo_key, issue_id, payload FROM events WHERE seq=?", (int(seq),))
-            row = c.fetchone()
-        if not row:
+        _seq = int(seq)
+    except (TypeError, ValueError):
+        return
+    _issue_hint = ""
+    _guard_hint = ""
+    try:
+        from src.domains.runtime import public as _rt_public
+        evt = _rt_public.event_routing_payload(_seq)
+        if not evt:
             return
-        repo_key, issue_id, payload_raw = row[0] or "", row[1] or "", row[2] or ""
-        try:
-            payload = json.loads(payload_raw or "{}")
-        except Exception:
-            return
+        repo_key, issue_id = evt.get("repo_key") or "", evt.get("issue_id") or ""
+        _issue_hint = str(issue_id)
+        payload = evt.get("payload")
         if not isinstance(payload, dict):
             return
         guard = payload.get("stage_guard")
@@ -4361,6 +4369,7 @@ def _rollback_auto_advance_stage(seq: int) -> None:
             return
         from_stage = str(guard.get("from") or "").strip()
         to_stage = str(guard.get("to") or "").strip()
+        _guard_hint = f"{from_stage}->{to_stage}" if (from_stage or to_stage) else ""
         if (not from_stage or not to_stage or from_stage == to_stage
                 or not repo_key or not issue_id):
             return
@@ -4372,7 +4381,14 @@ def _rollback_auto_advance_stage(seq: int) -> None:
         log.info(f"Pipeline: auto-advance rollback seq={seq} "
                  f"stage {to_stage}->{from_stage} issue={issue_id}")
     except Exception as e:
-        log.warning(f"Pipeline: auto-advance stage rollback failed seq={seq}: {e}")
+        # Issue #4375：每小时 5 条被 WARNING 吞掉，巡检查不到断链；升 ERROR 并带
+        # `route/target_db/pid/host`（脱敏事实串，Issue #3909 同款），验收可分流根因。
+        from src.kernel import db_registry
+        log.error(
+            f"Pipeline: auto-advance stage rollback failed seq={seq} "
+            f"issue={_issue_hint or '-'} stage_guard={_guard_hint or '-'} "
+            f"{db_registry.conn_facts('runtime')}: {e}"
+        )
 
 
 def _fail_event(seq: int, reason: str, exit_code: int = 1, diag: dict = None):

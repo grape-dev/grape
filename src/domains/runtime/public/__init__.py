@@ -351,6 +351,27 @@ def event_payload(seq: int) -> dict[str, Any] | None:
         return None
 
 
+def event_routing_payload(seq: int) -> dict[str, Any] | None:
+    """按 seq 取事件的路由字段（repo_key / issue_id / payload），跨域只读口（Issue #4375）。
+
+    `event_payload` 只返回 payload；auto-advance 回滚还需要事件归属（repo_key/issue_id）
+    才能定位并回退 `issue.stage`，故补这条具名查询。payload 按 JSON 解析为 dict；
+    无该 seq / payload 为空 / 非 dict（非法 JSON、数组等）→ 返回 None，由调用方短路。
+    """
+    row = read_one_any("event_routing_payload", (int(seq),))
+    if not row:
+        return None
+    repo_key, issue_id, payload_raw = row[0] or "", row[1] or "", row[2] or ""
+    payload = None
+    if payload_raw:
+        try:
+            _parsed = json.loads(payload_raw)
+        except Exception:
+            _parsed = None
+        payload = _parsed if isinstance(_parsed, dict) else None
+    return {"repo_key": str(repo_key), "issue_id": str(issue_id), "payload": payload}
+
+
 def has_inflight_repo(repo_key: str) -> bool:
     """某仓库是否仍有在途任务（解绑/迁移前守卫）。"""
     with _any_cursor() as c:
@@ -2146,6 +2167,8 @@ __all__ = ['reconcile_pipeline_progress', 'create_task_via_issue',
            "skill_agent_type_by_priority_any", "skill_rebind_candidate_rows_any",
            # QA 结论门禁读口（src/api/qa_gate.py；events 本域）
            "qa_gate_latest_event_any", "qa_gate_latest_pr_payload_any",
+           # auto-advance 回滚的事件路由字段读口（src/domains/runtime/pipeline/event_pipeline.py）
+           "event_routing_payload",
            # 接管会话状态（src/api/git_repo_api.py；takeover_sessions 本域）
            "takeover_session_status_any",
            # 接管会话心跳（src/domains/mgmt/routes/takeover.py；takeover_sessions 本域）
@@ -2929,6 +2952,11 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_resolve_preferred": (
         "SELECT id, skill_name, scope FROM skill WHERE skill_name=? AND is_active=1 "
         "ORDER BY CASE scope WHEN 'official' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END LIMIT 1"),
+    # ── 事件回滚/路由字段（Issue #4375；auto-advance 回滚读 events）──────────────
+    # 回滚需 repo_key + issue_id 定位 `issue` 行（`event_payload` 只给 payload）；
+    # 列序与 `event_routing_payload` 的解包顺序逐字一致，LIMIT 1 按主键即唯一行。
+    "event_routing_payload": (
+        "SELECT repo_key, issue_id, payload FROM events WHERE seq=? LIMIT 1"),
     "event_feedback_row": (
         "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result "
         "FROM events WHERE seq=?"),
@@ -3450,21 +3478,18 @@ _ANY_QUERIES: dict[str, str] = {
 
 @contextmanager
 def _any_cursor(write: bool = False):
-    """runtime 基表游标：自有 DSN 优先（autocommit），单库/测试拓扑回落进程主库。
+    """runtime 基表游标：统一走内核唯一路由判定（`db_registry.cursor_for("runtime")`）。
+
+    Issue #4375：原实现自带第二套判定（`uses_own_dsn("runtime") ? 域连接 : 进程主库`）。
+    三库拓扑下缺 `GRAPE_DSN_RUNTIME` 时它会**静默回落 mgmt 主库**，跨域读落到另一张库的
+    同名表/空壳上（`Table 'grape_prod_mgmt.events' doesn't exist` 1146 的残留口子），
+    与「数据本就不存在」不可区分。现在交给 `route_of`：`domain` → 域连接；`local`
+    （单库拓扑 / 本域进程）→ 进程主库；三库缺 DSN → 显式 `DomainUnavailable`，绝不回落。
 
     `write=True` 时在回落路径提交（自有 DSN 连接本身是 autocommit，无需提交）。
     """
-    if db_registry.uses_own_dsn("runtime"):
-        with db_registry.cursor("runtime") as c:
-            yield c
-        return
-    from src.kernel.session_manager import db as _pdb, db_lock as _plock
-
-    with _plock:
-        c = _pdb.cursor()
+    with db_registry.cursor_for("runtime", write=write) as c:
         yield c
-        if write:
-            _pdb.commit()
 
 
 @contextmanager
