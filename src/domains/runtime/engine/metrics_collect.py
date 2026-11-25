@@ -15,6 +15,7 @@ ctypes-Win32 / PowerShell-CIM 四条路径，放在同一个文件里后续调�
   更不能每轮串 4 次超时。
 """
 import os
+import shutil as _shutil
 
 from src.kernel.config import log
 
