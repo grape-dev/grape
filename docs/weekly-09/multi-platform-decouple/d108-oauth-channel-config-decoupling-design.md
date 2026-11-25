@@ -139,6 +139,14 @@ authorization_code）；标准 oauth2 渠道不做自动 refresh（仅 OIDC 策�
 
 ## 9. D108-B：登录令牌不回落仓库操作（选项 A，2026-11-13 用户拍板）
 
+> ⚠️ **2026-11-25 负责人改判（Issue #4301）**：GitHub 登录渠道 scope 由
+> `read:user user:email repo` 扩为 `read:user user:email repo workflow admin:repo_hook`
+> （不含 `offline_access`），理由是缺 `workflow` 时任何含 `.github/workflows` 的推送
+> 都被 GitHub 拒绝、Coding Agent 只能退化成 `ci/` 妥协。本文「登录令牌不回落」的
+> 关回落开关已由 D109 第一批删除，现行口径是 **PAT 优先、PAT 缺席回落登录令牌**
+> （`src/api/deps.py` get_user_token_for 注释，2026-11-14 用户口径）；scope 是那条回落
+> 路径的实际权限边界。改判的影响面：升级 scope 后全体 GitHub 用户需重新授权一次。
+
 外部评审建议"登录与仓库用两个独立 OAuth 应用"。裁定：安全方向采纳，但**不采用双应用**，
 改为单应用 + 收窄 scope + 关回落 —— 安全性等价，成本是双应用的零头。
 
