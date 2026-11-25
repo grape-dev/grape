@@ -176,3 +176,26 @@ def test_failed_snapshot_records_pool_engine_source_column():
             (REPO, seq)).fetchone()
     assert row, "失败快照应落库（缺列时会整条丢弃）"
     assert row[0] == "failed" and (row[1] or "") == ""
+
+
+def test_direct_and_failed_rows_carry_engine_priorities_placeholder():
+    """Issue #3564 QA 回归：direct/failed 两个调用点必须补 engine_priorities 列值。
+
+    2026-11-20 事故同型：_TASK_COLUMNS_LIST 新增 engine_priorities 时两调用点未跟
+    → _task_insert_row 抛 ValueError 被 except 吞掉 → 任务行/失败快照不落库。
+    """
+    seq_d, seq_f = 9101, 9102
+    tid = ep._create_direct_task(REPO, seq_d, "vod", "opencode", "vod",
+                                 skill_path="skills/vod/SKILL.md", engine_id=0,
+                                 evt={"issue_id": "#101"})
+    assert tid, "direct 任务行必须落库"
+    ep._create_failed_task(REPO, seq_f, "vod", "opencode", "vod", skill_path="",
+                           skill_id=0, evt={"type": "issue_opened", "issue_id": "#102"},
+                           issue_id="#102", runtime_id=0)
+    with db_lock:
+        c = db.cursor()
+        rows = dict(c.execute(
+            "SELECT event_seq, engine_priorities FROM agent_tasks "
+            "WHERE repo_key=? AND event_seq IN (?, ?)", (REPO, seq_d, seq_f)).fetchall())
+    assert seq_d in rows and (rows[seq_d] or "") == "", "direct 行 engine_priorities 应为空串占位"
+    assert seq_f in rows and (rows[seq_f] or "") == "", "failed 快照 engine_priorities 应为空串占位"

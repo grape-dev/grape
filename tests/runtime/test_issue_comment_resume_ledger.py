@@ -163,13 +163,13 @@ def test_qa02_ledger_hit_resume_supersedes():
     assert _issue_status() == "processing", _issue_status()
     assert "outbound_ledger_hit" not in _skipped_reasons(), _skipped_reasons()
 
-def test_qa03_pending_review_resume():
+def test_qa03_pending_review_comment_preserves_review():
+    """Issue #4063：在位审核点不被 issue_comment（含回声）消费，稳定驻留 pending_review。"""
     _clean()
     _seed_issue(status="pending_review")
     ol.record_outbound("gitcode", RK, "issue_comment", "90003", issue_number="8")
     _run(_comment_payload_noteable(cid=90003))
-    assert _issue_status() == "processing", _issue_status()
-    assert "outbound_ledger_hit" not in _skipped_reasons(), _skipped_reasons()
+    assert _issue_status() == "pending_review", _issue_status()
 
 def test_qa04_bot_self_post_still_ledger_blocked():
     _clean()

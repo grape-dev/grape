@@ -220,23 +220,31 @@ def mixed_client(monkeypatch):
     from src.domains.mgmt.auth import grape_account_db as gad
     from src.domains.mgmt.routes import repos as repos_route
     from src.domains.mgmt.user import db as user_db
+    from src.domains.platform import visibility
 
     user = {"id": "u-mixed-route", "username": "u-mixed", "auth_type": "jwt", "org_id": 0}
     app.dependency_overrides[require_org_member] = lambda: user
 
     monkeypatch.setattr(repos_route, "_repo_listable_providers", lambda: ["gitcode", "gitee"])
     monkeypatch.setattr(repos_route, "is_platform_visible", lambda p: True, raising=False)
+    monkeypatch.setattr(visibility, "is_platform_visible", lambda p: True)
     monkeypatch.setattr(gad, "list_platform_links", lambda uid: [
         {"provider": "gitcode", "source": "identity", "status": 1, "token_usable": True,
          "has_pat_token": False, "has_oauth_token": True, "external_login": "u-mixed"},
         {"provider": "gitee", "source": "pat", "status": 1, "has_pat_token": False,
          "token_usable": False, "credential_error": "decrypt_failed", "external_login": ""},
     ])
-    state = {"cached": [], "synced_at": None, "downloads": []}
+    state = {"cached": [], "synced_at": None, "downloads": [], "saved": []}
     monkeypatch.setattr(user_db, "get_user_repos", lambda uid: list(state["cached"]))
     monkeypatch.setattr(user_db, "get_user_repos_synced_at", lambda uid: state["synced_at"])
-    monkeypatch.setattr(user_db, "save_user_repos",
-                        lambda uid, repos, providers=None: True)
+
+    def _save(uid, repos, providers=None):
+        state["saved"].append({"repos": list(repos),
+                               "providers": list(providers) if providers is not None else None})
+        return True
+
+    monkeypatch.setattr(user_db, "save_user_repos", _save)
+    monkeypatch.setattr(repos_route, "_start_stale_probe_async", lambda *a, **kw: None)
 
     def _fake_fetch(user_obj, provider, fn):
         state["downloads"].append(provider)
@@ -247,13 +255,25 @@ def mixed_client(monkeypatch):
                  "is_admin": 1, "role": "Admin", "created_at": "2025-09-21 20:33:13"}]
 
     monkeypatch.setattr(repos_route, "with_oauth_token", _fake_fetch)
+    with repos_route._REFRESH_GUARD:
+        repos_route._REFRESH_INFLIGHT.clear()
     try:
         yield TestClient(app), state
     finally:
+        with repos_route._REFRESH_GUARD:
+            repos_route._REFRESH_INFLIGHT.clear()
         app.dependency_overrides.clear()
 
 
 def test_member_mixed_providers_hides_broken_and_warns(mixed_client):
+    """缓存过期 + 某平台凭据损坏：SWR 立即返回旧缓存，坏平台行剔除但必须带提示。
+
+    回归背景（2026-11-23 QA）：rebase 后新增的 SWR 早返回分支漏传 `**_notice`，
+    使这个「过期 + 凭据损坏」组合静默隐藏坏平台仓库。这里同时覆盖该组合，
+    并按 SWR 异步语义：先断言旧缓存响应带提示，再等后台刷新完成后断言回源/落库。
+    """
+    from src.domains.mgmt.routes import repos as repos_route
+
     client, state = mixed_client
     state["cached"] = [
         {"repo_key": "gitcode:u-mixed/alive", "full_name": "u-mixed/alive",
@@ -266,12 +286,23 @@ def test_member_mixed_providers_hides_broken_and_warns(mixed_client):
     r = client.get("/api/repos/member")
     assert r.status_code == 200, r.text
     body = r.json()
+    # SWR：过期缓存立即返回，不等后台刷新
+    assert body.get("_cached") is True, body
+    assert body.get("_stale") is True, body
+    # 口径乙：坏平台的缓存行不当可操作仓库返回，但每个 200 出口都必须带提示
     assert [x["repo_key"] for x in body["repos"]] == ["gitcode:u-mixed/alive"], body
     assert body.get("_credential_broken") == ["gitee"], body
+    assert body.get("_reauth_provider") == "gitee", body
     hint = body.get("hint", "")
     assert "已隐藏其仓库" in hint, body
     assert "gitee" in hint, body
+    # 后台刷新为异步：等待 singleflight 完成后再断言回源与落库
+    key = repos_route._member_refresh_key("u-mixed-route", ["gitcode"])
+    assert repos_route._wait_member_refresh(key, 5), "后台刷新未在超时内结束"
     assert state["downloads"] == ["gitcode"], state
+    assert state["saved"], "后台刷新完成后应落库"
+    assert state["saved"][-1]["providers"] == ["gitcode"], state
+    assert [x["repo_key"] for x in state["saved"][-1]["repos"]] == ["gitcode:u-mixed/alive"], state
 
 
 def test_sync_mixed_providers_warns_instead_of_silent(mixed_client):

@@ -616,12 +616,13 @@ def _require_repo_access(user: dict, repo_key: str):
     - 用户级（JWT / API Key）：repo_key 必须在该用户托管仓库（get_managed_repos）内
     - 会话 token（tk_）：repo_key 必须匹配 token 作用域（session_key 对应仓库）
     """
+    from src.kernel.repo_key import repo_key_casefold
     if user.get("auth_type") == "session_token":
-        if user.get("repo_key") != repo_key:
+        if not user.get("repo_key") or repo_key_casefold(user.get("repo_key")) != repo_key_casefold(repo_key):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库任务（作用域不匹配）"})
         return
     from src.domains.mgmt import public as _user_db
-    _managed = {r.get("repo_key") for r in _user_db.get_managed_repos(user.get("id") or 0)}
-    if repo_key not in _managed:
+    _managed = {repo_key_casefold(r.get("repo_key")) for r in _user_db.get_managed_repos(user.get("id") or 0)}
+    if repo_key_casefold(repo_key) not in _managed:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库任务"})
 

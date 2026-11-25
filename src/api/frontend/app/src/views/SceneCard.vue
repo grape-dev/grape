@@ -16,8 +16,8 @@
         <div class="scn-card-title">{{ s.display_name || s.name }}</div>
         <span v-if="s.is_featured" class="scn-star">🌟</span>
       </div>
-      <div class="scn-card-desc" :title="s.market_description || s.description || ''">
-        {{ s.market_description || s.description || '' }}
+      <div class="scn-card-desc" :title="descFull || defaultDesc">
+        {{ descText }}
       </div>
       <div v-if="catPath" class="scn-cat">{{ catPath }}</div>
       <div v-if="tags.length" class="scn-chips">
@@ -54,6 +54,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import { plainTextSummary } from '../lib/plainTextSummary.js'
 
 const props = defineProps({ s: { type: Object, required: true } })
 defineEmits(['open', 'apply', 'experience', 'like'])
@@ -72,6 +73,7 @@ const DEFAULTS = {
   repos_in_use: '仓库在用',
   apply_scene: '应用',
   experience: '体验',
+  no_description: '暂无描述',
 }
 const catBg = computed(() => CAT_BG[props.s.category_id] || 'bg-default')
 const skills = computed(() => props.s.skills || [])
@@ -88,6 +90,10 @@ const iconIsUrl = computed(() => {
   return v.startsWith('http') || v.startsWith('/static/') || v.startsWith('/uploads/')
 })
 const iconText = computed(() => props.s.icon || '⚙')
+const rawDesc = computed(() => props.s.market_description || props.s.description || '')
+const descFull = computed(() => plainTextSummary(rawDesc.value, 0))
+const defaultDesc = computed(() => tf('no_description'))
+const descText = computed(() => plainTextSummary(rawDesc.value) || defaultDesc.value)
 
 // I18N 陷阱：t(key) 找不到返回 key 本身，须与完整 key 比对再兜底
 function tf(key) {

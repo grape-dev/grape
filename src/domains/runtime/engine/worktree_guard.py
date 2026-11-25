@@ -1051,6 +1051,8 @@ def parse_issue_workdir(path: str, workspace_dir: str = "") -> tuple:
 
     支持结构：
     - 新 `{provider}/{owner}/{repo}/issues/{n}/{agent}`；
+    - 同 Issue 多 PR `{provider}/{owner}/{repo}/issues/{n}/pr-<p>/{agent}`（Issue #3375）；
+    - issue-less PR `{provider}/{owner}/{repo}/prs/<p>/{agent}`（Issue #3375）；
     - 旧 `{owner}/{repo}/issues/{n}/{agent}`（provider 回退 gitcode）；
     - 过渡期旧 `{repo}/{agent}/issues/{n}`（cleanup._zombie_issue_dirs 仍扫描该布局，
       不解析会绕开保全闸直接 rmtree）。
@@ -1064,10 +1066,23 @@ def parse_issue_workdir(path: str, workspace_dir: str = "") -> tuple:
         if rel.startswith(".."):
             return "", "", ""
         parts = rel.split(os.sep)
-        if len(parts) >= 5 and parts[-3] == "issues":
+        if (len(parts) >= 6 and parts[-4] == "issues"
+                and parts[-2].startswith("pr-")):
+            # {..}/issues/{n}/pr-<p>/{agent}
+            agent, issue_part = parts[-1], parts[-3]
+            identity = parts[:-4]
+            if not issue_part.isdigit():
+                return "", "", ""
+        elif len(parts) >= 5 and parts[-3] == "issues":
             # {..}/issues/{n}/{agent}
             agent, issue_part = parts[-1], parts[-2]
             identity = parts[:-3]
+        elif len(parts) >= 4 and parts[-3] == "prs":
+            # issue-less PR {..}/prs/<p>/{agent}
+            agent, issue_part = parts[-1], parts[-2]
+            identity = parts[:-3]
+            if not issue_part.isdigit():
+                return "", "", ""
         elif len(parts) >= 4 and parts[-2] == "issues":
             # 过渡期旧布局 {repo}/{agent}/issues/{n}
             agent, issue_part = parts[-3], parts[-1]

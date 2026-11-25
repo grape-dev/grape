@@ -187,8 +187,8 @@ def parse_baseline_error_text(text) -> dict:
         elif val is not None:
             try:
                 fields[key] = int(val)
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e:
+                log.debug(f"repogit: baseline error field {key}={val!r} not int: {e}")
     return fields
 
 
@@ -563,9 +563,34 @@ def repo_base_dir(repo_key: str) -> str:
     from src.kernel.repo_key import workspace_repo_dir
     return os.path.join(workspace_repo_dir(repo_key), "codebase")
 
-def issue_dir_for(repo_key: str, agent_type: str, issue_num) -> str:
+def _pr_dir_key(pr_number) -> str:
+    """PR 维度目录键：`pr-<n>`；非数字/0/空返回空串（Issue #3375）。"""
+    from src.kernel.pr_scope import pr_dir_key
+    return pr_dir_key(pr_number)
+
+
+def _issue_branch(issue_num, pr_number="") -> str:
+    """Issue/PR 维度开发分支：同 Issue 多 PR 派生 `feat/issue-<n>-pr-<p>`（Issue #3375）。
+
+    无 PR 时保持 `feat/issue-<n>`（既有行为不变）；有 PR 时按 PR 派生，
+    避免同 Issue 第二个 worktree add 复用同一分支导致「分支已被 checkout」冲突。
+    """
+    _pr_key = _pr_dir_key(pr_number)
+    return f"feat/issue-{issue_num}-{_pr_key}" if _pr_key else f"feat/issue-{issue_num}"
+
+
+def issue_dir_for(repo_key: str, agent_type: str, issue_num, pr_number="") -> str:
+    """Issue 级 worktree 目录；带 pr_number 时增加 PR 子键（同 Issue 多 PR 隔离）。
+
+    - 无 PR：{repo}/issues/{n}/{agent_type}
+    - 有 PR：{repo}/issues/{n}/pr-{pr}/{agent_type}
+    """
     from src.kernel.repo_key import workspace_repo_dir
-    return os.path.join(workspace_repo_dir(repo_key), "issues", str(issue_num), agent_type)
+    _dir = os.path.join(workspace_repo_dir(repo_key), "issues", str(issue_num))
+    _pr_key = _pr_dir_key(pr_number)
+    if _pr_key:
+        _dir = os.path.join(_dir, _pr_key)
+    return os.path.join(_dir, agent_type)
 
 def ensure_feature_branch(wt_dir: str, target_branch: str, base_branch: str,
                           logger=None) -> bool:
@@ -948,7 +973,7 @@ def _linked_repo_token(repo_key: str, env: dict = None) -> str:
 
 def ensure_linked_repo_worktrees(linked_repos: list, agent_type: str, issue_num,
                                   token: str = "", env: dict = None,
-                                  task_id: str = "") -> list:
+                                  task_id: str = "", pr_number="") -> list:
     """为关联仓库列表创建 Issue 级 worktree（Issue #242）。
 
     遍历 linked_repos，为每个 repo_key 调用 ensure_issue_worktree。
@@ -979,8 +1004,10 @@ def ensure_linked_repo_worktrees(linked_repos: list, agent_type: str, issue_num,
             log.warning(f"ensure_linked_repo_worktrees: no token for {rk}, skipping")
             continue
         try:
-            wt = ensure_issue_worktree(rk, agent_type, issue_num, token=_repo_token,
-                                       work_branch=branch, task_id=task_id)
+            _wt_kwargs = {"token": _repo_token, "work_branch": branch, "task_id": task_id}
+            if pr_number:
+                _wt_kwargs["pr_number"] = pr_number
+            wt = ensure_issue_worktree(rk, agent_type, issue_num, **_wt_kwargs)
         except WorkspaceBaselineError as _wb_err:
             log.error(f"workspace.baseline_blocked_linked repo={rk} issue={issue_num} "
                       f"agent={agent_type}: {_wb_err}")
@@ -2590,7 +2617,7 @@ def worktree_failure_error(repo_key: str, issue_num=None, agent_type: str = "",
 def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str = "",
                           work_branch: str = "", task_id: str = "",
                           strict_override=None, delivery_branch: str = "",
-                          delivery_info=None) -> str | None:
+                          delivery_info=None, pr_number="") -> str | None:
     """确保共享基线 + Issue 级 worktree（任务 cwd）。已存在则**过闸门后**复用。
 
     work_branch 由调用方从 env_extra["GRAPE_WORK_BRANCH"] 传入（API 服务器从 MySQL 读取后注入）。
@@ -2609,6 +2636,8 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
     自检 git 写权限，不可写则迁移到会话可写 gitdir（或降级标注只读）。
     Issue #2281：分支 ref 仍在时复用分支并标记「已找回」；ref 消失时从归档 bundle 恢复上一轮
     未推送 commit（仅在新建的基线 worktree 上执行，无归档/失败仅告警）。
+    Issue #3375：pr_number 有值时 worktree 落 issues/<n>/pr-<pr>/<agent_type>，
+    与 get_agent_workdir 的 PR 维度隔离键保持同构（同 Issue 多 PR 不共用工位）。
     """
     if not is_git_agent(agent_type):
         return None
@@ -2628,7 +2657,7 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                                 agent_type=agent_type) or (_base_dir if _is_git_dir(_base_dir) else None)
     if not base:
         return None
-    issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
+    issue_dir = issue_dir_for(repo_key, agent_type, issue_num, pr_number=pr_number)
     # Issue #3923 复审 Required：目录建不出来（父路径是普通文件/磁盘满/权限）
     # 必须在**本函数内**写失败现场。旧实现把 makedirs 放在 try 之外，异常一路
     # 冒到 agent 的宽 except 只 WARNING 一条 → 无现场 → 任务在无工作区状态下继续跑。
@@ -2641,7 +2670,7 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
             f"ensure_issue_worktree dir create failed: {e}",
             issue_num=issue_num, agent_type=agent_type)
         return None
-    branch = f"feat/issue-{issue_num}"
+    branch = _issue_branch(issue_num, pr_number)
     # #2514：基线只解析一次并贯穿全函数（标记 baseline / 新建起点 / 闸门同一口径）
     base_branch, requested_branch, _fb_reason = _resolve_base_branch(
         base, token, repo_key, env_work_branch=work_branch)
@@ -3044,9 +3073,72 @@ def restore_worktree_from_bundle(wt_dir: str, repo_key: str, issue_num,
     return res
 
 
+def pr_workdir_dir(repo_key: str, agent_type: str, pr_number="") -> str:
+    """issue-less PR 的工位目录：`{repo}/prs/<pr>/<agent>`（Issue #3375）。"""
+    from src.kernel.pr_scope import normalize_pr_number
+    _pr = normalize_pr_number(pr_number)
+    if not _pr:
+        return ""
+    from src.kernel.repo_key import workspace_repo_dir
+    return os.path.join(workspace_repo_dir(repo_key), "prs", _pr, agent_type)
+
+
+def cleanup_pr_worktree(repo_key: str, agent_type: str, pr_number,
+                        token: str = "", task_id: str = "",
+                        reason: str = "") -> bool:
+    """清理 issue-less PR 工位（与 get_agent_workdir 的 `prs/<pr>/<agent>` 同构）。
+
+    issue-less PR 无关联 Issue，`remove_issue_worktree_if_pushed` 因 _num 为空跳过；
+    该目录不在 issues 树内，sweeper 旧扫描也覆盖不到。删除前仍过保全闸：
+    含 .git 的 worktree 先归档未推送/脏内容，归档失败则保留现场。
+
+    返回 True=已删除；False=保留/不存在。
+    """
+    issue_dir = pr_workdir_dir(repo_key, agent_type, pr_number)
+    if not issue_dir or not os.path.isdir(issue_dir):
+        return False
+    _git_marker = os.path.join(issue_dir, ".git")
+    _has_git = os.path.isfile(_git_marker) or os.path.isdir(_git_marker)
+    if _has_git and is_git_agent(agent_type):
+        try:
+            from src.domains.runtime.engine.worktree_guard import archive_worktree_before_reset
+            from src.kernel.pr_scope import normalize_pr_number
+            _res = archive_worktree_before_reset(
+                issue_dir, repo_key, f"pr-{normalize_pr_number(pr_number)}", agent_type,
+                token=token, reason=reason or "pr_cleanup", task_id=task_id)
+            if _res.get("risk") and not _res.get("ok"):
+                log.warning(f"repogit: PR worktree cleanup refused (archive failed) "
+                            f"{repo_key} pr={pr_number} agent={agent_type}: "
+                            f"{_res.get('error', '')}")
+                return False
+        except Exception as _ge:
+            log.warning(f"repogit: PR worktree reset guard failed, refuse cleanup "
+                        f"{repo_key} pr={pr_number}: {_ge}")
+            return False
+    base = repo_base_dir(repo_key)
+    if os.path.isdir(base):
+        with _repo_lock(base):
+            try:
+                _run_git(["-C", base, "worktree", "remove", "--force", issue_dir],
+                         token=token)
+            except Exception:
+                pass
+    shutil.rmtree(issue_dir, ignore_errors=True)
+    _drop_fidelity_baseline(issue_dir)
+    removed = not os.path.isdir(issue_dir)
+    if not removed:
+        log.warning(f"workspace.cleanup PR dir kept (remove failed): "
+                    f"pr={pr_number} agent={agent_type} path={issue_dir}")
+    else:
+        log.info(f"workspace.cleanup pr={pr_number} agent={agent_type} "
+                 f"path={issue_dir} reason={reason or 'unspecified'}")
+    return removed
+
+
 def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num,
                            token: str = "", base_branch: str = "",
-                           reason: str = "", task_id: str = "") -> bool:
+                           reason: str = "", task_id: str = "",
+                           pr_number="") -> bool:
     """移除 Issue 级 worktree + 删除目录（sweeper 用）。
 
     Issue #2041：删除/重置前过保全守卫——存在未推送提交或白名单外的未提交/
@@ -3067,7 +3159,7 @@ def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num,
 
     返回 True=已删除；False=保留（守卫拒绝/未删除）。
     """
-    issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
+    issue_dir = issue_dir_for(repo_key, agent_type, issue_num, pr_number=pr_number)
     _git_marker = os.path.join(issue_dir, ".git")
     _has_git = os.path.isfile(_git_marker) or os.path.isdir(_git_marker)
     if os.path.isdir(issue_dir) and not _has_git and is_git_agent(agent_type):
@@ -3135,7 +3227,7 @@ def _unpushed_archive_start(issue_dir: str, token: str = "") -> str:
 
 
 def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, token: str = "",
-                                    task_id: str = "") -> bool:
+                                    task_id: str = "", pr_number="") -> bool:
     """任务终态清理 Issue 级 worktree（Issue #2514 收紧语义）。
 
     旧语义 = 仅当本地 HEAD 已与远程分支一致（已 push）才删，导致失败任务/未 push 轮次的
@@ -3149,14 +3241,15 @@ def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, t
     - 清理失败只记日志，不阻断终态上报（调用方 _cleanup_task_workdir / _cleanup_direct_workdir）。
 
     返回 True=已删除；False=保留（网络不可核对 / 存档失败 / 清理失败 / 异常）。
+    pr_number（Issue #3375）：与入队/执行期同构的 PR 维度目录（pr-<n> 子键）。
     """
     if not is_git_agent(agent_type):
         return False
     try:
-        issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
+        issue_dir = issue_dir_for(repo_key, agent_type, issue_num, pr_number=pr_number)
         if not os.path.isdir(issue_dir):
             return False
-        branch = f"feat/issue-{issue_num}"
+        branch = _issue_branch(issue_num, pr_number)
         archive_label = _archive_workspace_label(issue_num, agent_type, task_id)
         # Issue #2514：脏树先存档（证据一次落全）；存档失败 → 保留工作区，不删
         dirty, _cur_branch, _cur_head = _worktree_state(issue_dir, token=token)
@@ -3195,7 +3288,8 @@ def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, t
                             f"failed) {repo_key} issue={issue_num} path={issue_dir}")
                 return False
         return cleanup_issue_worktree(repo_key, agent_type, issue_num, token=token,
-                                      reason="task_terminal", task_id=task_id)
+                                      reason="task_terminal", task_id=task_id,
+                                      pr_number=pr_number)
     except Exception as e:
         log.warning(f"repogit remove_issue_worktree_if_pushed failed {repo_key}: {e}")
         return False
@@ -3351,8 +3445,8 @@ def _clone_auth_scheme_for(repo_key: str) -> str:
         card = get_platform_card(provider)
         if card is not None:
             return card.clone_auth
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001 - 卡片查不到就用默认 header 名
+        log.debug(f"platform card clone_auth lookup failed for {provider}: {e}")
     return "x_access_token"
 
 # scheme → Basic auth 的用户名段（G2：gitlab=oauth2:，gitee=空用户名+token 作密码，

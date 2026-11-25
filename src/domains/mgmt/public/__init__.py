@@ -2043,6 +2043,13 @@ _ANY_QUERIES: dict[str, str] = {
     "scene_id_active_by_repo_scene": (
         "SELECT scene_id FROM devops_pipeline_scene "
         "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1"),
+    # 跨流水线交办刷新 Issue 场景时回填归属人（uid=0 冲掉旧归属人的事故）
+    "scene_created_by_by_repo": (
+        "SELECT created_by FROM devops_pipeline_scene "
+        "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1"),
+    "scene_created_by_generic": (
+        "SELECT created_by FROM devops_pipeline_scene "
+        "WHERE scene_id=? AND is_active=1 LIMIT 1"),
     "scene_deploy_url_set": (
         "UPDATE devops_pipeline_scene SET deploy_url=? "
         "WHERE scene_id=? AND repo_key=? AND is_active=1"),
@@ -3922,6 +3929,25 @@ def scene_id_exists_any(scene_id: str, repo_key: str) -> str:
     """场景在该仓库下是否在用；命中返回 scene_id 原值，否则空串。"""
     row = read_one_any("scene_id_active_by_repo_scene", (scene_id, repo_key))
     return str(row[0] or "") if row else ""
+
+
+def scene_created_by_any(scene_id: str, repo_key: str = "") -> str:
+    """场景创建者（平台账号名）——交办刷新 Issue 场景时回填归属人用。
+
+    优先本仓库行，其次 repo_key='' 的通用行；只认在用场景（is_active=1）。
+    无行/空值返回空串（调用方据此保持 Issue 原归属人不变，不要写 0）。
+    """
+    if not scene_id:
+        return ""
+    for _key, _params in (("scene_created_by_by_repo", (scene_id, repo_key or "")),
+                          ("scene_created_by_generic", (scene_id,))):
+        try:
+            row = read_one_any(_key, _params)
+        except Exception:
+            row = None
+        if row and row[0]:
+            return str(row[0])
+    return ""
 
 
 def scene_active_flags_any(scene_id: str, repo_key: str) -> list[Any]:
@@ -6242,6 +6268,20 @@ def get_host_user_id(repo_key: str):
     from src.domains.mgmt.user.db import get_host_user_id as _impl
 
     return _impl(repo_key)
+
+
+def credential_workflows_write(user_id: str, provider: str):
+    """该用户在某 VCS provider 上的 workflow 写能力（True/False/None=未知）。"""
+    from src.domains.mgmt.user.repo_manager import credential_workflows_write as _impl
+
+    return _impl(user_id, provider)
+
+
+def github_token_scopes(token: str):
+    """探测 GitHub token 的 OAuth scope 集合（None 表示未知）。"""
+    from src.domains.mgmt.user.repo_manager import get_github_token_scopes as _impl
+
+    return _impl(token)
 
 
 def resolve_skill_dispatch(skill_name: str, skill_id: int = 0, repo_key: str = "",

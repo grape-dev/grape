@@ -217,10 +217,13 @@ def test_pipeline_replay_preserves_pending_review():
     assert st[1] == "pending_review", st
 
 
-def test_pipeline_non_replay_resumes_pending_review():
+def test_pipeline_non_replay_comment_preserves_pending_review():
+    """Issue #4063：非重放 issue_comment 也不得消费在位审核点（仅显式审核动作流转）。"""
     _seed(status="pending_review", stage="pending_review", owner_agent="qa")
     _run_pipeline(_comment_payload(), replay=False)
-    assert _status()[0] == "processing"
+    st = _status()
+    assert st[0] == "pending_review", st
+    assert st[1] == "pending_review", st
 
 
 # ---------- noop 原因码 ----------

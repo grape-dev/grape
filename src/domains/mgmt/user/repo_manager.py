@@ -823,6 +823,11 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
         # token 必须照常携带。
         target_url = f"https://oauth2:{user_token}@{_tgt_host}/{owner_login}/{target_repo}.git"
         if _wf_denied:
+            # TODO(Issue #3386): 此「无 workflow 权限 → 静默删除模板 .github/workflows」
+            # 的规避逻辑为过渡兼容保留，本单**不删除**。下线条件：默认 scope 补
+            # workflow / X-OAuth-Scopes 能力探测 / 绑定预警 / 任务预检四项上线并
+            # 验证存量凭据不再误删模板后，单独开单移除（届时此分支只保留显式
+            # False 的 fail-closed 提示，不再破坏用户模板）。
             # token 无 workflows 权限，push 含 .github/workflows 的仓库会被拒绝
             # ——怪癖以卡 workflows_write=False 声明（github 内置卡）。
             _wf_dir = os.path.join(workdir, ".github", "workflows")
@@ -1158,7 +1163,14 @@ def _github_check_installation(api_token: str) -> str:
         "然后撤销授权（https://github.com/settings/applications）并重新登录。"
     )
 
-def _github_req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
+def _github_req_with_headers(method: str, url: str, token: str = "",
+                             body: dict | None = None) -> tuple[dict, dict]:
+    """GitHub API 请求，返回 ``(解析后的 JSON, 响应头小写映射)``。
+
+    Issue #3386：部分能力只能从响应头判断（如 ``X-OAuth-Scopes``），
+    原 ``_github_req`` 直接丢弃 headers。这里保留完整响应头，供 scope 探测使用；
+    ``_github_req`` 继续委托本函数，保持存量调用方零改动。
+    """
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/vnd.github+json",
@@ -1171,14 +1183,59 @@ def _github_req(method: str, url: str, token: str = "", body: dict | None = None
     try:
         with urllib.request.urlopen(req, timeout=upstream_timeout_seconds()) as resp:
             raw = resp.read().decode()
+            resp_headers = {str(k).lower(): str(v)
+                            for k, v in (resp.headers.items() if resp.headers else [])}
             if raw.strip():
-                return json.loads(raw)
-            return {}
+                return json.loads(raw), resp_headers
+            return {}, resp_headers
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
         raise UpstreamAPIError(method, url, e.code, body, provider="GitHub")
     except urllib.error.URLError as e:
         raise RuntimeError(f"Cannot reach GitHub API: {e.reason}")
+
+
+def _github_req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
+    data, _headers = _github_req_with_headers(method, url, token=token, body=body)
+    return data
+
+
+def parse_x_oauth_scopes(headers) -> "set[str] | None":
+    """从响应头解析 X-OAuth-Scopes（Issue #3386；大小写不敏感）。
+
+    返回：``set[str]``（含空集合=明确无 scope）；``None``=头缺失（未知）。
+    独立于 ``get_github_token_scopes``：token 校验路径已拿到同一响应，
+    复用这里的解析即可，避免重复 GET /user。
+    """
+    raw = None
+    for key, value in (headers or {}).items():
+        if str(key).lower() == "x-oauth-scopes":
+            raw = value
+            break
+    if raw is None:
+        return None
+    return {s.strip() for s in str(raw).split(",") if s.strip()}
+
+
+def get_github_token_scopes(token: str) -> "set[str] | None":
+    """读取 GitHub Token 的 OAuth scope 集合（Issue #3386）。
+
+    - 来源：``GET https://api.github.com/user`` 的 ``X-OAuth-Scopes`` 响应头
+      （GitHub classic PAT / OAuth token 唯一可枚举的真实授权来源）。
+    - 返回：``set[str]``（解析成功，空集合=明确无 scope）；``None``=未知
+      （头缺失，常见于 fine-grained PAT / GitHub App token / 代理缓存；探测失败也按未知处理）。
+    - 约定：**未知不误判阻断**，调用方只提示，不放行也不拒绝。
+    """
+    if not token:
+        return None
+    try:
+        _data, headers = _github_req_with_headers(
+            "GET", f"{_GITHUB_API_BASE}/user", token=token)
+    except Exception as e:
+        log.warning(f"get_github_token_scopes: probe failed: {e}")
+        return None
+    return parse_x_oauth_scopes(headers)
+
 
 def fetch_github_repos_with_role(api_token: str) -> list[dict]:
     """获取用户的 GitHub 仓库列表。

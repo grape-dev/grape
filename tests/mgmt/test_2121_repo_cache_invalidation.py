@@ -50,17 +50,28 @@ def test_invalidate_user_repos_marks_stale_and_preserves_data():
 def _patch_member_deps(monkeypatch, cached_repos, fresh_repos, synced_at):
     from src.domains.mgmt.routes import repos as repos_route
     from src.domains.mgmt.auth import grape_account_db as acct_db
+    from src.domains.platform import visibility
 
-    calls = {"fetch": 0, "saved": None}
+    calls = {"fetch": 0, "saved": None, "saved_providers": None}
+    with repos_route._REFRESH_GUARD:
+        repos_route._REFRESH_INFLIGHT.clear()
 
+    # 缓存视图随落库更新：refresh=1 同步等待后重读缓存能看到刚回源的行（与线上一致）
+    state = {"rows": list(cached_repos)}
     monkeypatch.setattr(repos_route.user_db, "get_user_repos",
-                        lambda uid: list(cached_repos))
+                        lambda uid: list(state["rows"]))
     monkeypatch.setattr(repos_route.user_db, "get_user_repos_synced_at",
                         lambda uid: synced_at)
-    monkeypatch.setattr(repos_route.user_db, "save_user_repos",
-                        lambda uid, repos: calls.__setitem__("saved", list(repos)))
-    monkeypatch.setattr(acct_db, "get_user_identities",
-                        lambda uid: [{"provider": "gitcode"}])
+
+    def _save(uid, repos, providers=None):
+        calls["saved"] = list(repos)
+        calls["saved_providers"] = list(providers) if providers is not None else None
+        state["rows"] = list(repos)
+
+    monkeypatch.setattr(repos_route.user_db, "save_user_repos", _save)
+    monkeypatch.setattr(acct_db, "list_platform_links",
+                        lambda uid: [{"provider": "gitcode", "token_usable": True}])
+    monkeypatch.setattr(visibility, "is_platform_visible", lambda p: True)
 
     def _fetch(user, provider, fn, *a, **kw):
         calls["fetch"] += 1
@@ -102,10 +113,14 @@ def test_member_refresh_forces_vcs_and_persists(monkeypatch):
 
     result = repos_route.list_member_repos(USER, provider="", refresh=1)
 
-    assert result["_cached"] is False, "refresh=1 必须绕过缓存"
+    # 已发布契约（docs/issue-2121）：refresh=1 跳过缓存同步回源并落库，
+    # 写操作（建仓/托管/解除托管）后立刻要准；默认/过期路径才是 SWR。
+    assert result["_cached"] is False, "refresh=1 必须同步回源并返回最新列表"
+    assert result["_refresh_requested"] is True
+    assert [r["full_name"] for r in result["repos"]] == ["org/cached", "org/new"]
     assert calls["fetch"] == 1, "refresh=1 应回源一次"
     assert calls["saved"] is not None, "refresh=1 回源结果应落库"
-    assert "org/new" in [r["full_name"] for r in result["repos"]]
+    assert "org/new" in [r["full_name"] for r in calls["saved"]]
 
 
 def test_experience_reports_host_failure(monkeypatch):
@@ -320,11 +335,17 @@ def test_remove_managed_repo_resets_join_and_refreshes_list(monkeypatch):
             "full_name": "2121owner/unhost-demo", "owner": "2121owner", "name": "unhost-demo",
             "role": "Admin", "is_admin": True, "repo_key": repo_key,
         }]
-        _patch_member_deps(monkeypatch, cached, fresh, "")
+        calls = _patch_member_deps(monkeypatch, cached, fresh, "")
         member = repos_route.list_member_repos(USER, provider="", refresh=0)
-        assert member["_cached"] is False, "缓存已失效，刷新应回源"
+        # Issue #3356: 缓存失效先返回旧缓存（stale-while-revalidate），后台刷新
+        assert member["_cached"] is True
+        assert member["_stale"] is True
         target = next(r for r in member["repos"] if r["repo_key"] == repo_key)
         assert target["is_joined"] is False
         assert target["is_hosted"] is False, "解除托管后应回到未托管列表"
+
+        key = repos_route._member_refresh_key(uid, ["gitcode"])
+        assert repos_route._wait_member_refresh(key, 5), "后台刷新未完成"
+        assert calls["saved"] is not None, "缓存失效后应向 VCS 回源并落库"
     finally:
         user_db.clear_user_repos(uid)

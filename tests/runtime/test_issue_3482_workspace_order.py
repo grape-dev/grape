@@ -200,7 +200,7 @@ class TestFailClosedBehavior:
         monkeypatch.setattr(ep, "_inject_issue_pr_env", lambda *a, **k: None)
         monkeypatch.setattr(ep, "_inject_bot_agent_env", lambda *a, **k: None)
         monkeypatch.setattr(session_store, "get_or_create_issue_session",
-                            lambda rk, at, iid: {"id": "sess-3482"})
+                            lambda rk, at, iid, pr="": {"id": "sess-3482"})
         monkeypatch.setattr(session_store, "guard_issue_session_pointer",
                             lambda s, backend: "oc-1")
 
@@ -288,7 +288,7 @@ class TestDirectLastNodePendingReviewHook:
         monkeypatch.setattr(direct_executor, "_materialize_workdir_and_skill_gate",
                             lambda **kw: (kw.get("prompt", ""), True))
         monkeypatch.setattr(session_store, "get_or_create_issue_session",
-                            lambda rk, at, iid: {"id": "sess-3482"})
+                            lambda rk, at, iid, pr="": {"id": "sess-3482"})
         monkeypatch.setattr(session_store, "guard_issue_session_pointer",
                             lambda s, backend: "")
         monkeypatch.setattr(session_store, "is_subtask_mode_enabled",

@@ -409,8 +409,12 @@ def _start_active_user_tracker_task():
                     _purge_i = 0
                     from src.kernel.auth_sdk.auth_token import purge_expired_session_tokens
                     await asyncio.to_thread(purge_expired_session_tokens)
-                    from src.api.event_store import purge_stale_event_guards
+                    from src.api.event_store import (
+                        purge_stale_comment_dispatch_guards,
+                        purge_stale_event_guards,
+                    )
                     await asyncio.to_thread(purge_stale_event_guards)
+                    await asyncio.to_thread(purge_stale_comment_dispatch_guards)
             except Exception as e:
                 log.warning(f"Session token purge failed: {e}")
 

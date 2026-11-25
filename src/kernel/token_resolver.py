@@ -48,6 +48,7 @@ from src.kernel.ports import vcs_cards as _vcs_cards
 from src.kernel.ports import vcs_provider as _vcs_provider
 from src.kernel.ports._base import PortNotBound as _PortNotBound
 from src.kernel.ports.vcs_provider import VCSProviderPort
+from src.kernel.ports.vcs_provider import create_provider_from_repo_key
 
 # 凭据不可用分类（Issue #3713）——**唯一一份**枚举，两个消费面各自渲染：
 #   换券面（HTTP）  424 + code + stage（前端/CLI 需区分该轮换还是该重新配置）
@@ -778,6 +779,13 @@ def resolve_exec_token(repo_key: str) -> TokenResult:
         return TokenResult(token="", level="", repo_key=repo_key,
                            attribution=CREDENTIAL_ATTRIBUTION_UNATTRIBUTED,
                            attribution_detail=f"选择器异常（{e}）")
+
+
+# Issue #3427（QA 复审 R1 修复）：带原因码的单点凭据解析器
+# resolve_credential_detailed / _probe_credential_token / CredentialResolution
+# 已整体迁到 src/domains/mgmt/auth/credential_resolver.py（解析器需要读
+# mgmt/insight 域内数据，kernel 不得 import domains）。调用方（repos host /
+# POST /api/issues / a2a）从 mgmt 域侧取解析器；本模块不再持有该职责。
 
 
 class TokenResolver:

@@ -1209,6 +1209,22 @@ def render_takeover_prompt(*, repo: str, issue_number: str, agent_type: str, ski
     return "\n".join(lines)
 
 
+def _derive_task_cwd(repo_key: str, agent_type: str, task: dict) -> str:
+    """任务缺 cwd 时按平台同一规则推导（Issue #3375：含 PR 维度隔离键）。
+
+    env_extra 可能是 dict 或 JSON 字符串（任务行快照），统一走 pr_scope 解析。
+    推导失败仅告警，返回空串（保持旧行为，不阻断接管）。
+    """
+    try:
+        from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
+        from src.kernel.pr_scope import pr_number_from_env_extra
+        _pr = pr_number_from_env_extra(task.get("env_extra"))
+        return get_agent_workdir(repo_key, agent_type, task.get("issue_id") or "", _pr)
+    except Exception as e:
+        log.warning(f"takeover: derive cwd failed: {e}")
+        return ""
+
+
 def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: int,
                  user: dict, platform_meta: dict | None = None,
                  cancel_ok: bool = True, cancel_error: str = "",
@@ -1227,11 +1243,7 @@ def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: i
         warnings.append("remote_may_still_run")
 
     if not (task.get("cwd") or "").strip():
-        try:
-            from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
-            task["cwd"] = get_agent_workdir(repo_key, agent_type, task.get("issue_id") or "")
-        except Exception as e:
-            log.warning(f"takeover: derive cwd failed: {e}")
+        task["cwd"] = _derive_task_cwd(repo_key, agent_type, task)
 
     issue = _issue_row(repo_key, issue_number)
     scene_id = (issue.get("scene_id") or "").strip()

@@ -22,6 +22,9 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 
 AGENT_TYPES = ["vod", "issue", "coding", "qa", "sre"]
 
+# Issue #4240：事件统计卡状态集合（单一来源，前端 AgentView EVENT_STATUSES 与之对齐）
+EVENT_STATUSES = ("pending", "completed", "running", "failed", "cancelled")
+
 def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[int], user_id: int = 0):
     """更新当前场景 node 的引擎绑定（Issue #1208 D11：一律写 uids 清 ids）。
 
@@ -217,7 +220,7 @@ def list_agent_types():
         "bg": BGS.get(r[0], "var(--bg)"),
     } for r in rows]}
 
-@router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Get agent config", description="Returns the agent session config (runtime/skill/engine bindings) for name/owner/repo.")
+@router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Get agent config", description="Returns the agent session config (runtime/skill/engine bindings) for name/owner/repo. metrics.total_events is the sum of the five whitelisted statuses (pending/completed/running/failed/cancelled, unknown statuses excluded); the unbounded raw count is returned separately as metrics.total_events_raw.")
 def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                      keyword: str = Query("", description="事件关键词搜索（seq/issue_id/event_type/title/summary/actor）"),
                      page: int = Query(1, ge=1, description="页码，从 1 开始"),
@@ -253,7 +256,10 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
 
     from src.kernel.session_manager import db, db_lock
     session_data = {}
-    event_stats = {"pending": 0, "running": 0, "completed": 0, "failed": 0}
+    # Issue #4240：固定下发五个状态键（缺省 0），状态卡之和 = total_events
+    event_stats = {st: 0 for st in EVENT_STATUSES}
+    # Issue #4240：原始总数与状态计数同源，取不到时置 None（前端回退状态之和，避免冒充原始值）
+    total_events_raw = None
     recent_events = []
     events_total = 0
     vod_bot_connected = False
@@ -335,8 +341,17 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             except Exception as _ge2:  # noqa: BLE001
                 log.debug(f"agents: provider event_status_counts failed, fallback: {_ge2}")
                 _cnts = _rt_agents.event_status_counts(_repo_keys, name)
+            # Issue #4240：仅回填五状态白名单，未知状态不进状态卡字典（只计入原始总数）
+            _raw_total = 0
             for r in _cnts:
-                event_stats[r[0]] = r[1]
+                if not r:
+                    continue
+                _cnt = int(r[1] or 0)
+                _raw_total += _cnt
+                if r[0] in event_stats:
+                    event_stats[r[0]] = _cnt
+            # Issue #4240：原始总数直接由同一份 GROUP BY 结果求和，含未知状态且不受 keyword 影响
+            total_events_raw = _raw_total
         except Exception:
             pass
 
@@ -507,6 +522,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         "last_active": session_data.get("last_active_at", ""),
         "metrics": {
             "total_events": sum(event_stats.values()),
+            "total_events_raw": total_events_raw,
             "event_stats": event_stats,
         },
         "recent_events": recent_events,

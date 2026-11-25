@@ -14,13 +14,13 @@
     "client_id": "<your-github-client-id>",
     "client_secret": "<your-github-client-secret>",
     "redirect_uri": "https://<your-grape-domain>/api/auth/callback/github",
-    "scope": "repo user admin:repo_hook offline_access"
+    "scope": "read:user user:email"
   }
 }
 ```
 
 - 在 GitHub **Settings → Developer settings → OAuth Apps** 创建应用，`Authorization callback URL` 填 `https://<你的域名>/api/auth/callback/github`（与 `redirect_uri` 完全一致）。
-- `scope` 按上例即可覆盖仓库读取、用户信息与 webhook 管理。
+- 登录 `scope` 只申请身份范围（`read:user user:email`），不用于仓库写操作（D108-B）。仓库读写请使用 PAT，创建时勾选 `repo` 与 `workflow`（Issue #3386：缺 `workflow` 会导致 `.github/workflows` 推送被 GitHub 拒绝）。
 
 **如何验证**：Grape 登录页出现 GitHub 入口 → 点击 → GitHub 授权后回跳并登录成功。
 
@@ -37,7 +37,7 @@
 }
 ```
 
-- `github_bot_token`：GitHub Bot 账号的 PAT（classic，勾选 `repo` 权限），用于创建/关闭/评论 Issue 等写操作。
+- `github_bot_token`：GitHub Bot 账号的 PAT（classic，勾选 `repo` 与 `workflow` 权限），用于创建/关闭/评论 Issue 等写操作；需要更新 `.github/workflows` 时必须含 `workflow` scope。
 - `github_bot_username`：Bot 账号用户名（协作者管理等场景使用）。
 
 **如何验证**：托管一个 GitHub 仓库并触发一次 Issue 处理——Agent 的评论出现在 GitHub 且作者为 Bot 账号，即 Token 有效。

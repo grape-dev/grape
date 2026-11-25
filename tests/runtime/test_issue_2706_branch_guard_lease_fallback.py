@@ -160,7 +160,9 @@ def test_hook_entry_fails_open_on_tree_missing_kernel_lock(tmp_path):
     assert r.returncode == 0, r.stderr            # push 不被阻断
     assert "ImportError" not in r.stderr          # 无 ImportError 上抛形态
     assert "[branch-guard] WARNING" in r.stderr
-    assert LOCK_MODULE in r.stderr                 # 告警指名缺失模块
+    # Issue #2923：告警只给可读结论，不再指名原始模块名/异常原文。
+    assert "分支守卫依赖缺失" in r.stderr
+    assert LOCK_MODULE not in r.stderr
     assert "install-worker" in r.stderr or "升级" in r.stderr
 
 

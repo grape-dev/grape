@@ -101,7 +101,8 @@ def sweep_claim_without_session_once() -> int:
                 if ev_seq:
                     try:
                         from src.domains.runtime.engine.service import _cascade_event_terminal
-                        _cascade_event_terminal(c, ev_seq, "failed", exit_code=1)
+                        _cascade_event_terminal(c, ev_seq, "failed", exit_code=1,
+                                                failure_phase="recover")
                     except Exception as _ce:
                         log.debug(f"sweeper: cascade event {ev_seq} failed: {_ce}")
                 if rid and int(rid) > 0:

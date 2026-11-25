@@ -813,6 +813,14 @@
                 ⚠️ {{ modal.sceneWarn.reason }}
                 <a @click="goSceneRebind">去换绑 →</a>
               </div>
+              <!-- Issue #3508：健康探测接口失败兜底——可读错误 + 重试，不白屏 -->
+              <div v-else-if="modal.sceneHealth.error" class="isk-scene-warn">
+                ⚠️ {{ modal.sceneHealth.error }}
+                <a @click="retrySceneWarn">{{ td('retry') }}</a>
+              </div>
+              <div v-else-if="modal.sceneHealth.loading" class="isk-fld-hint">
+                {{ td('engine_health_checking') }}
+              </div>
             </div>
             <div class="isk-fld-hint">{{ t('create.assignee_hint') }}</div>
             <!-- 附件（创建/PR介入） -->
@@ -1157,17 +1165,39 @@ function mapStatusL(tk) {
   if (tk.status === 'processing') return 'in_progress'
   return 'pending'
 }
+// Issue #4234：统一状态词表（单一事实来源）。每个视图状态在这里集中定义：
+//   api      → 看板列游标 / statuses= 筛选下发的服务端原始 status 集（行为不变：pending=active、in_progress=active,processing）
+//   labelKey → 列头、卡片、详情共用的展示名词条键（列名与卡片名从此同源，杜绝两套口径）
+//   fallback → 词条缺失时的兜底文案；strip=true 的词条过 stripTag（与旧 STATUS_LABELS 行为一致）
+const STATUS_VIEW_MAP = {
+  pending: { api: ['active'], labelKey: 'status.tag_pending', fallback: '待处理', strip: true },
+  in_progress: { api: ['active', 'processing'], labelKey: 'status.tag_processing', fallback: '处理中', strip: true },
+  awaiting_input: { api: ['awaiting_input'], labelKey: 'status.tag_awaiting_input', fallback: '待澄清' },
+  pending_review: { api: ['pending_review'], labelKey: 'status.tag_pending_review', fallback: '待审核' },
+  done: { api: ['completed'], labelKey: 'status.tag_completed', fallback: '已完成', strip: true },
+  cancelled: { api: ['cancelled'], labelKey: 'status.tag_cancelled', fallback: '已取消' },
+}
+function viewStatusLabel(k) {
+  const v = STATUS_VIEW_MAP[k]
+  if (!v) return ''
+  const raw = t(v.labelKey) || v.fallback
+  return v.strip ? stripTag(raw) : raw
+}
+// Issue #4234：列游标 / statuses= 筛选的下发口径改由 STATUS_VIEW_MAP 派生（原字面量搬移，值不变）
+const TASK_STATUS_TO_API = Object.fromEntries(
+  Object.entries(STATUS_VIEW_MAP).map(([k, v]) => [k, v.api])
+)
 function stripTag(v) {
   return String(v || '').replace(/<[^>]*>/g, '')
 }
-const STATUS_LABELS = computed(() => ({
-  pending: stripTag(t('status.tag_pending')) || '待处理',
-  in_progress: stripTag(t('status.tag_processing')) || '处理中',
-  awaiting_input: t('status.tag_awaiting_input') || '待澄清',
-  pending_review: t('status.tag_pending_review') || '待审核',
-  done: stripTag(t('status.tag_completed')) || '已完成',
-  cancelled: t('status.tag_cancelled') || '已取消',
-}))
+// 列头文案（看板列名、状态筛选选项、卡片/详情状态点共用）同样从 STATUS_VIEW_MAP 派生
+const STATUS_LABELS = computed(() => {
+  const out = {}
+  Object.keys(STATUS_VIEW_MAP).forEach((k) => {
+    out[k] = viewStatusLabel(k)
+  })
+  return out
+})
 const STATUS_COLORS = {
   pending: 'var(--t3)',
   in_progress: '#3b82f6',
@@ -1199,44 +1229,16 @@ const STAGE_COLORS = {
 function statusInfo(tk) {
   const ms = mapStatusL(tk)
   const m = {
-    pending: {
-      ic: '#',
-      cls: 'tsk-tag-p',
-      rIc: 'tsk-ic-p',
-      text: t('status.tag_pending') || '待处理',
-    },
-    in_progress: {
-      ic: '⏳',
-      cls: 'tsk-tag-pr',
-      rIc: 'tsk-ic-pr',
-      text: t('status.tag_processing') || '处理中',
-    },
-    awaiting_input: {
-      ic: '?',
-      cls: 'tsk-tag-pr',
-      rIc: 'tsk-ic-pr',
-      text: t('status.tag_awaiting_input') || '待澄清',
-    },
-    pending_review: {
-      ic: '◉',
-      cls: 'tsk-tag-pr',
-      rIc: 'tsk-ic-pr',
-      text: t('status.tag_pending_review') || '待审核',
-    },
-    done: {
-      ic: '✓',
-      cls: 'tsk-tag-d',
-      rIc: 'tsk-ic-d',
-      text: t('status.tag_completed') || '已完成',
-    },
-    cancelled: {
-      ic: '✕',
-      cls: 'tsk-tag-d',
-      rIc: 'tsk-ic-d',
-      text: t('status.tag_cancelled') || '已取消',
-    },
+    pending: { ic: '#', cls: 'tsk-tag-p', rIc: 'tsk-ic-p' },
+    in_progress: { ic: '⏳', cls: 'tsk-tag-pr', rIc: 'tsk-ic-pr' },
+    awaiting_input: { ic: '?', cls: 'tsk-tag-pr', rIc: 'tsk-ic-pr' },
+    pending_review: { ic: '◉', cls: 'tsk-tag-pr', rIc: 'tsk-ic-pr' },
+    done: { ic: '✓', cls: 'tsk-tag-d', rIc: 'tsk-ic-d' },
+    cancelled: { ic: '✕', cls: 'tsk-tag-d', rIc: 'tsk-ic-d' },
   }
-  return m[ms] || m.pending
+  const c = m[ms] || m.pending
+  // Issue #4234：卡片状态点文案与列头同源（STATUS_VIEW_MAP），列「处理中」卡「待处理」不再出现
+  return { ic: c.ic, cls: c.cls, rIc: c.rIc, text: viewStatusLabel(ms) || viewStatusLabel('pending') }
 }
 
 // ═══════════ 过滤/分页 ═══════════
@@ -1446,12 +1448,14 @@ const BOARD_CURSOR_OF_COL = {
   done: 'done',
   cancelled: 'cancelled',
 }
+// Issue #4234：游标 statuses 口径同样由 STATUS_VIEW_MAP 派生（待处理+进行中共用一条
+// active_flow 游标 = 两列 api 集合并集，值仍为 'active,processing'，行为不变）
 const BOARD_CURSOR_STATUSES = {
-  active_flow: 'active,processing',
-  awaiting_input: 'awaiting_input',
-  pending_review: 'pending_review',
-  done: 'completed',
-  cancelled: 'cancelled',
+  active_flow: [...new Set([...TASK_STATUS_TO_API.pending, ...TASK_STATUS_TO_API.in_progress])].join(','),
+  awaiting_input: TASK_STATUS_TO_API.awaiting_input.join(','),
+  pending_review: TASK_STATUS_TO_API.pending_review.join(','),
+  done: TASK_STATUS_TO_API.done.join(','),
+  cancelled: TASK_STATUS_TO_API.cancelled.join(','),
 }
 const colCursor = reactive({}) // cursor -> {page, hasMore, loading, total, seq}
 // Issue #2649：整刷回合化（旧前端 issues.js 的语义等价迁移）
@@ -1784,9 +1788,12 @@ const detailTarget = computed(
 const detailCardHtml = computed(() => {
   const tk = detailTarget.value
   if (!tk || tk.is_pr_event) return ''
-  const isDone = tk.status === 'completed'
-  const isProc = tk.status === 'processing'
-  const isCancelled = tk.status === 'cancelled'
+  // Issue #4234：详情状态点改走 mapStatusL 派生口径（与看板列/卡片同源）——
+  // status=active 且 stage 已在流水线内时不再误显「待处理」
+  const ms = mapStatusL(tk)
+  const isDone = ms === 'done'
+  const isProc = ms === 'in_progress'
+  const isCancelled = ms === 'cancelled'
   const reasonText =
     tk.completed_reason === 'issue_closed'
       ? t('status.reason_issue_closed')
@@ -2731,7 +2738,8 @@ const modal = reactive({
   desc: '',
   sceneId: '',
   scenes: [],
-  sceneWarn: null, // {reason, sceneId}
+  sceneWarn: null, // {reason, sceneId}（Issue #3508：由 engine-status 按需探测生成）
+  sceneHealth: { loading: false, error: '' }, // Issue #3508：健康探测请求态（可重试）
   error: '',
   submitting: false,
   crossTargets: [],
@@ -2861,13 +2869,7 @@ function loadScenes(repoName, withOfflineWarn) {
       modal.scenes = (d.scenes || []).map(function (s) {
         return {
           id: s.id,
-          label:
-            (s.display_name || s.name || s.id) +
-            (s.scope === 'repo' ? ' 【仓库级】' : '') +
-            (withOfflineWarn && s.all_offline ? ' ⚠️' : ''),
-          all_offline: !!s.all_offline,
-          offline_nodes: s.offline_nodes || [],
-          sre_unbound: !!s.sre_unbound,
+          label: (s.display_name || s.name || s.id) + (s.scope === 'repo' ? ' ' + td('repo_scope_tag') : ''),
         }
       })
       updateSceneWarn()
@@ -2876,21 +2878,77 @@ function loadScenes(repoName, withOfflineWarn) {
       /* ignore */
     })
 }
+// ═══ Issue #3508：引擎健康按需探测（双指标 + 错误兜底可重试）═══
+// with-pipeline 自 Issue #501 起不再返回 all_offline——旧实现读不到字段导致
+// 健康告警永远不显示（用户反馈「不好查看」）。这里改为选中场景后按需
+// 调用 /scenes/{id}/engine-status，区分「物理不可达」与「健康分不足」双指标。
+function buildSceneWarn(sceneId, d) {
+  if (d && d.degraded) {
+    modal.sceneHealth.error = d.error || td('engine_health_error')
+    return null
+  }
+  const offline = (d && d.offline_nodes) || []
+  const lowScore = (d && d.low_score_nodes) || []
+  // Issue #3396：SRE 空绑定 = 广播模式，不再作为告警条件（sre_unbound 恒 False）。
+  if (!offline.length && !lowScore.length) return null
+  const parts = []
+  if (offline.length) parts.push(td('engine_unreachable_nodes', { nodes: offline.join('、') }))
+  if (lowScore.length) parts.push(td('engine_low_score_nodes', { nodes: lowScore.join('、') }))
+  const reasons = ((d && d.engines) || [])
+    .filter(function (e) {
+      return e.reason
+    })
+    .map(function (e) {
+      const code = e.health_reason
+      return e.name + ': ' + (code ? td('engine_reason_' + code) : '')
+    })
+  const reason =
+    td('scene_engine_warning_prefix') +
+    parts.join('；') +
+    td('scene_engine_warning_suffix') +
+    (reasons.length ? td('scene_engine_reason_prefix') + reasons.join('；') : '。')
+  return { sceneId: sceneId, reason: reason }
+}
+function fetchSceneEngineWarn(sceneId) {
+  const repo = currentRepo()
+  const repoName = repo ? repo.fullName || (repo.owner || '') + '/' + (repo.name || '') : ''
+  modal.sceneHealth.loading = true
+  modal.sceneHealth.error = ''
+  API()
+    .get(
+      '/scenes/' +
+        encodeURIComponent(sceneId) +
+        '/engine-status?repo=' +
+        encodeURIComponent(repoName)
+    )
+    .then(function (d) {
+      // Issue #3508：快速切换场景时丢弃过期响应，避免告警挂到错误场景
+      if (modal.sceneId !== sceneId) return
+      modal.sceneHealth.loading = false
+      const warn = buildSceneWarn(sceneId, d)
+      modal.sceneWarn = warn // 无异常时为 null（探测失败不阻塞创建）
+    })
+    .catch(function (e) {
+      // Issue #3508：过期请求（已切换到别的场景）不覆盖当前场景的告警/错误
+      if (modal.sceneId !== sceneId) return
+      // 接口错误兜底：可读错误 + 重试入口，不白屏、不静默
+      modal.sceneHealth.loading = false
+      modal.sceneHealth.error =
+        td('engine_health_error_prefix') +
+        ((e && e.detail && e.detail.message) || (e && e.message) || td('retry_later'))
+      modal.sceneWarn = null
+    })
+}
+function retrySceneWarn() {
+  if (modal.sceneId) fetchSceneEngineWarn(modal.sceneId)
+}
 function updateSceneWarn() {
   modal.sceneWarn = null
+  modal.sceneHealth.error = ''
   if (modal.mode !== 'create') return
   const s = modal.scenes.find((x) => x.id === modal.sceneId)
-  if (!s || !s.all_offline) return
-  const nodes = (s.offline_nodes || []).join('、')
-  // Issue #3396：SRE 未选机器特例已删除（SRE 空绑定 = 广播模式，不再是告警条件；
-  // sre_unbound 字段保留恒 False，仅作 API 兼容）。
-  modal.sceneWarn = {
-    sceneId: s.id,
-    reason:
-      '该场景绑定的引擎当前全部离线' +
-      (nodes ? '（离线节点：' + nodes + '）' : '') +
-      '，创建后任务将无法派发。',
-  }
+if (!s) return
+  fetchSceneEngineWarn(s.id)
 }
 function goSceneRebind() {
   modal.open = false
@@ -3113,16 +3171,9 @@ function deployLongPressEnd() {
 //   opts.append：列表滚动追加下一屏；opts.merge：轮询只拉第 1 屏做增量对账；缺省：重置回第 1 屏
 // Issue #2984d027a：重置类请求不再用 loading 闸门拦截（重复进页的第二发会被 nav 的 abort 吃掉 → 永久卡加载），
 //   改由 taskReqSeq 让最新一发胜出；只有滚动追加做并发去重。
-// 状态 → 服务端 issue.status 多值映射（statuses= 参数）；in_progress 下发 active+processing，
+// 状态 → 服务端 issue.status 多值映射（statuses= 参数）：Issue #4234 起由 STATUS_VIEW_MAP
+// 统一派生（见上方 mapStatusL 区块），此处不再重复定义；in_progress 下发 active+processing，
 //   服务端粗筛后仍由 filtered 按 stage 精筛（保持旧口径）。
-const TASK_STATUS_TO_API = {
-  pending: ['active'],
-  in_progress: ['active', 'processing'],
-  awaiting_input: ['awaiting_input'],
-  pending_review: ['pending_review'],
-  done: ['completed'],
-  cancelled: ['cancelled'],
-}
 // 重置回第 1 屏（筛选/搜索/板↔列表切换/换模式）：看板走列游标，列表走全局分屏
 function resetAndLoad() {
   tasksHasMore.value = false
@@ -4868,10 +4919,10 @@ onBeforeUnmount(function () {
   margin-top: 4px;
   padding: 8px 12px;
   border-radius: 8px;
-  background: rgba(245, 158, 11, 0.08);
-  border: 1px solid rgba(245, 158, 11, 0.3);
+  background: color-mix(in srgb, var(--c-warning) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c-warning) 30%, transparent);
   font-size: 12px;
-  color: #b45309;
+  color: var(--c-warning);
   line-height: 1.6;
   display: flex;
   align-items: center;

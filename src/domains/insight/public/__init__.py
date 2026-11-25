@@ -206,8 +206,8 @@ def _invalidate_token_resolve_cache(repo_key: str) -> None:
         from src.kernel.token_resolver import invalidate_repo_bot_token_cache
 
         invalidate_repo_bot_token_cache(repo_key)
-    except Exception:  # noqa: BLE001 - kernel 未就位/缓存空时不阻断写路径
-        pass
+    except Exception as e:  # noqa: BLE001 - kernel 未就位/缓存空时不阻断写路径
+        log.debug(f"insight: repo bot token cache invalidate skipped {repo_key}: {e}")
 
 
 def repo_credential_value(repo_key: str, cred_type: str) -> str:

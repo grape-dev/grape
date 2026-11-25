@@ -24,7 +24,17 @@
           >
             ‹
           </button>
-          <span class="ts t3 ev__seq">Event #{{ data.seq || '—' }}</span>
+          <span class="ts t3 ev__seq"
+            >Event #{{ data.seq || '—' }}
+            <button
+              v-if="data.seq"
+              class="ev__seqcopy"
+              :title="t('seq_copy_title')"
+              @click="copySeq"
+            >
+              ⧉
+            </button></span
+          >
           <span v-if="data.nav_scope === 'issue' && data.nav_issue_id" class="ts t3 ev__navscope"
             >{{ t('nav_same_issue', { id: data.nav_issue_id }) }}</span
           >
@@ -471,6 +481,16 @@ const DEFAULTS = {
   log_title_realtime: '实时运行日志',
   log_title_inline: '事件日志',
   log_count_suffix: ' 条',
+  seq_copy_title: '复制事件序号',
+  seq_copied: '已复制事件序号 #{seq}',
+  seq_copy_failed: '复制失败',
+  fail_phase: '失败阶段',
+  fail_type: '异常类型',
+  fail_engine: '执行引擎',
+  fail_legacy_hint: '该事件为历史事件，未记录结构化失败原因；可查看下方处理记录与日志排查。',
+  fail_actions: '建议操作',
+  btn_fail_retry: '重试',
+  btn_contact_human: '联系人工',
   log_copy: '复制',
   log_copy_title: '复制日志',
   log_copied: '已复制',
@@ -704,9 +724,22 @@ const statusText = computed(() => {
   return html
 })
 const failExpanded = ref(false)
+function parseFailureInfo(raw) {
+  if (!raw) return null
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw)
+      return parsed && typeof parsed === 'object' ? parsed : null
+    } catch (e) {
+      return null
+    }
+  }
+  return typeof raw === 'object' ? raw : null
+}
 const failReasonText = computed(() => {
   const d = data.value
   if (d.status !== 'failed') return ''
+  const fi = parseFailureInfo(d.failure_info)
   // Issue #494：result 为空/不足时补 task.errors 归因（超时等失败此前零归因）
   const txt = (d.result || '').toString().trim()
   const errs = ((d.task && d.task.task_errors) || [])
@@ -716,29 +749,45 @@ const failReasonText = computed(() => {
   if (txt) parts.push(txt)
   if (errs.length && errs.join('\n') !== txt) parts.push(errs.join('\n'))
   const full = parts.join('\n')
-  if (!full)
-    return (
-      '<div style="margin-top:6px;font-size:11px;color:var(--t3,#86868b)">' +
-      esc(t('no_fail_reason')) +
-      '</div>'
-    )
-  // 长文本折叠：默认 200 字，展开/收起走事件委托
+  const message = (fi && fi.message) || full
+  // Issue #3433：结构化原因优先；历史事件缺字段降级提示，不报错
+  const boxStyle =
+    'margin-top:6px;background:color-mix(in srgb, var(--r) 8%, transparent);border:1px solid color-mix(in srgb, var(--r) 18%, transparent);border-radius:10px;padding:8px 12px;font-size:12px;color:var(--r);line-height:1.6'
+  const row = (label, value) =>
+    '<div><b>' + esc(label) + '：</b><span style="white-space:pre-wrap">' + esc(value) + '</span></div>'
+  let html = '<div class="ev-fail-box" style="' + boxStyle + '">'
   const LIMIT = 200
-  const short = full.length > LIMIT ? full.slice(0, LIMIT) + '…' : full
-  const expandable = full.length > LIMIT
-  const shown = expandable && failExpanded.value ? full : short
-  let html =
-    '<div class="ev-fail-box" style="margin-top:6px;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:10px;padding:8px 12px;font-size:12px;color:#d32f2f;line-height:1.6"><b>' +
-    esc(t('fail_reason')) +
-    '：</b><span style="white-space:pre-wrap">' +
-    esc(shown) +
-    '</span>'
-  if (expandable) {
-    html +=
-      ' <a href="javascript:void(0)" data-ev-act="failtoggle" style="color:var(--a);white-space:nowrap">' +
-      esc(t(failExpanded.value ? 'fail_collapse' : 'fail_expand')) +
-      '</a>'
+  if (message) {
+    const expandable = message.length > LIMIT
+    const shown = expandable && failExpanded.value ? message : message.slice(0, LIMIT) + (expandable ? '…' : '')
+    html += row(t('fail_reason'), shown)
+    if (expandable) {
+      html +=
+        ' <a href="javascript:void(0)" data-ev-act="failtoggle" style="color:var(--a);white-space:nowrap">' +
+        esc(t(failExpanded.value ? 'fail_collapse' : 'fail_expand')) +
+        '</a>'
+    }
   }
+  if (fi) {
+    const phase = fi.phase_label || fi.phase
+    if (phase) html += row(t('fail_phase'), phase)
+    if (fi.error_type) html += row(t('fail_type'), fi.error_type)
+    const engine = [fi.runtime, fi.agent].filter(Boolean).join(' / ')
+    if (engine) html += row(t('fail_engine'), engine)
+  } else {
+    html +=
+      '<div style="margin-top:4px;color:var(--t3,#86868b);font-size:11px">' +
+      esc(t('fail_legacy_hint')) +
+      '</div>'
+  }
+  html +=
+    '<div style="margin-top:8px"><b>' +
+    esc(t('fail_actions')) +
+    '：</b> <button class="bt bt-o bt-s" data-ev-act="failretry">' +
+    esc(t('btn_fail_retry')) +
+    '</button> <button class="bt bt-o bt-s" style="margin-left:4px" data-ev-act="failfeedback">' +
+    esc(t('btn_contact_human')) +
+    '</button></div>'
   html += '</div>'
   return html
 })
@@ -856,6 +905,8 @@ function onInfoClick(ev) {
   else if (act === 'tasklog') openTaskLog(data.value.task.task_id, 'seq#' + data.value.seq)
   else if (act === 'inlinelog') openInlineLog(data.value.seq, 'seq#' + data.value.seq)
   else if (act === 'failtoggle') failExpanded.value = !failExpanded.value // Issue #494：失败原因展开/收起
+  else if (act === 'failretry') ((redispatch.open = true), (redispatch.seq = data.value.seq))
+  else if (act === 'failfeedback') openFeedback()
 }
 // ── 折叠区块 ──
 const openSections = reactive({ ctxInfo: true, promptBody: false })
@@ -1744,6 +1795,32 @@ function terminateCurrentTask() {
       G.app.showToast(t('terminate_failed', { msg: e.message || e }))
     })
 }
+function copySeq() {
+  const seq = data.value && data.value.seq
+  if (!seq) return
+  const text = '#' + seq
+  const ok = function () {
+    G.app.showToast(t('seq_copied', { seq: seq }))
+  }
+  const fail = function () {
+    G.app.showToast(t('seq_copy_failed'))
+  }
+  if (G.window.navigator.clipboard && G.window.navigator.clipboard.writeText) {
+    G.window.navigator.clipboard.writeText(text).then(ok, fail)
+  } else {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    document.body.appendChild(ta)
+    ta.select()
+    try {
+      document.execCommand('copy')
+      ok()
+    } catch (e) {
+      fail()
+    }
+    ta.remove()
+  }
+}
 function copyTaskLog() {
   const el = document.querySelector('.ev__tl-body')
   if (!el) return
@@ -1943,6 +2020,16 @@ onMounted(function () {
 .ev__seq {
   font-size: 12px;
   font-weight: 600;
+}
+.ev__seqcopy {
+  margin-left: 4px;
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--a);
+  background: transparent;
+  border: 1px solid var(--b);
+  border-radius: 4px;
+  cursor: pointer;
 }
 .ev__feedback {
   margin-left: auto;

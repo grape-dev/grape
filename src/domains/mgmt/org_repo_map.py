@@ -1186,8 +1186,8 @@ def _ai_status_map(org_id: str) -> dict[str, dict]:
                 parsed = json.loads(r[4] or "{}")
                 if isinstance(parsed, dict):
                     meta.update(_presentation_fields(parsed))
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - 历史脏 JSON 不阻断地图列表
+                log.debug(f"org_repo_map ai json parse failed org={org_id} repo={r[0]}: {exc}")
             out[str(r[0])] = meta
         return out
     except Exception as exc:  # noqa: BLE001 - 缺表/分库时退回纯地图视图

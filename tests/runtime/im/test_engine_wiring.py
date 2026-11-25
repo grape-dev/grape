@@ -170,8 +170,9 @@ def _build_engine(db_path, api, rec):
 
 def _fake_process_command(rec):
     async def _cmd(ctx, api_, text, chat_id, sender_id, db, account="",
-                   msg_id="", sender_open_id="", card_value=None, action_token=""):
-        rec.calls.append(("command", text))
+                   msg_id="", sender_open_id="", card_value=None, action_token="",
+                   channel_type=""):
+        rec.calls.append(("command", text, str(channel_type)))
         return "cmd-ok"
     return _cmd
 
@@ -581,24 +582,46 @@ def test_lookup_user_sync_dingtalk_column(tmp_path):
     assert engine_wiring._lookup_user_sync(path, "inst-1", "ou_x") == "101"
 
 
-async def test_router_unbound_bind_command_writes_identity(db_path):
-    """未绑定发送者发 /绑定 → 落 grape_t_channel_sender_identity，下一条正常进 agent。"""
+async def test_router_unbound_bind_command_writes_identity(db_path, monkeypatch):
+    """未绑定发送者发 /绑定 → 先确认卡；确认后才落库，之后正常进 agent。
+
+    两段式：/绑定 只发确认卡（避免绑错账号），点「确认绑定」/回复 /确认绑定 才真正落库。
+    测试环境里安装查找走 _mgmt_public（查不到行 → owner 为空），故把 owner 与落库原语钉死。
+    """
+    inst_id = sqlite3.connect(db_path).execute(
+        "SELECT id FROM grape_t_channel_installation LIMIT 1").fetchone()[0]
+    monkeypatch.setattr(engine_wiring, "_lookup_installation_by_app_sync",
+                        lambda db, app: {"installation_id": inst_id, "scope": "user",
+                                         "owner_user_id": "101", "repo_key": "",
+                                         "config": {"app_id": app}, "status": "active"})
+    bound: list = []
+
+    def _lookup_user(db, inst, open_id, channel_type="feishu"):
+        return "101" if open_id == "staff-1" and "staff-1" in bound else ""
+
+    def _bind(db, inst, scope, owner, open_id, stable_id=""):
+        bound.append(open_id)
+        return str(owner)
+
+    monkeypatch.setattr(engine_wiring, "_lookup_user_sync", _lookup_user)
+    monkeypatch.setattr(engine_wiring, "_bind_identity_sync", _bind)
+
     rec = Recorder()
     api = FakeApi()
     engine, api = await _drive(db_path, rec, api,
                               msg=_msg("om_b1", "/绑定", sender="staff-1"))
     try:
         await asyncio.sleep(0.3)
-        conn = sqlite3.connect(db_path)
-        row = conn.execute(
-            "SELECT user_id, platform_stable_user_id FROM grape_t_channel_sender_identity "
-            "WHERE platform_user_id='staff-1'").fetchone()
-        conn.close()
-        assert row and str(row[0]) == "101"
-        assert api.cards and "已绑定" in api.cards[-1][1]
+        assert bound == [], "/绑定 第一步不得落库"
+        assert api.cards and "确认绑定" in api.cards[-1][1]
 
         handler = next(iter(engine.supervisor._channels.values()))[0].cfg.inbound_handler
-        await handler(CancelContext(), _msg("om_b2", "你好", sender="staff-1"))
+        await handler(CancelContext(), _msg("om_b2", "/确认绑定", sender="staff-1"))
+        await asyncio.sleep(0.3)
+        assert bound == ["staff-1"]
+        assert any("已绑定" in text for _, text in api.cards)
+
+        await handler(CancelContext(), _msg("om_b3", "你好", sender="staff-1"))
         await asyncio.sleep(0.8)
         assert any(c[0] == "chat" for c in rec.calls)
     finally:

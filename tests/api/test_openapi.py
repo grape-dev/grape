@@ -328,6 +328,8 @@ EXPECTED_PUBLIC = {
     "project_templates_list": ("get", "/api/project-templates"),
     "repos_bot_token_get": ("get", "/api/repos/bot-token/{owner}/{repo_name}"),
     "repos_bot_token_set": ("put", "/api/repos/bot-token"),
+    # Issue #3427: 显式绑定接口（写入即校验）
+    "repos_bot_token_bind": ("put", "/api/repos/{owner}/{repo_name}/bot-token"),
     "repos_check_name": ("get", "/api/repos/check-name"),
     "repos_create": ("post", "/api/repos/create"),
     "repos_deploy_url": ("get", "/api/repos/deploy-url/{owner}/{repo_name}"),

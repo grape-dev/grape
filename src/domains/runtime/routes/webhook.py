@@ -1080,15 +1080,24 @@ async def gitcode_webhook(request: Request):
         log.warning("Webhook: invalid JSON body")
         return JSONResponse(status_code=400, content={"code": 400, "message": "invalid body"})
 
+    # Issue #3397：优先 repository.full_name（VCS 实际路径，大小写权威），
+    # project.path_with_namespace 仅在缺失时回退（webhook 该字段可能被归一为全小写）。
     repo = ""
-    if "project" in payload and isinstance(payload["project"], dict):
-        repo = payload["project"].get("path_with_namespace", "")
-    if not repo and "repository" in payload and isinstance(payload["repository"], dict):
-        repo = payload["repository"].get("full_name", "")
+    if isinstance(payload.get("repository"), dict):
+        repo = payload["repository"].get("full_name", "") or ""
+    if not repo and isinstance(payload.get("project"), dict):
+        repo = payload["project"].get("path_with_namespace", "") or ""
 
     if not repo:
         log.warning("Webhook: could not extract repo from payload")
         return JSONResponse(status_code=400, content={"code": 400, "message": "missing repository"})
+
+    # Issue #3397：按已存登记回填权威大小写，避免全小写路径导致 managed_repos 查不到
+    try:
+        from src.kernel.repo_key import canonicalize_repo_full_name
+        repo = canonicalize_repo_full_name(repo, "gitcode") or repo
+    except Exception as e:
+        log.warning(f"Webhook: canonicalize repo path failed (repo={repo}): {e}")
 
     log.info(f"Webhook: extracted repo={repo}")
 
@@ -1268,7 +1277,8 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
     _raw_session_info = verify_session_token(_auth)
     if _raw_session_info and _raw_session_info.get("repo_key"):
         _session_repo = _raw_session_info["repo_key"]
-        if _session_repo != repo_key:
+        from src.kernel.repo_key import same_repo_key as _same_session_repo
+        if not _same_session_repo(_session_repo, repo_key):
             # 检查 1: 两仓 bot token 相同（同一运维主体）
             _session_bot_token = get_repo_bot_token_no_global(_session_repo) or ""
             if _session_bot_token and _session_bot_token == _expected:
@@ -1436,6 +1446,33 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     }
 
 
+def _handoff_target_scene_owner_uid(repo_key: str, scene_id: str) -> int | None:
+    """目标场景归属人（账号 id）；解析不出返回 None（调用方保持 Issue 原归属人）。
+
+    为什么需要：交办把 Issue 绑定场景切到目标场景时，原实现调 `set_issue_scene`
+    不传归属人 → 写 0，把原场景时期已绑定的归属人冲成 0；此后 a2a listener 按
+    Issue 场景取 task.user_id=0，scope=user 的个人引擎在 claim_by_tag 的 scope
+    过滤里永远领不到（任务永久 queued，且无任何日志）。这里用场景 created_by
+    （平台账号名）→ 账号 id 回填，取不到就传 None 让 set_issue_scene 保留旧值，
+    绝不写 0。
+    """
+    from src.kernel.config import log
+    try:
+        from src.domains.mgmt import public as _mg_pub
+        _creator = _mg_pub.scene_created_by_any(scene_id, repo_key)
+        if not _creator:
+            log.info(f"A2A #568: target scene {scene_id} has no created_by, keep issue scene_user_id unchanged")
+            return None
+        _uid = _mg_pub.account_id_by_username_ci_any(_creator)
+        if _uid:
+            return int(str(_uid).strip())
+        log.info(f"A2A #568: target scene {scene_id} created_by={_creator} 未注册平台账号, "
+                 f"keep issue scene_user_id unchanged")
+    except Exception as _e:
+        log.warning(f"A2A #568: resolve target scene owner failed (scene={scene_id}): {_e}")
+    return None
+
+
 def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_scene_id: str) -> str:
     """Issue #568: 跨流水线移交后刷新 issue 绑定场景为目标场景有效 ID。
 
@@ -1443,6 +1480,10 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
     绑定场景刷新为 DB 行 scene_id（有效 ID 归一）；后续 agent 任务经
     `_resolve_scene_id` → `get_issue_scene` 注入的 GRAPE_SCENE_ID 即为该有效 ID，
     且可通过 `scenes detail` 查询且节点有效。
+
+    归属人一并刷新：按目标场景 created_by 解析账号 id
+    写入 Issue 的 scene_user_id；解析不出时传 None → set_issue_scene 保留旧值，
+    不再把已绑定的归属人冲成 0。
 
     返回刷新后的有效 scene_id；目标场景 DB 行不存在时返回空串（软失败——
     移交主流程已通过 get_pipeline_config 兜底口径校验节点，这里仅收紧
@@ -1461,8 +1502,10 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
         return ""
     try:
         from src.api.session_store import set_issue_scene
-        set_issue_scene(repo_key, f"#{issue_number}", effective_scene_id)
-        log.info(f"A2A #568: issue scene refreshed to effective scene={effective_scene_id} (issue=#{issue_number})")
+        _owner_uid = _handoff_target_scene_owner_uid(repo_key, effective_scene_id)
+        set_issue_scene(repo_key, f"#{issue_number}", effective_scene_id, scene_user_id=_owner_uid)
+        log.info(f"A2A #568: issue scene refreshed to effective scene={effective_scene_id} "
+                 f"(issue=#{issue_number}, uid={_owner_uid if _owner_uid is not None else 'preserve'})")
     except Exception as _e:
         log.warning(f"A2A #568: issue scene refresh failed: {_e}")
     return effective_scene_id
@@ -2416,7 +2459,12 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             from src.domains.mgmt.public import get_managed_repos
             managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
             if repo_key not in managed:
-                raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
+                # Issue #3427：a2a 403 与 token 类错误解耦——此处失败与凭据无关，
+                # 是 user_repos 未关联（未同步/未加入该仓库），文案指向关联动作。
+                raise HTTPException(status_code=403, detail={
+                    "code": 403, "error_code": "REPO_NOT_BOUND_TO_USER",
+                    "message": "当前用户未关联该仓库（user_repos 无关联记录，与凭据无关）："
+                                "请先在仓库列表同步/加入该仓库，或由托管人在仓库成员中添加后再发起 A2A"})
         else:
             # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
             _a2a_session_info = _authorize_a2a(request, repo_key)

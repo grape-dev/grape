@@ -6,13 +6,19 @@
         <img class="logo" :src="'/static/img/grape-logo.jpg?v=1'" alt="Grape Admin" />
         <h1>Grape Admin</h1>
         <p class="sub">{{ t('login.subtitle') }}</p>
+        <label class="visually-hidden" for="adminUsername">{{ t('login.admin_account') }}</label>
         <input
+          id="adminUsername"
+          name="username"
           v-model="loginUser"
           class="ipt"
           :placeholder="t('login.admin_account')"
           autocomplete="username"
         />
+        <label class="visually-hidden" for="adminPassword">{{ t('login.password') }}</label>
         <input
+          id="adminPassword"
+          name="password"
           v-model="loginPass"
           class="ipt"
           type="password"
@@ -1105,6 +1111,18 @@ if (getToken()) {
   --auth-accent: var(--a);
   --auth-accent-hover: var(--ah);
   --auth-error: var(--r);
+}
+/* 可视觉隐藏但保留无障碍语义的 label（屏幕阅读器可读） */
+.admv-login .visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 /* 登录面板（固定深色场景）的输入框 */
 .admv-login .ipt {
