@@ -86,7 +86,7 @@ def classify(c, user_id):
     复用主服务真实逻辑：候选序 = canonical 优先 + 遗留行按 last_active DESC。
     """
     from src.kernel.session_manager import _pick_chat_config_row
-    picked_id, row, backend = _pick_chat_config_row(c, user_id)
+    picked_id, row, backend, _reason = _pick_chat_config_row(user_id)
     c.execute("SELECT COUNT(*) FROM chat_agent_session WHERE id=? AND (repo_key='' OR repo_key IS NULL)",
               (CANON + str(user_id),))
     canon_exists = (c.fetchone() or [0])[0] > 0
@@ -133,7 +133,7 @@ def plan(c, users):
                 c.execute("SELECT user_id FROM chat_agent_session WHERE id=?", (canon_id,))
                 _owner = (c.fetchone() or [None])[0]
                 _rt = dead[0][1]
-                _, usable = _chat_config_row_engine(c, _rt)
+                _, usable, _reason, _ = _chat_config_row_engine(_rt, "", row_id="")
                 if _owner == uid and not usable and picked_id == good[0][0]:
                     actions.append(dict(kind="D", uid=uid, canon_id=canon_id, keep=good[0][0],
                                         rename=(good[0][0], canon_id), delete=[canon_id], rows=rows,

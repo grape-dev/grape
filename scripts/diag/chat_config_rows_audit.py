@@ -299,7 +299,7 @@ def run_direct(args) -> int:
                 if seen:
                     print(f"  {'user_id':>8} | {'当前会读到的行':<15} | 引擎")
                     for uid in seen:
-                        picked_id, row, backend = _pick_chat_config_row(ac, uid)
+                        picked_id, row, backend, _reason = _pick_chat_config_row(uid)
                         print(f"  {uid:>8} | {picked_id or '(无配置行)':<15} | {backend or '—'}")
         except Exception as e:
             print(f"  需要主服务代码可导入（在仓库根用 .venv/bin/python 运行）：{str(e)[:120]}")

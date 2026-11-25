@@ -1655,6 +1655,10 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
         "backend": {
             "type": cfg.get("backend", ""),
         },
+        # Issue #4045：绑定状态显式化——`bound=False` + `reason`（engine_missing/unbound）
+        # 让前端能区分「配置绑定的引擎已失效」与「真未绑定」，不再只能看 runtime_id=0。
+        "bound": bool(cfg.get("bound", True)),
+        "reason": cfg.get("reason", "") or "",
         "selectedEngine": selected_engine,
         "skill": cfg.get("skill", ""),
         "skill_id": cfg.get("skill_id", 0) or 0,
