@@ -1307,6 +1307,68 @@
         "x-token-scope": "dual"
       }
     },
+    "/api/repos/{owner}/{repo}/vcs-health/reset": {
+      "post": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "Reset repo VCS breaker",
+        "description": "Issue #3759: clears the repo-level VCS missing breaker (`vcs_status`/`vcs_fail_count`/probe ledger). Use after rebinding the provider or confirming the upstream repository exists again; the next issue read re-probes upstream. Idempotent.",
+        "operationId": "repos_vcs_health_reset",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Owner"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/repos/{provider}/connection": {
       "get": {
         "tags": [
@@ -36403,19 +36465,27 @@
   },
   "x-changelog": {
     "version": "2.3.0a1",
+<<<<<<< HEAD
     "added": [
       "/api/repos/{owner}/{repo_name}/bot-token",
       "/api/skills/by-id/{skill_id}/ai-fill",
       "/api/skills/by-id/{skill_id}/content",
       "/api/skills/by-id/{skill_id}/convert"
     ],
+=======
+    "added": [],
+>>>>>>> origin/weekly-13
     "removed": [],
     "deprecated": [
       "/api/dashboard/efficiency"
     ],
     "baseline_available": true
   },
+<<<<<<< HEAD
   "x-endpoint-count": 405,
+=======
+  "x-endpoint-count": 403,
+>>>>>>> origin/weekly-13
   "x-groups": [
     "a2a",
     "agents",
@@ -36450,6 +36520,13 @@
     "task",
     "tasks"
   ],
+<<<<<<< HEAD
   "x-source-commit": "54849a368",
   "x-generated-at": "2026-11-25T06:19:35.102513+00:00"
 }
+=======
+  "x-source-commit": "d0839cec8e",
+  "x-generated-at": "2026-11-25T05:56:58.190658+00:00",
+  "tags": []
+}
+>>>>>>> origin/weekly-13

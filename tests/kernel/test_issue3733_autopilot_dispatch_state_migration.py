@@ -72,7 +72,10 @@ def test_backfill_adds_state_columns_and_marks_empty_instruction_rows(tmp_path):
     assert marked == 2, "只应标记 enabled=1 且指令为空的两行"
     state, reason, at, enabled = _row(c, "issue-patrol")
     assert state == AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION
-    assert reason and "指令" in reason, "原因需可直接展示给运营，不得为空"
+    assert reason, "原因出参不得为空（界面按 code 取语言包，空值无从回退）"
+    assert reason == AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION, (
+        "原因出参是稳定 code 而非中文文案（D1 国际化守卫，dfcb3f80a）："
+        "后端下发文案会让 en 界面出现 CJK，本条断言随之从「含『指令』」改为等于 code")
     assert at, "状态进入时间必须落库（跨进程判重权威）"
     assert enabled == 1, "不得改动 enabled——停用会掩盖空转事实"
     # 纯空白等价于空指令

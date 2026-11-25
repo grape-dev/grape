@@ -130,12 +130,16 @@ def test_seed_rules_idempotent_and_levels():
                           # Issue #516 M3：超时失败聚合告警
                           "task_timeout",
                           # Issue #1938：事件回报丢失补偿（用户面可见，仓库维度计数）
-                          "cascade_compensation"}
-    assert len(al.list_rules()) == 15, "种子规则应为 15 条（9 指标 + 2 缺失 + 1 突变 + 2 表体积 + 1 补偿）"
+                          "cascade_compensation",
+                          # Issue #3750：webhook 验签拒绝速率（用户面可见，仓库维度计数）
+                          "webhook_token_mismatch_rate"}
+    assert len(al.list_rules()) == 16, \
+        "种子规则应为 16 条（9 指标 + 2 缺失 + 1 突变 + 2 表体积 + 1 补偿 + 1 webhook 拒绝速率）"
     user_rules = {r["name"] for r in al.list_rules(level="user")}
     assert user_rules == {"task_stuck", "task_failure_rate", "task_queue_backlog",
                           "runtime_silent", "repo_silent", "task_success_rate_drop",
-                          "task_timeout", "cascade_compensation"}
+                          "task_timeout", "cascade_compensation",
+                          "webhook_token_mismatch_rate"}
     for name in ("db_pool_usage", "db_aborted_connects", "http_error_rate_5xx_warning",
                  "http_error_rate_5xx_critical", "all_runtimes_offline"):
         assert rules[name]["level"] == "platform"

@@ -149,6 +149,44 @@ groups:
           summary: "Repo dispatch lease busy repeated (repo={{ $labels.repo }})"
           description: "{{ $value }} repo-dispatch lease waits exhausted their budget in 5m for repo {{ $labels.repo }} — enqueue is queueing behind a long-held lease (see #3927 db_lock) and autopilot runs are being requeued; check lease_wait_seconds and db_lock hold time."
 
+      # Issue #4081：插件代理缺插件上报降级（`report-missing` 回补闭环不可用）
+      # 语义：result=degraded 表示市场契约与统一确认队列都不可用，Agent 只能回帖协商
+      # 文本，补装闭环静默失效（此前该结果只有 logger.debug，值守只能翻 nginx 日志）。
+      # 排查：日志 grep "plugin report-missing degraded"；核对 plugin_install_requests
+      # 表与 src.api.plugin_market.create_plugin_install_request 可用性。
+      - alert: GrapePluginMissingReportDegraded
+        expr: sum by (result) (increase(grape_plugin_missing_report_total{result="degraded"}[10m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Plugin missing report degraded (comment fallback)"
+          description: "{{ $value }} report-missing submissions fell back to the comment channel in the last 10 minutes — the unified install-confirmation queue / plugin market contract is unavailable, so the missing-plugin discovery-to-refill loop is silent for the reporting agent."
+
+      # Issue #4081：插件代理端点不可用（本构建未实现 / 旧构建裸 404-405）
+      # 语义：第一分支 grape_plugin_agent_unimplemented_total 由 /api/plugins/agent/*
+      # 的路由级兜底自增（501 NOT_IMPLEMENTED，不再裸 404/405，只在本构建内可见）；
+      # 第二分支兜住**未升级的旧构建**：那里的请求根本不进本 router，应用侧只有
+      # SPA catch-all 的 404（route="/{path}"）与 Starlette 的 405（route="unmatched"），
+      # 应用指标 `grape_http_requests_total{route=...}` 的 route 是路由模板、永远不匹配
+      # `/api/plugins/agent/.*`（#3847 复盘：网关侧 404/405 不进应用侧指标）。因此第二
+      # 分支必须用 Alloy 从 nginx access.log 派生的 `nginx_upstream_requests_total`
+      # （deploy/alloy-config.alloy：path=真实请求路径、status=三位状态码）。
+      # 排查：GET /api/plugins/agent/capabilities 看 available / missing_operations
+      # （`/api/ping` 由 worker 进程承载、没有插件代理 router，不提供该能力位）；
+      # 对比发布版本（生产 8081 是否包含 src/domains/mgmt/routes/plugins_agent.py）。
+      - alert: GrapePluginAgentEndpointMissing
+        expr: |
+          sum by (method) (increase(grape_plugin_agent_unimplemented_total[10m])) > 0
+          or
+          sum(rate(nginx_upstream_requests_total{path=~"/api/plugins/agent/.*", status=~"404|405|501"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Plugin agent endpoint unavailable (404/405/501)"
+          description: "Plugin-agent calls are being answered as not-implemented (501) or 404/405 in the last minutes — the running build does not serve /api/plugins/agent/* for the calling runtime. Risk: missing-plugin discovery and install negotiation are dead on every runtime host. Check GET /api/plugins/agent/capabilities (available / missing_operations) and the deployed build version."
+
       # Issue #1938：事件回报丢失补偿频发
       # 语义：任务已终态但事件回报未落库，服务端级联收敛并自行生成/回填结论。
       # 频发 = worker 回报链路在丢消息，且事件结论已不属于 Agent 真实答复口径。
@@ -297,6 +335,20 @@ groups:
         annotations:
           summary: "No-progress task scan is failing repeatedly"
           description: "The no_progress sweep has failed at least 5 times in 5 minutes, so stuck running tasks may never be auto-requeued. Check master scheduler logs for 'no_progress: scan running tasks failed', then verify the DB backend cursor iteration/context protocol and SQL dialect."
+      # Issue #3905：运行时 env 契约三变量（ACCOUNT/GRAPE_ISSUE_ID/GRAPE_WORK_BRANCH）
+      # 持续缺失。语义：issue 任务全程 degraded env（拿不到内部卡片 id 与场景基线，
+      # A2A 交办无 account 主体）。修复后本指标增量应归零。
+      # 排查：指标按 backend/agent_type/var 拆分定位丢 env 的派发路径；
+      # 服务端日志 "runtime env contract missing" / "on N consecutive tasks"；
+      # 核对 agent_tasks.env_extra 快照是否为空（direct/failed 快照组装，Issue #3905）。
+      - alert: GrapeRuntimeEnvContractMissing
+        expr: sum by (var) (increase(grape_runtime_env_contract_missing_total[30m])) >= 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Runtime env contract variable {{ $labels.var }} keeps missing"
+          description: "{{ $labels.var }} was missing on at least 10 task starts in 30m after the fallback chain, so issue/autopilot tasks run with a degraded env. Query grape_runtime_env_contract_missing_total by backend/agent_type to find the dispatch path, then check agent_tasks.env_extra snapshot assembly (Issue #3905)."
       # Issue #4203：内核 OOM killer 选中本机任一进程即 P1（critical，值班立即响应）。
       # 语义：<host> 曾 24h 内多次 OOM kill，前 3 次选中引擎子进程（无外显），
       # 第 4 次选中 worker 主进程才 数百次 502 + 终态/消息回执丢失。任何增量都说明
@@ -339,3 +391,18 @@ groups:
         annotations:
           summary: "Worker process RSS keeps growing ({{ $labels.process }})"
           description: "RSS of process {{ $labels.process }} grew by more than 512MiB over the last 30 minutes with a consistently positive slope — memory leak or runaway task suspected. Correlate with grape_engine_child_rss_bytes per engine and long-running agent tasks. See Issue #4203."
+
+      # Issue #3750：同仓库 webhook 验签 token 不匹配速率 > 10/min 且持续 5 分钟。
+      # 被 403 丢弃的 webhook **不会重放**（Push Hook 丢失 → PR 关联 / push 触发 / 巡检 pipeline
+      # 漏事件且无补偿），典型成因是该仓库残留旧 secret / 测试 hook / 镜像 hook 仍在投递。
+      # 定位：grape-webhook 日志 `Webhook rejected: token mismatch for repo=... event=...
+      # token_fp=sha256:xxx expected_fp=sha256:yyy reason=mismatch ip=...`，或按 (ip, token_fp)
+      # 反查 obs_webhook_rejects；处置：核查 GitCode 仓库 webhook 列表，删除/统一旧 secret。
+      - alert: GrapeWebhookTokenMismatch
+        expr: sum by (repo) (increase(grape_webhook_token_mismatch_total[1m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Webhook token mismatch for {{ $labels.repo }} (>10/min)"
+          description: "More than 10 webhook requests per minute for repo {{ $labels.repo }} were rejected with a token mismatch for 5 minutes. Those events were dropped and will not be replayed. Correlate `token_fp=`/`expected_fp=` fingerprints in the webhook log or look up `obs_webhook_rejects` by (ip, token_fp), then remove the stale webhook secret on the platform side. See Issue #3750."

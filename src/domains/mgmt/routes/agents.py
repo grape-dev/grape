@@ -480,6 +480,8 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
 
     # 引擎绑定真实性同步 §4.3：该仓库场景有引擎被系统解绑且未重绑 → 前端编辑页提示条
     detached_engines = []
+    detached_engines_degraded = False
+    detached_engines_unavailable_reason = ""
     try:
         from src.kernel.session_manager import db as _sdb, db_lock as _slock
         with _slock:
@@ -496,9 +498,15 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                 _sr = _sc.fetchone()
             if _sr:
                 from src.domains.runtime.public import get_detached_engine_hints
-                detached_engines = get_detached_engine_hints(scene_row_id=_sr[0])
+                # Issue #3909：返回 {hints, degraded, reason}——「查询失败」不得与「无解绑」同形
+                _det = get_detached_engine_hints(scene_row_id=_sr[0])
+                detached_engines = _det.get("hints") or []
+                detached_engines_degraded = bool(_det.get("degraded"))
+                detached_engines_unavailable_reason = _det.get("reason") or ""
     except Exception as _de:
         log.warning(f"get_agent_detail: detached_engines lookup failed: {_de}")
+        detached_engines_degraded = True
+        detached_engines_unavailable_reason = detached_engines_unavailable_reason or "query"
 
     return {
         "agent_type": name,
@@ -513,6 +521,10 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         "declared_runtime_ids": _eids or [],  # Issue #524: 场景声明的引擎集合（声明配置）
         "effective_runtime_id": session_data.get("runtime_id", 0),  # Issue #524: 实际生效引擎（生效配置）
         "detached_engines": detached_engines,  # 被系统解绑的引擎提示（引擎绑定真实性同步 §4.3）
+        # Issue #3909：解绑提示不可用（runtime 域不可达/查询失败）时显式标记，
+        # 前端渲染「解绑信息暂不可用」，不再把「查询失败」画成「无解绑」
+        "detached_engines_degraded": detached_engines_degraded,
+        "detached_engines_unavailable_reason": detached_engines_unavailable_reason,
         "skill": session_data.get("skill", ""),
         "skill_id": session_data.get("skill_id", 0),
         "skill_scope": skill_scope,

@@ -31,6 +31,20 @@ DEGRADED_REASONS = (
     "session_paused_risk",
 )
 
+# Issue #3795：WS 关闭码归因键族（`ws_close_<code>`）。
+# flap_by_cause 是常驻字典，键必须有界：应用自定义码（4000+，各渠道自定义语义）
+# 统一进 `ws_close_4xxx` 桶，取不到码进 `ws_close_unknown`，避免看板键无界增长。
+WS_CLOSE_APP_CODE_FLOOR = 4000
+
+
+def ws_close_cause(code: Any) -> str:
+    """关闭码 → 有界的归因键（数字码原样，应用自定义码分桶，无码 unknown）。"""
+    if isinstance(code, bool) or not isinstance(code, int):
+        return "ws_close_unknown"
+    if code >= WS_CLOSE_APP_CODE_FLOOR:
+        return "ws_close_4xxx"
+    return f"ws_close_{code}"
+
 
 @dataclass
 class EngineMetrics:
@@ -77,6 +91,16 @@ class EngineMetrics:
     def record_disconnect(self, cause: str) -> None:
         """断开不重连（让渡/停机）：仅按原因记抖动。"""
         self._bump(cause)
+
+    def record_ws_close(self, close_code: Any) -> str:
+        """Issue #3795：按 WS 关闭码记一次抖动归因（键有界，见 ``ws_close_cause``）。
+
+        关闭同时已被记一次 ``ws_transport``（reconnects 口径不变），这里只补关闭码
+        维度，供看板区分 3003 ping timeout / 1006 异常断连 / 4000+ 应用自定义码。
+        """
+        cause = ws_close_cause(close_code)
+        self._bump(cause)
+        return cause
 
     def _bump(self, cause: str) -> None:
         self.flap_by_cause[cause] = self.flap_by_cause.get(cause, 0) + 1
@@ -139,4 +163,5 @@ class CountingSender:
         return result
 
 
-__all__ = ["EngineMetrics", "CountingSender", "FLAP_CAUSES", "DEGRADED_REASONS"]
+__all__ = ["EngineMetrics", "CountingSender", "FLAP_CAUSES", "DEGRADED_REASONS",
+           "ws_close_cause"]

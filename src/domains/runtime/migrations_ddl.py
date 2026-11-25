@@ -153,6 +153,16 @@ DROP_AGENT_RUNTIMES = "DROP TABLE agent_runtimes"
 ALTER_AGENT_TASKS = "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT"
 ALTER_AGENT_TASKS__ALTER_SKILL_FILES_IF_NEEDED = "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT"
 
+# ── Issue #4339：events.payload TEXT(65,535) → MEDIUMTEXT(16,777,215) ──
+# 必须写成 `MODIFY COLUMN`（带 COLUMN）：`src/api/db_setup.py::_destructive_ddl` 的
+# 迁移执行器只把含 `MODIFY COLUMN` 的语句路由进 min_code_version 门槛 + 失败抛出的
+# 收口路径；上面 `ALTER_AGENT_TASKS` 缺 COLUMN 的历史先例正是「绕过门槛 + 失败被吞」
+# 的成因，本条不沿用其写法（tests/runtime/test_event_payload_mediumtext.py 锁定）。
+# DEFAULT '{}' 由 mysql_compat 翻成表达式默认值（MySQL 8 TEXT 族不接受字面量默认）。
+ALTER_EVENTS__EVENTS_PAYLOAD_MEDIUMTEXT = (
+    "ALTER TABLE events MODIFY COLUMN payload MEDIUMTEXT DEFAULT '{}'"
+)
+
 # ── 自 db_setup._tasks_to_issue_rename_pre_create() 下沉 ─────────────
 SELECT_ISSUE__TASKS_TO_ISSUE_RENAME_PRE_CR = "SELECT COUNT(*) FROM issue"
 DROP_ISSUE = "DROP TABLE issue"

@@ -8,11 +8,10 @@
   "src/domains/runtime/engine/branch_guard.py": 6,
   "src/domains/runtime/engine/deploy_evidence.py": 1,
   "src/domains/runtime/engine/direct_executor.py": 10,
-  "src/domains/runtime/engine/engine_select.py": 15,
+  "src/domains/runtime/engine/engine_select.py": 11,
   "src/domains/runtime/engine/health_scorer.py": 1,
   "src/domains/runtime/engine/local_claimer.py": 9,
   "src/domains/runtime/engine/plugin_state.py": 3,
-  "src/domains/runtime/engine/recovery.py": 12,
   "src/domains/runtime/engine/scheduler.py": 22,
   "src/domains/runtime/engine/service.py": 6,
   "src/domains/runtime/engine/transient_retry.py": 10,
@@ -30,8 +29,8 @@
  },
  "risk_domains": {
   "insight": 5,
-  "runtime": 244
+  "runtime": 230
  },
- "risk_sites": 249,
- "total_sites": 628
+ "risk_sites": 235,
+ "total_sites": 612
 }

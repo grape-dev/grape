@@ -1,5 +1,10 @@
 <template>
   <div class="apv">
+    <!-- Issue #3812：会话失效软横幅（保留页面，给明确的重新登录入口） -->
+    <div v-if="sessionExpired" class="apv-session-banner">
+      <span>⚠ {{ tb('session_expired') }}</span>
+      <button class="bt bt-p bt-s" @click="relogin">{{ tb('relogin') }}</button>
+    </div>
     <!-- ═══ 列表页 ═══ -->
     <template v-if="!detailId">
       <div class="cd">
@@ -111,6 +116,13 @@
                 v-if="t.enabled && t.dispatchable === false"
                 class="apv-warn"
                 :title="dispatchReasonText(t.dispatch_state_reason, 'list')"
+                >⚠</span
+              >
+              <!-- Issue #3909：解绑记录查询失败 → 列表显式降级（不与「无解绑」同形） -->
+              <span
+                v-if="t.engine_detached_degraded"
+                class="apv-warn"
+                :title="tt('detail.engine_detached_unavailable')"
                 >⚠</span
               >
               <span v-if="t.enabled" class="apv-on">●</span>
@@ -958,6 +970,8 @@
 import { providerFromRepoKey, repoKeyOf } from '../lib/repo-provider.js'
 import { stripRepoPrefix } from '../lib/repo-key.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+// Issue #3812：会话感知轮询器（401 停机 / 连续失败降频 / 会话事件订阅）
+import { createSessionPoller, DEGRADE_FACTOR } from '../lib/pollGuard.js'
 
 const G = globalThis
 
@@ -1046,7 +1060,18 @@ const detailWbBranch = ref('')
 const detailBranches = ref([])
 detailBranches.value._isDetail = true
 const detailCustomFields = ref([])
-let logPollTimers = {}
+// Issue #3812：会话失效态（横幅 + 重新登录入口）与高频轮询节奏常量。
+// logPollers 替代旧的 logPollTimers：每个执行槽一个会话感知轮询器，
+// 停机时整表清空（Object.keys(logPollers).length === 0），恢复时按打开态重建。
+const sessionExpired = ref(false)
+const APV_LOG_POLL_INTERVAL_MS = 2000 // 日志弹窗
+const APV_EXEC_POLL_INTERVAL_MS = 3000 // 执行卡片内联日志
+// 降频间隔与 pollGuard.DEGRADE_FACTOR 同源推导（2s→6s / 3s→9s），不再各自硬编码 10s。
+// 不直接用 POLL_DEGRADE_INTERVAL_MS(60s)：日志/执行是用户正在看的交互面板，1 分钟粒度
+// 会让「还在跑吗」不可见；60s 档留给后台列表类轮询。
+const APV_LOG_POLL_DEGRADE_MS = APV_LOG_POLL_INTERVAL_MS * DEGRADE_FACTOR
+const APV_EXEC_POLL_DEGRADE_MS = APV_EXEC_POLL_INTERVAL_MS * DEGRADE_FACTOR
+const logPollers = {}
 // 弹窗状态
 const dlg = reactive({
   open: false,
@@ -1107,6 +1132,13 @@ function tc(key) {
   const map = { loading: '加载中...', cancel: '取消', confirm: '确认' }
   const v = G.I18N.t('common.' + key)
   return v && v !== 'common.' + key ? v : map[key] || key
+}
+// Issue #3812：会话失效横幅文案复用看板已有词条（tasks.board.*，zh/en 双包齐备），
+// 不新增语言包键、也不在视图里硬编码中文字面量（中文棘轮只减不增）。
+function tb(key, params) {
+  const full = 'tasks.board.' + key
+  const v = G.I18N.t(full, params)
+  return v && v !== full ? v : key
 }
 function esc(s) {
   return String(s == null ? '' : s)
@@ -1713,8 +1745,18 @@ const engineNamesText = computed(() => {
 })
 const engineDetachedHtml = computed(() => {
   const t = detail.value
-  if (!t || !t.engine_detached || !t.engine_detached.engines || !t.engine_detached.engines.length)
-    return ''
+  if (!t) return ''
+  const hasHints = !!(t.engine_detached && t.engine_detached.engines && t.engine_detached.engines.length)
+  // Issue #3909：解绑提示查询失败 → 显式降级文案（不与「无解绑」同形）
+  if (!hasHints && !t.engine_detached_degraded) return ''
+  if (!hasHints) {
+    return (
+      '<div class="apv-detach">' +
+      esc(tt('detail.engine_detached_unavailable') ||
+        '解绑信息暂不可用（引擎解绑记录查询失败），请稍后重试。') +
+      '</div>'
+    )
+  }
   return (
     '<div class="apv-detach">' +
     (tt('detail.engine_detached_hint') || '绑定的引擎 ') +
@@ -1897,7 +1939,6 @@ const escapedPlainLog = computed(function () {
     })
     .join('')
 })
-let logTimer = null
 let logSince = 0
 let logInfoLoaded = false
 
@@ -2028,51 +2069,62 @@ function logLoadInfo(tid) {
 function pollLog() {
   if (!logDlg.open || !logDlg.taskId) return
   const tid = logDlg.taskId
-  API()
-    .get('/task-logs/' + encodeURIComponent(tid) + '/messages?since=' + logSince)
-    .then(function (d) {
-      if (!logDlg.open || logDlg.taskId !== tid) return
-      const msgs = Array.isArray(d) ? d : ((d && d.messages) || [])
-      logDlg.loading = false
-      if (msgs.length) {
-        logSince = msgs[msgs.length - 1].seq
-        let add = ''
-        msgs.forEach(function (m) {
-          const line = logMsgHtml(m)
-          if (line) add += line
-        })
-        if (add) {
-          logDlg.html += add
-          logScrollToEnd()
+  // Issue #3812：两条请求合并成一轮——任一条失败只计一次失败（不加速降频），
+  // 401 由轮询器停机并亮横幅（旧实现两条 catch 各自静默吞错、2s 无限打点）。
+  Promise.all([
+    API()
+      .get('/task-logs/' + encodeURIComponent(tid) + '/messages?since=' + logSince)
+      .then(function (d) {
+        if (!logDlg.open || logDlg.taskId !== tid) return
+        const msgs = Array.isArray(d) ? d : ((d && d.messages) || [])
+        logDlg.loading = false
+        if (msgs.length) {
+          logSince = msgs[msgs.length - 1].seq
+          let add = ''
+          msgs.forEach(function (m) {
+            const line = logMsgHtml(m)
+            if (line) add += line
+          })
+          if (add) {
+            logDlg.html += add
+            logScrollToEnd()
+          }
         }
-      }
-    })
-    .catch(function (e) {
-      logDlg.loading = false
-      if (!logDlg.html) {
-        logDlg.lines.push((e && e.message) || String(e))
-      }
-    })
-  API()
-    .get('/runtime/tasks/' + encodeURIComponent(tid) + '/status')
-    .then(function (d) {
-      if (!logDlg.open || logDlg.taskId !== tid) return
-      if (d && d.status) {
-        logDlg.status = d.status
-        logDlg.statusHtml = logStatusHtml(d.status)
-        if (d.status !== 'running' && d.status !== 'dispatched') {
-          stopLogTimer()
-          if (!logInfoLoaded) logLoadInfo(tid)
+      }),
+    API()
+      .get('/runtime/tasks/' + encodeURIComponent(tid) + '/status')
+      .then(function (d) {
+        if (!logDlg.open || logDlg.taskId !== tid) return
+        if (d && d.status) {
+          logDlg.status = d.status
+          logDlg.statusHtml = logStatusHtml(d.status)
+          if (d.status !== 'running' && d.status !== 'dispatched') {
+            stopLogTimer()
+            if (!logInfoLoaded) logLoadInfo(tid)
+          }
         }
-      }
-    })
-    .catch(function () {})
+      }),
+  ]).then(
+    function () {
+      logDlgPoller.noteSuccess()
+    },
+    function (e) {
+      logDlg.loading = false
+      if (!logDlg.html) logDlg.lines.push((e && e.message) || String(e))
+      logDlgPoller.noteError(e)
+    }
+  )
 }
+// Issue #3812：日志弹窗轮询器（2s）——401 停机，非 401 连续 3 次降频 10s
+const logDlgPoller = createSessionPoller({
+  intervalMs: APV_LOG_POLL_INTERVAL_MS,
+  degradeIntervalMs: APV_LOG_POLL_DEGRADE_MS,
+  tick: pollLog,
+  onSessionExpired: markSessionExpired,
+  onSessionRestored: resumeAfterSessionRestored,
+})
 function stopLogTimer() {
-  if (logTimer) {
-    clearInterval(logTimer)
-    logTimer = null
-  }
+  logDlgPoller.stop()
 }
 // 日志按钮：页面内弹窗（不依赖 event-view 的 window.openTaskLog）
 function openTaskLog(e) {
@@ -2092,8 +2144,9 @@ function openTaskLog(e) {
   logSince = 0
   logInfoLoaded = false
   logLoadInfo(e.agent_task_id)
+  if (sessionExpired.value) return // 失效态不恢复打点，等重新登录（session-restored）
   pollLog()
-  logTimer = setInterval(pollLog, 2000)
+  logDlgPoller.start()
 }
 function closeLog() {
   logDlg.open = false
@@ -2131,60 +2184,109 @@ function copyLog() {
   ta.remove()
 }
 function startLogPoll(e) {
-  if (logPollTimers[e.id]) clearInterval(logPollTimers[e.id])
+  if (!e || !e.id || !e.agent_task_id) return
+  if (sessionExpired.value) return // 失效态不打点，等重新登录后按打开态重建
+  stopLogPoll(e.id)
   let since = 0
-  logPollTimers[e.id] = setInterval(function () {
-    API()
-      .get('/task-logs/' + e.agent_task_id + '/messages?since=' + since)
-      .then(function (d) {
-        const msgs = Array.isArray(d) ? d : ((d && d.messages) || [])
-        if (!msgs.length) return
-        since = msgs[msgs.length - 1].seq
-        const lines = msgs
-          .map(function (m) {
-            const ty = m.type || ''
-            const content = m.content || m.tool || ''
-            if (ty === 'text') return content.substring(0, 200)
-            if (ty === 'step_start') return '▶ ' + content
-            if (ty === 'step_finish') return '✓ ' + content
-            if (ty === 'tool_use') return '🔧 ' + (m.tool || '')
-            if (ty === 'error') return '❌ ' + content
-            return ''
-          })
-          .filter(Boolean)
-        if (lines.length) {
-          // 追加到对应 pre（DOM 直更，等价老代码）
-          const pres = document.querySelectorAll('.apv-exec-pre')
-          pres.forEach(function (pre) {
-            pre.textContent += lines.join('\n') + '\n'
-            pre.scrollTop = pre.scrollHeight
-          })
+  const poller = createSessionPoller({
+    intervalMs: APV_EXEC_POLL_INTERVAL_MS,
+    degradeIntervalMs: APV_EXEC_POLL_DEGRADE_MS,
+    onSessionExpired: markSessionExpired,
+    onSessionRestored: resumeAfterSessionRestored,
+    // Issue #3812：两条请求合并成一轮——任一条失败只计一次失败；401 停机 + 横幅，
+    // 非 401 连续 3 次降频 10s（旧实现两条 catch 都静默吞错、3s 无限打点）。
+    tick: function () {
+      Promise.all([
+        API()
+          .get('/task-logs/' + e.agent_task_id + '/messages?since=' + since)
+          .then(function (d) {
+            const msgs = Array.isArray(d) ? d : ((d && d.messages) || [])
+            if (!msgs.length) return
+            since = msgs[msgs.length - 1].seq
+            const lines = msgs
+              .map(function (m) {
+                const ty = m.type || ''
+                const content = m.content || m.tool || ''
+                if (ty === 'text') return content.substring(0, 200)
+                if (ty === 'step_start') return '▶ ' + content
+                if (ty === 'step_finish') return '✓ ' + content
+                if (ty === 'tool_use') return '🔧 ' + (m.tool || '')
+                if (ty === 'error') return '❌ ' + content
+                return ''
+              })
+              .filter(Boolean)
+            if (lines.length) {
+              // 追加到对应 pre（DOM 直更，等价老代码）
+              const pres = document.querySelectorAll('.apv-exec-pre')
+              pres.forEach(function (pre) {
+                pre.textContent += lines.join('\n') + '\n'
+                pre.scrollTop = pre.scrollHeight
+              })
+            }
+          }),
+        // 检查执行是否结束
+        API()
+          .get('/autopilot/executions?task_id=' + detailId.value + '&limit=50')
+          .then(function (d) {
+            const cur = (d.executions || []).find(function (x) {
+              return x.id === e.id
+            })
+            if (cur && cur.status !== 'running' && cur.status !== 'dispatched') {
+              stopLogPoll(e.id)
+              loadExecutions(detailId.value)
+            }
+          }),
+      ]).then(
+        function () {
+          poller.noteSuccess()
+        },
+        function (err) {
+          poller.noteError(err)
         }
-      })
-      .catch(function () {})
-    // 检查执行是否结束
-    API()
-      .get('/autopilot/executions?task_id=' + detailId.value + '&limit=50')
-      .then(function (d) {
-        const cur = (d.executions || []).find(function (x) {
-          return x.id === e.id
-        })
-        if (cur && cur.status !== 'running' && cur.status !== 'dispatched') {
-          stopLogPoll(e.id)
-          loadExecutions(detailId.value)
-        }
-      })
-      .catch(function () {})
-  }, 3000)
+      )
+    },
+  })
+  logPollers[e.id] = poller
+  poller.start()
 }
 function stopLogPoll(execId) {
-  if (logPollTimers[execId]) {
-    clearInterval(logPollTimers[execId])
-    delete logPollTimers[execId]
+  if (logPollers[execId]) {
+    logPollers[execId].dispose()
+    delete logPollers[execId]
   }
 }
 function stopAllLogPolls() {
-  Object.keys(logPollTimers).forEach(stopLogPoll)
+  Object.keys(logPollers).forEach(stopLogPoll)
+}
+// Issue #3812：会话失效收口——两条高频日志轮询 + 弹窗轮询全停（幂等）
+function markSessionExpired() {
+  stopLogTimer()
+  stopAllLogPolls()
+  sessionExpired.value = true
+}
+// Issue #3812：登录恢复后只回启「仍在打开态」的日志（隐藏/已结束的不复活）
+function resumeAfterSessionRestored() {
+  if (!sessionExpired.value) return
+  sessionExpired.value = false
+  const view = String(G.window._currentView || '')
+  if (view.indexOf('autopilot') !== 0) return
+  if (
+    logDlg.open &&
+    logDlg.taskId &&
+    (logDlg.status === 'running' || logDlg.status === 'dispatched')
+  ) {
+    pollLog()
+    logDlgPoller.start()
+  }
+  ;(executions.value || []).forEach(function (ex) {
+    if (!ex || !openExec.has(ex.id)) return
+    if (ex.status !== 'running' && ex.status !== 'dispatched') return
+    if (!ex.agent_task_id) return
+    startLogPoll(ex)
+  })
+}
+function relogin() {
+  if (app() && app().showLogin) app().showLogin()
 }
 // findings 徽标
 function sevIcon(sev) {
@@ -2650,6 +2752,9 @@ function onDocClick(e) {
 }
 onMounted(function () {
   document.addEventListener('click', onDocClick)
+  // Issue #3812：api.js 401 清 token 后广播；本页收到即停机 + 亮横幅（幂等）。
+  G.window.addEventListener('grape:session-expired', markSessionExpired)
+  G.window.addEventListener('grape:session-restored', resumeAfterSessionRestored)
   if (props.initialDetailId) {
     G.window._currentView = 'autopilot-detail' // renderAutopilotDetail 契约（入口已设，防御）
     loadDetail(props.initialDetailId)
@@ -2662,12 +2767,30 @@ onBeforeUnmount(function () {
   document.removeEventListener('click', onDocClick)
   stopAllLogPolls()
   closeLog()
+  logDlgPoller.dispose()
+  G.window.removeEventListener('grape:session-expired', markSessionExpired)
+  G.window.removeEventListener('grape:session-restored', resumeAfterSessionRestored)
 })
 </script>
 
 <style scoped>
 .apv {
   min-height: 100%;
+}
+/* Issue #3812：会话失效横幅（与看板 #3734 的 isk-session-banner 同款视觉，文档流内，
+   不遮挡列表/详情；按钮复用存量 bt bt-p bt-s） */
+.apv-session-banner {
+  position: relative;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--c-issue) 14%, transparent);
+  color: var(--c-issue);
+  font-size: 12px;
 }
 .apv-head {
   display: flex;

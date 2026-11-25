@@ -26,16 +26,26 @@ TOO_MANY_REQUESTS = 429
 INTERNAL_SERVER_ERROR = 500
 BAD_GATEWAY = 502
 SERVICE_UNAVAILABLE = 503
+# Issue #4081：路径已知但本构建未实现（插件代理过渡期语义）。
+NOT_IMPLEMENTED = 501
+
+# 统一错误码（detail.error_code，与 src/api/deps.py 的 401 族同口径）
+ERROR_NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
 
 
-def api_error(status: int, message: str, internal: str = "") -> HTTPException:
+def api_error(status: int, message: str, internal: str = "",
+              error_code: str = "") -> HTTPException:
     """构造统一 HTTP 错误响应（Agent 可读英文 message）。
 
     - status: HTTP 状态码（默认取常量大写命名）。
     - message: 英文，对外返回；Agent 据此解析与决策。
     - internal: 可选内部信息（错误码/追踪），不暴露敏感信息；仅记录日志用。
+    - error_code: 可选机器可读错误码（`detail.error_code`，与 deps.py 的 401 族
+      同口径，如 NOT_IMPLEMENTED）——Agent 侧按码降级，不解析文案（Issue #4081）。
     """
     detail = {"code": status, "message": message}
+    if error_code:
+        detail["error_code"] = error_code
     if internal:
         detail["internal"] = internal
     return HTTPException(status_code=status, detail=detail)

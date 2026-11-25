@@ -105,6 +105,14 @@ from src.kernel.comment_metrics import install as _install_comment_metrics
 # Issue #4183：任务会话 get-or-create 失败指标（grape_task_conversation_ensure_failed_total{reason}）。
 # 旧 Issue 重派撞唯一索引后的「1062 兜底仍查不到」由 WARNING 升级为可巡检指标。
 from src.kernel.task_conversation_metrics import install as _install_task_conversation_metrics
+# Issue #3999：stage 解析 ident 观测指标（grape_gsb_issue_card_invalid_ident_total{provider}）。
+# provider hop 420/422 的成因已由 #4065 消除，本指标把「ident 无法归一为卡片主键」
+# 从静默回落变成可巡检计数；收集器定义在 kernel，这里注册进本模块 registry。
+from src.kernel.gsb.issue_card_metrics import install as _install_issue_card_metrics
+# Issue #3877：事件级联终态收敛指标（grape_event_cascade_converge_failed_total{reason,stage} /
+# grape_event_cascade_converge_degraded_total{missing}）。此前 1054 缺列导致收敛 100% 失败，
+# 只有一条被吞的 WARNING；收集器定义在 kernel，这里注册进本模块 registry。
+from src.kernel.cascade_converge_metrics import install as _install_cascade_converge_metrics
 # db_lock 的等待/持锁直方图与持有者 gauge（owner = 归一化请求路径）。
 # 与 lock_instrument 的慢锁计数器互补：这里看「等了多久、谁在持」，那里看「临界区在哪」。
 from src.kernel.db_lock_metrics import install as _install_db_lock_metrics
@@ -117,6 +125,8 @@ _install_db_lock_metrics(registry)
 _install_startup_metrics(registry)
 _install_comment_metrics(registry)
 _install_task_conversation_metrics(registry)
+_install_cascade_converge_metrics(registry)
+_install_issue_card_metrics(registry)
 # Issue #3740：RepoBotToken 历史列回落 counter。降噪后日志不再承担全量计数，
 # 回落规模与仓库分布由 grape_repo_bot_legacy_fallback_total{provider,repo} 兜底。
 from src.kernel.repo_bot_observability import install as _install_repo_bot_observability
@@ -375,6 +385,44 @@ REPO_DISPATCH_BUSY = Counter(
     "grape_repo_dispatch_busy_total",
     "Repo-dispatch lease waits that exhausted their budget (task enqueue busy).",
     ["repo"],
+    registry=registry,
+)
+
+# Issue #3750：webhook 验签拒绝计数（token 不匹配 / 未带 token），按仓库一维。
+# 语义：一次 403 拒绝 = 一次自增；与落库 `grape_t_obs_webhook_rejects` 同源不同路
+# （落库失败仍计数，指标反映真实拒绝量）。deploy/alerts.yml 的
+# GrapeWebhookTokenMismatch 消费本指标；应用内按仓库速率规则见 alerts.SEED_RULES。
+WEBHOOK_TOKEN_MISMATCH_TOTAL = Counter(
+    "grape_webhook_token_mismatch_total",
+    "Webhook requests rejected because the provided token did not match the managed repo secret.",
+    ["repo"],
+    registry=registry,
+)
+
+# Issue #4081：插件代理缺插件上报结果（agent negotiation 闭环）。
+# 语义：result=submitted（入统一确认单/队列成功，闭环可用）| degraded（市场契约/
+# 确认队列不可用 → comment 通道降级，需要人看一眼）。此前该结果只有 logger.debug，
+# 值守只能翻 nginx/应用日志。标签只有 result 一维（repo_key 高基数，不引入）。
+PLUGIN_MISSING_REPORT_METRIC = "grape_plugin_missing_report_total"
+
+PLUGIN_MISSING_REPORT = Counter(
+    PLUGIN_MISSING_REPORT_METRIC,
+    "Agent report-missing submissions by result (submitted|degraded).",
+    ["result"],
+    registry=registry,
+)
+
+# Issue #4081：插件代理命名空间下「本构建未实现」的请求计数。
+# 语义：/api/plugins/agent/* 未登记的路径/方法命中路由级兜底 → 501 NOT_IMPLEMENTED
+# 并在此自增（method 一维即可；具体路径只落日志，避免探测流量打高基数）。
+# 用途：deploy/alerts.yml 的 GrapePluginAgentEndpointMissing 据此告警，
+# 取代「每台 runtime 静默 404/405、只能翻 nginx 日志」的现状。
+PLUGIN_AGENT_UNIMPLEMENTED_METRIC = "grape_plugin_agent_unimplemented_total"
+
+PLUGIN_AGENT_UNIMPLEMENTED = Counter(
+    PLUGIN_AGENT_UNIMPLEMENTED_METRIC,
+    "Requests to plugin-agent paths this build does not implement (answered 501).",
+    ["method"],
     registry=registry,
 )
 
@@ -733,6 +781,42 @@ def record_env_extra_plaintext_row(outcome: str = "heal_failed"):
     if o not in ENV_EXTRA_PLAINTEXT_OUTCOMES:
         o = "unknown"
     ENV_EXTRA_PLAINTEXT_ROWS.labels(outcome=o).inc()
+
+
+# ===== 运行时 env 契约缺失（Issue #3905）=====
+# 生产 Loki 里契约缺失只是 WARNING（24h 949 条淹没在噪声中），无法按 backend/agent
+# 维度聚合，也做不出「连续全缺」告警。改按 (backend, agent_type, var) 计数：
+#   - backend：引擎后端名（hermes/hwcloud/aishell-dsh/空=通用 CLI 路径）；
+#   - agent_type：从执行标签解析（issue/coding/qa/sre/vod…），未知归 unknown；
+#   - var：缺失变量名（ACCOUNT/GRAPE_ISSUE_ID/GRAPE_WORK_BRANCH/DEVOPS_EVENT_TYPE）。
+# 三者都是低基数字典值，repo/issue 号**不进标签**（防高基数）。
+
+RUNTIME_ENV_CONTRACT_MISSING_METRIC = "grape_runtime_env_contract_missing_total"
+
+RUNTIME_ENV_CONTRACT_MISSING = Counter(
+    RUNTIME_ENV_CONTRACT_MISSING_METRIC,
+    "Runtime env contract variables still missing after the fallback chain, by "
+    "backend / agent_type / variable name. Increase => issue tasks are running with a "
+    "degraded env (missing GRAPE_ISSUE_ID / GRAPE_WORK_BRANCH / ACCOUNT).",
+    ["backend", "agent_type", "var"],
+    registry=registry,
+)
+
+
+def record_runtime_env_contract_missing(backend: str = "", agent_type: str = "",
+                                        var: str = ""):
+    """记一次契约变量缺失（维度缺省归 unknown；名字不在契约内也照记，不丢数）。"""
+    # 标签值截断（B2 五源 = 规范/契约）：Prometheus 标签值无长度上限，但每个唯一值都是
+    # 一条独立时间序列；这里取「够放已知取值 + 留前缀余量」的长度——
+    # · 40：backend / agent_type 为短枚举（backend ≤10、agent_type ≤12，实测见
+    #   prompt_builder 的角色表），40 留 3 倍余量且能吃下 `[opencode] ` 这类前缀拼接；
+    # · 48：契约变量名按 `GRAPE_` + 全大写蛇形命名（最长实测 `GRAPE_WORK_BRANCH` 18 字符），
+    #   48 覆盖未来同类变量而不引入超长脏值。
+    # 截断只影响指标维度，不影响日志原文（原文按 backend/agent_type 原样记录）。
+    b = (backend or "").strip().lower()[:40] or "unknown"
+    a = (agent_type or "").strip().lower()[:40] or "unknown"
+    v = (var or "").strip().upper()[:48] or "UNKNOWN"
+    RUNTIME_ENV_CONTRACT_MISSING.labels(backend=b, agent_type=a, var=v).inc()
 
 
 # ===== MySQL 连接池指标（参考 multica metrics/db.go，适配 grape MySQL）=====

@@ -22,12 +22,12 @@ import pytest
 SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
 LOCALES = SHELL / "locales"
 
-LOCALE_FINGERPRINT = '316eb1085d8a0d78'
+LOCALE_FINGERPRINT = '79e5a09a09076e4f'
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
     'index.html': ('95', '53'),
-    'admin.html': ('20261125-1', '20261114-23'),
+    'admin.html': ('20261125-2', '20261114-23'),
     'register.html': ('73', '45'),
     'forgot.html': ('73', '45'),
 }

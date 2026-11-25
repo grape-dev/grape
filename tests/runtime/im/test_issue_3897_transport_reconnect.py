@@ -48,9 +48,12 @@ class _LeaseStore:
 
 
 class BrokenPipeChannel(Channel):
-    """每次 connect 都以真实传输层错误失败（复现现场）。"""
+    """先以真实传输层错误失败 ``fail_times`` 次（复现现场），随后恢复正常连接并阻塞
+    到 ctx 取消——避免「退避重连与测试取消互相竞争」导致的计数抖动（#3795 合入基线后
+    调度顺序变化，取消前可多跑数次重连）：失败次数由通道自身封顶，断言得以确定性成立。"""
 
     attempts = 0
+    fail_times = 3
 
     def __init__(self, cfg: ChannelConfig):
         self.cfg = cfg
@@ -60,7 +63,9 @@ class BrokenPipeChannel(Channel):
 
     async def connect(self, ctx: CancelContext) -> None:
         type(self).attempts += 1
-        raise BrokenPipeError(32, "Broken pipe")
+        if type(self).attempts <= type(self).fail_times:
+            raise BrokenPipeError(32, "Broken pipe")
+        await ctx.wait()
 
     async def disconnect(self) -> None:
         return None
@@ -164,6 +169,7 @@ async def _cancel(sup):
 
 def test_broken_pipe_is_transport_flap_not_crash(captured, delays):
     BrokenPipeChannel.attempts = 0
+    BrokenPipeChannel.fail_times = 3
     metrics = EngineMetrics()
     sup = _supervisor(BrokenPipeChannel, metrics)
 

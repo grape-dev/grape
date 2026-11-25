@@ -20,13 +20,13 @@ from typing import Awaitable, Callable, Optional
 
 from ..channel.channel import (
     CancelContext, Channel, ChannelConfig, ChannelError,
-    ChannelRegistrationConflict, PermanentChannelError,
+    ChannelRegistrationConflict, ChannelWsClosed, PermanentChannelError,
 )
 from ..channel.registry import ChannelRegistry
 from ..channel.types import Scope, Type
 from .hashring import build_ring, owner
 from .lease import lease_key
-from .metrics import EngineMetrics
+from .metrics import EngineMetrics, ws_close_cause
 
 BACKOFF_MIN = 2.0   # 指数退避 2s→15s（继承 run_bot）
 BACKOFF_MAX = 15.0
@@ -40,6 +40,10 @@ REGISTER_CONFLICT_ALERT_AFTER = 5
 # 一次连接健康存活 ≥ 该时长 → 视为已恢复，重置并发注册冲突的连续计数。
 REGISTER_CONFLICT_STABLE_SECS = 60.0
 
+#: WS 关闭码 duck-typing 的 cause/context 回溯层数上限（PR #2157 复审 C3 数值证据门）：
+#: 实测关闭帧最多挂在 3~4 层因果链上，8 层足够覆盖包装异常且不会在环状链上打转。
+WS_CLOSE_CHAIN_MAX_DEPTH = 8
+
 # Issue #3897：传输层断连异常族——「链路抖动」，不是适配器 bug。
 # 生产现场 `channel crashed (unexpected)` 的异常栈即 asyncio selector_events 写 socket 时
 # 抛的 BrokenPipeError（1h 11 条）。这类异常必须按传输抖动 WARNING 归因 + 既有指数退避，
@@ -48,6 +52,31 @@ _TRANSPORT_ERRORS = (
     BrokenPipeError, ConnectionResetError, ConnectionAbortedError, ConnectionRefusedError,
     asyncio.IncompleteReadError, TimeoutError,   # TimeoutError 即 asyncio.TimeoutError（3.11+）
 )
+
+
+def ws_close_code_of(exc: BaseException) -> Optional[int]:
+    """duck-typing 取 WS 关闭码（Issue #3795）：引擎不 import websockets。
+
+    识别 ``ConnectionClosed``（``code``）与关闭帧（``rcvd``/``sent`` 上的 ``code``），
+    沿 cause/context 链最多回溯若干层；普通异常自带的 HTTP/业务 ``code`` 不作为关闭码
+    （只在 ``rcvd``/``sent`` 容器里认，或异常自身同时具备 ``reason`` 时才认）。
+    """
+    cur: Optional[BaseException] = exc
+    for _ in range(WS_CLOSE_CHAIN_MAX_DEPTH):
+        if cur is None:
+            return None
+        for holder in (getattr(cur, "rcvd", None), getattr(cur, "sent", None)):
+            code = getattr(holder, "code", None)
+            if isinstance(code, int) and not isinstance(code, bool):
+                return code
+        # 异常自身即关闭帧（websockets Close）：仅当带 reason 属性时认，避免误取业务码
+        if hasattr(cur, "reason"):
+            code = getattr(cur, "code", None)
+            if isinstance(code, int) and not isinstance(code, bool):
+                return code
+        nxt = cur.__cause__ or cur.__context__
+        cur = nxt if nxt is not cur else None
+    return None
 
 log = logging.getLogger(__name__)
 
@@ -452,6 +481,16 @@ class Supervisor:
                         await _backoff_sleep(conflict_backoff)
                         conflict_backoff = next_backoff(
                             conflict_backoff, register_conflict=True)
+                    except ChannelWsClosed as e:
+                        # Issue #3795：服务端/对端发来关闭帧（飞书 3003 ping timeout 等）
+                        # 是既定的传输层关闭，不是适配器 bug——WARNING 单行 + 关闭码归因，
+                        # 永不进 `channel crashed (unexpected)` 全栈 ERROR。
+                        last_session_secs = time.monotonic() - started
+                        self._log_ws_closed(
+                            inst_id, channel_type, getattr(e, "close_code", None),
+                            backoff, e)
+                        await _backoff_sleep(backoff)
+                        backoff = next_backoff(backoff)
                     except ChannelError:
                         # 链路断开 → 退避重连（Issue #870：reconnects +1，抖动归因 ws_transport）
                         # Issue #1728：微信 ilink 长轮询断线单独归因 ilink_longpoll，便于看板区分。
@@ -475,15 +514,30 @@ class Supervisor:
                             "cause=%s errtype=%s errno=%s retry_in=%.0fs: %s",
                             inst_id, channel_type, _cause, type(e).__name__,
                             getattr(e, "errno", None), backoff, e)
+                        # Issue #3795：适配器若有裸 ConnectionClosed 泄漏（未被归一），
+                        # 关闭码同样进归因桶，看板仍能区分 3003 ping timeout 与真实断连。
+                        _leaked_code = ws_close_code_of(e)
+                        if _leaked_code is not None:
+                            self._record_ws_close(_leaked_code)
                         self._record_reconnect(_cause)
                         await _backoff_sleep(backoff)
                         backoff = next_backoff(backoff)
-                    except Exception:
+                    except Exception as e:
                         # 非契约异常（适配器 bug / 意外 payload 形态）：绝不能让任务
                         # 就此静默死亡（2026-11-05 钉钉 data 为字符串 → AttributeError
                         # 打死 connect 任务，channels 恒为 1 但永不收消息）。按瞬时故障
                         # 计 ws_transport 抖动并退避重连，异常栈留在日志。
                         last_session_secs = time.monotonic() - started
+                        # Issue #3795：适配器没归一而泄漏的 websockets ConnectionClosed
+                        # （非 OSError 族，落不到上面传输分支）同样是链路关闭——按关闭码
+                        # WARNING 归因重连，不写全栈 ERROR；真 bug 仍走下面的 log.exception。
+                        _leaked_close_code = ws_close_code_of(e)
+                        if _leaked_close_code is not None:
+                            self._log_ws_closed(
+                                inst_id, channel_type, _leaked_close_code, backoff, e)
+                            await _backoff_sleep(backoff)
+                            backoff = next_backoff(backoff)
+                            continue
                         log.exception("[im-engine] channel crashed (unexpected): inst=%s type=%s",
                                       inst_id, channel_type)
                         self._record_reconnect(
@@ -555,6 +609,29 @@ class Supervisor:
         """Issue #870：重连计数 + 按原因抖动（metrics 未注入时零开销）。"""
         if self._metrics is not None:
             self._metrics.record_reconnect(cause)
+
+    def _record_ws_close(self, close_code) -> str:
+        """Issue #3795：WS 关闭码归因（keys 有界，见 metrics.ws_close_cause）。"""
+        cause = ws_close_cause(close_code)
+        if self._metrics is not None:
+            self._metrics.record_ws_close(close_code)
+        return cause
+
+    def _log_ws_closed(self, inst_id: str, channel_type: str, close_code,
+                       backoff: float, exc: BaseException) -> str:
+        """Issue #3795：WS 关闭的 WARNING 单行 + 归因（替代 log.exception 全栈 ERROR）。
+
+        关闭是可重连的链路事件，reconnects 与 `ws_transport` 口径保持不变（看板不断档），
+        额外记一条 `ws_close_<code>` 让 3003 ping timeout / 1006 / 4000+ 可区分。
+        不打印 payload 与凭证：exception 文本来自契约异常，不含原始帧内容。
+        """
+        cause = self._record_ws_close(close_code)
+        log.warning(
+            "[im-engine] channel ws closed: inst=%s type=%s ws closed code=%s "
+            "cause=%s retry_in=%.0fs: %s",
+            inst_id, channel_type, close_code, cause, backoff, exc)
+        self._record_reconnect("ws_transport")
+        return cause
 
     def _record_disconnect(self, cause: str) -> None:
         """Issue #870：不重连的断开仅记抖动归因。"""

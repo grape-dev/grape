@@ -379,6 +379,11 @@ def _start_obs_sample_task():
                     if _npc:
                         log.info(f"Plugin call logs cleaned: {_npc} rows")
                         _obs_loops.beat("plugin_audit_cleanup")
+                # Issue #3750：webhook 验签拒绝事实留存（14 天，模块内小时级限流）
+                from src.domains.insight.observability import webhook_rejects as _obs_rejects
+                _nrc = await asyncio.to_thread(_obs_rejects.maybe_cleanup)
+                if _nrc:
+                    log.info(f"Observability webhook rejects cleaned: {_nrc} rows")
                 _obs_loops.beat("obs_sample")
             except Exception as e:
                 _obs_loops.fail("obs_sample", e)
@@ -725,6 +730,15 @@ app.include_router(plugins_router)
 app.include_router(plugins_agent_router)  # Issue #1090 C2/D1-a：Agent 侧协商端点
 app.include_router(plugin_market_router)  # Issue #1079：上传/上架前 L0 强校验门禁
 
+# Issue #4081 结构性约束（必须保持）：`plugins_agent_router` 末位注册了一条命名空间兜底
+# `/api/plugins/agent/{rest:path}`（未登记路径/方法 → 501 NOT_IMPLEMENTED）。它只保证在
+# **本文件内**是最后一条，无法约束跨文件 include 顺序——任何在本行之后 include 的
+# router 若再定义 `/api/plugins/agent/*`，会先被兜底匹配返 501，而能力位仍报
+# available=true（端点被吞 + 能力位说谎）。新增该前缀路由请 include 在 plugins_agent
+# 之前，或合并进 `src/domains/mgmt/routes/plugins_agent.py`。
+# 看护：tests/mgmt/test_issue_4081_plugin_agent_contract.py::
+# TestNamespaceRegistrationOrder（断言命名空间内所有已登记 pair 的下标都早于兜底）。
+
 app.include_router(skills.router)
 
 app.include_router(search.router)
@@ -784,6 +798,7 @@ app.include_router(observability.router)
 
 app.include_router(patrol.router)
 
+# ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 from src.api.openapi import custom_openapi
 
 app.openapi = lambda: custom_openapi(app)
@@ -824,9 +839,6 @@ from src.api.middleware import install_request_middleware
 # /api/ping（Issue #596 P1：随 health_endpoints 安装，含 /health /healthz /readyz /health/realtime）
 from src.api.health_endpoints import install_health_endpoints
 
-# ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
-from src.api.openapi import custom_openapi
-
 # ===== Issue #596 P1：静态资源 + SPA 路由抽至 src/api/spa.py（A 进程复用）=====
 from src.api.spa import install_spa_routes
 
@@ -839,13 +851,17 @@ from src.api.exception_handlers import install_exception_handlers
 
 # ===== 三层健康检查（Issue #596 P1：抽至 src/api/health_endpoints.py）=====
 # /health /healthz /readyz /health/realtime /api/ping 已在上方 install_health_endpoints(app) 处注册。
-@app.get("/metrics")
-async def metrics():
-    """Prometheus 指标端点已禁用——无外部 Prometheus 消费，且无认证暴露 API 路由结构有安全风险。
-    如需启用，配置 METRICS_ADDR 并添加认证后取消下方注释。
-    """
-    from fastapi.responses import JSONResponse
-    return JSONResponse({"error": "metrics endpoint disabled"}, status_code=404)
+# Issue #3757：`server_common.attach_health(readiness=True)` 已注册 /metrics；这里再注册
+# 一份会同时污染 app.routes 与 schema 生成（Duplicate Operation ID metrics_metrics_get）。
+# 保留 stub 作为唯一兜底：仅在未被装配时注册（此前它是被先注册者完全遮蔽的死代码）。
+if not server_common.has_route(app, "/metrics"):
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus 指标端点已禁用——无外部 Prometheus 消费，且无认证暴露 API 路由结构有安全风险。
+        如需启用，配置 METRICS_ADDR 并添加认证后取消下方注释。
+        """
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "metrics endpoint disabled"}, status_code=404)
 
 def _check_and_sync_templates() -> bool:
     """检查 project-templates.json + examples/ 是否存在，缺失则自动从 grape-template 仓库拉取。

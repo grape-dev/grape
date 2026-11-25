@@ -510,6 +510,19 @@
             <span class="rtv-k" style="min-width: 70px">IP</span>
             {{ engineDetail.worker_ip || '—' }}
           </div>
+          <!-- Issue #4349：engine_uid 比对结果（DB 行 uid vs 引擎上报 uid，stale 标记） -->
+          <div class="rtv-kv">
+            <span class="rtv-k" style="min-width: 70px">{{ t('label.engine_uid') }}</span>
+            <span
+              v-if="engineDetail.engine_uid_status === 'stale'"
+              class="rtv-uid-stale"
+              :title="engineUidStaleTitle(engineDetail)"
+              >{{ engineDetail.engine_uid || '—' }} · {{ t('label.engine_uid_stale') }}</span
+            >
+            <span v-else :title="engineDetail.engine_uid || ''">{{
+              engineDetail.engine_uid || '—'
+            }}</span>
+          </div>
           <div class="rtv-kv">
             <span class="rtv-k" style="min-width: 70px">{{ t('label.scope_label') }}</span>
             {{ scopeLabel(engineDetail.scope) }}
@@ -1468,6 +1481,17 @@ const WARN_I18N = {
 function warnText(code) {
   const key = WARN_I18N[code]
   return key ? t(key) : t('credential.warn_unknown', { code: String(code) })
+}
+// Issue #4349：engine_uid 比对结果——引擎上报 uid 未命中平台记录（stale）时的
+// 提示文案：列出近期失效上报的 uid 与次数，指向重新注册回填。
+function engineUidStaleTitle(rt) {
+  const reps = rt && rt.engine_uid_stale_reports ? rt.engine_uid_stale_reports : []
+  const uids = reps
+    .map(function (r) {
+      return r.uid + ' ×' + r.count
+    })
+    .join(', ')
+  return t('label.engine_uid_stale_tip', { uids: uids })
 }
 function tc(key) {
   const v = G.I18N.t('common.' + key)
@@ -3622,6 +3646,11 @@ onBeforeUnmount(function () {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+/* Issue #4349：引擎详情弹窗的 engine_uid stale 标记（引擎上报 uid 失效） */
+.rtv-uid-stale {
+  color: var(--rtv-warn);
+  font-weight: 600;
 }
 /* Issue #865：模型行跨两列 + 值省略号（不与 .rtv-ellipsis 的弱化字色混用） */
 .rtv-kv-full {

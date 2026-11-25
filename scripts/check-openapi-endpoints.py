@@ -115,32 +115,94 @@ def check_route_registration_unique(app_routes) -> list:
     因此 check_operation_id_unique 抓不到这类重复（FastAPI 只在启动时打
     UserWarning）。这里直接扫 app.routes，把「同一路由块粘两次」的回归挡在 CI。
     HEAD/OPTIONS 是框架自动补的方法，跳过以免噪声。
+
+    Issue #3757：`app.routes` 在 fastapi>=0.140 里是 `_IncludedRouter` 惰性包装，
+    直接读 `r.path`/`r.methods` 什么都取不到——本 guard 曾因此对「整条路由面重复
+    挂载」完全静默（mgmt 进程 456 个重复 operationId 就是这么漏掉的）。必须复用
+    `openapi._iter_routes` 展开后再判定，展开失败即视为门禁失效（fail-closed）。
     """
+    from src.api.openapi import _iter_routes
+
     seen = {}
     errors = []
-    for r in app_routes or []:
-        path = getattr(r, "path", None)
-        methods = getattr(r, "methods", None)
-        if not path or not methods:
-            continue
-        # 只看契约面：SPA 静态兜底（/{path:path}、/account 等）为既有设计；
-        # include_in_schema=False 的路由（如 /api/ping 双注册）不进 OpenAPI 契约，
-        # 不属本 guard 的守护对象。
-        if not str(path).startswith("/api/"):
-            continue
-        if getattr(r, "include_in_schema", True) is False:
-            continue
-        for m in methods:
-            m = str(m).upper()
-            if m in ("HEAD", "OPTIONS"):
+    expanded = 0
+    for route in app_routes or []:
+        for r in _iter_routes(route):
+            expanded += 1
+            path = getattr(r, "path", None)
+            methods = getattr(r, "methods", None)
+            if not path or not methods:
                 continue
-            key = (m, path)
-            if key in seen:
+            # 只看契约面：SPA 静态兜底（/{path:path}、/account 等）为既有设计；
+            # include_in_schema=False 的路由（如 /api/ping 双注册）不进 OpenAPI 契约，
+            # 不属本 guard 的守护对象。
+            if not str(path).startswith("/api/"):
+                continue
+            if getattr(r, "include_in_schema", True) is False:
+                continue
+            for m in methods:
+                m = str(m).upper()
+                if m in ("HEAD", "OPTIONS"):
+                    continue
+                key = (m, path)
+                if key in seen:
+                    errors.append(
+                        f"duplicate route registration: {m} {path} "
+                        f"(registered by {type(r).__name__} after {seen[key]})")
+                else:
+                    seen[key] = type(r).__name__
+    # Issue #3757：一个 APIRoute 都展开不出来 = 展开逻辑与新 fastapi 失配，
+    # 门禁会静默放行（假绿）。宁可失败让人来修，也不要它「看起来通过」。
+    if not expanded and app_routes:
+        errors.append(
+            "route-uniqueness guard could not expand any APIRoute from app.routes "
+            f"({len(list(app_routes))} entries) — openapi._iter_routes is out of sync "
+            "with the installed fastapi version")
+    return errors
+
+
+def check_app_operation_ids_unique(app_routes, app_name: str = "") -> list:
+    """校验 app.routes（展开后）上显式声明的 operationId 未被重复（Issue #3757）。
+
+    渲染出的 `paths` 是字典，同一 method+path 的两次注册会被折叠，因此
+    `check_operation_id_unique(paths)` 对「整条路由面重复挂载」不敏感；这一层直接扫
+    路由注册表，抓的是 FastAPI schema 生成时打 `Duplicate Operation ID` 的那批重复
+    （mgmt 进程实测 456 个 id 各告警一次）。口径：契约面（/api/ + include_in_schema）。
+    """
+    from src.api.openapi import _iter_routes
+
+    seen = {}
+    errors = []
+    tag = f"[{app_name}] " if app_name else ""
+    for route in app_routes or []:
+        for r in _iter_routes(route):
+            if getattr(r, "include_in_schema", True) is False:
+                continue
+            path = getattr(r, "path", None)
+            if not path or not str(path).startswith("/api/"):
+                continue
+            oid = getattr(r, "operation_id", None)
+            if not oid:
+                continue  # 隐式 id 由 (method,path) 唯一性覆盖
+            if oid in seen:
                 errors.append(
-                    f"duplicate route registration: {m} {path} "
-                    f"(registered by {type(r).__name__} after {seen[key]})")
+                    f"{tag}duplicate operationId '{oid}' at {seen[oid]} and {path}")
             else:
-                seen[key] = type(r).__name__
+                seen[oid] = path
+    return errors
+
+
+def check_process_apps_route_registry(apps: dict) -> list:
+    """对每个进程入口的 app 跑注册表唯一性（method+path / operationId）（Issue #3757）。
+
+    Issue #3757 根因之一：守卫此前只扫 `src.api.main`（单进程入口），而重复注册发生在
+    `src/api/grape_server.py`（mgmt 进程，四进程部署的真实入口）——被扫的 app 干净、
+    未扫的 app 重复，门禁因此长期假绿。四进程入口必须逐个纳入。
+    """
+    errors = []
+    for name, app in (apps or {}).items():
+        errors.extend(check_route_registration_unique(getattr(app, "routes", []) or []))
+        errors.extend(check_app_operation_ids_unique(getattr(app, "routes", []) or [], name))
     return errors
 
 
@@ -284,8 +346,23 @@ def main(argv=None) -> int:
 
     errors = check_core_endpoints(current_paths)
     errors.extend(check_operation_id_unique(current_paths))
-    from src.api.main import app as _app
-    errors.extend(check_route_registration_unique(_app.routes))
+    # Issue #3757：注册表唯一性覆盖全部进程入口（此前只扫单进程 main，mgmt 进场的
+    # 456 个重复 operationId 因此长期假绿）。
+    import importlib
+
+    _apps = {}
+    for _name, _mod in (
+        ("main", "src.api.main"),
+        ("mgmt", "src.api.grape_server"),
+        ("event", "src.api.grape_event_server"),
+        ("worker", "src.api.grape_worker_server"),
+        ("insight", "src.api.grape_insight_server"),
+    ):
+        try:
+            _apps[_name] = importlib.import_module(_mod).app
+        except Exception as e:  # noqa: BLE001 - 入口导入失败即门禁失效，必须 fail-loud
+            errors.append(f"[{_name}] cannot import {_mod} for route-registry check: {e}")
+    errors.extend(check_process_apps_route_registry(_apps))
     # G6 守卫：库内契约副本（/static/openapi.json 下载源）不得与代码漂移
     errors.extend(check_checked_in_copy(current_paths, CONTRACT_COPY))
 

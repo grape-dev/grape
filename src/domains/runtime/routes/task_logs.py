@@ -129,7 +129,11 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
     import re as _re
     _m = _re.search(r"(\d+\.\d+\.\d+)", str(agent_version or ""))
     ver = _m.group(1) if _m else str(agent_version or "")
-    _prompt = prompt or ""
+    # Issue #3818：任务详情回显同源脱敏——autopilot prompt 里的预签名 query / 口令
+    # 不应通过执行详情接口再泄露一次；全文长度保留原始值，便于排查截断。
+    from src.domains.runtime.engine.payload_guard import redact as _payload_redact
+    _prompt_len = len(prompt or "")
+    _prompt = _payload_redact(prompt or "")
     _PROMPT_CAP = 8000
     return {
         "agent_name": agent_name or "",
@@ -138,7 +142,7 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
         "last_ip": last_ip or "",
         "owner_name": owner_name or "",
         "prompt": _prompt[:_PROMPT_CAP],
-        "prompt_full_length": len(_prompt),
+        "prompt_full_length": _prompt_len,
         "created_at": normalize_event_time(created_at),
         "started_at": normalize_event_time(started_at),
         "completed_at": normalize_event_time(completed_at),

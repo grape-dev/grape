@@ -278,6 +278,7 @@ def test_engine_offline_hour_backoff_and_circuit(monkeypatch):
     assert task_id == TID_OFFLINE and status == "failed"
     assert S.ERROR_ENGINE_OFFLINE in summary, summary
     assert "i3800-offline-uid" in summary, f"告警须带绑定引擎信息: {summary}"
+    assert "离线时长" in summary, f"Issue #3823：告警须带离线时长: {summary}"
     # 熔断后不再派发（剩余 tick 全被暂停闸门拦住）
     assert decisions.count("dispatch") == len(calls), (decisions, calls)
     assert "paused" in decisions, decisions[-5:]
@@ -421,6 +422,9 @@ def test_binding_stale_alerts_on_first_dispatch(monkeypatch):
     assert len(alerts) == 1, alerts
     assert S.ERROR_BINDING_STALE in alerts[0], alerts
     assert "重新绑定" in alerts[0] or "rebind" in alerts[0].lower(), alerts
+    # Issue #3823 复审 Optional：悬空绑定无在线时长 → 显式「未知」，不得伪报 0s
+    assert "未知" in alerts[0], f"悬空绑定须标注无在线时长: {alerts[0]}"
+    assert "离线时长 0s" not in alerts[0], f"不得让值守读成刚掉线: {alerts[0]}"
     consecutive, code, offline_since, backoff_until, paused, next_run = _task_row(TID_STALE)
     assert code == S.ERROR_BINDING_STALE and consecutive == 1, (code, consecutive)
     assert backoff_until, "BINDING_STALE 也要进退避通道"

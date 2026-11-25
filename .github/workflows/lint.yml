@@ -51,9 +51,41 @@ jobs:
         run: |
           python -m pytest -q tests/insight/test_issue_4248_faro_client_disconnect.py \
                             tests/api/test_issue_4248_api_error_classname.py
+      - name: Autopilot no-progress stall regression (issue #3741)
+        # PR #2160 复审 Required：本单新增用例此前只在本地跑过，CI 里没有任何白名单入口，
+        # 合入后「指纹判据 / 重派耗尽收口 / poll 超时终止 / 反向残留 sweep」四族静默回归不可见。
+        # 与 PR 描述「测试」段同一组命令，PR 上可直接复算用例数。
+        run: |
+          python -m pytest -q tests/runtime/test_issue_3741_no_progress_stall.py \
+                            tests/runtime/test_issue_2793_no_progress.py \
+                            tests/runtime/test_issue_3772_no_progress_scan.py
       - name: Worktree build failure regression (issue #3923)
         # Issue #3923 复审：建树失败必须阻断（凭据归因不可用时透传 git 原文），
         # 这条不变量此前只在本机跑，CI 里无覆盖。纳入本 job 后 PR 上可直接复算。
         run: |
           python -m pytest -q tests/runtime/test_issue_3923_worktree_head_and_attribution.py \
                             tests/runtime/test_repogit.py
+      - name: Hermes overlay profiles policy regression (issue #3904)
+        # PR #2208 复审 Required：本单新增用例此前只在本地跑过，未接入任何 CI job，
+        # 合入后「构建跳过清单与自检必需清单同源 / profiles 不再 100% 回退共享 home /
+        # usage_collect 回退感知与先 start 后回退的基线结算」四族回归无门禁。
+        run: |
+          python -m pytest -q tests/runtime/test_issue_3904_overlay_profiles_policy.py \
+                            tests/runtime/test_hermes_overlay_home_439.py \
+                            tests/runtime/test_issue_3822_hermes_fallback.py
+      - name: Feishu session lifecycle regression (issue #3735 / #3897)
+        # PR #2158 复审 Required：本单 8 例新增回归此前只在本地跑，未接入任何 CI
+        # 白名单——「装配层丢弃 (ctx, api) 对必须 close session」这条不变量在 CI 里
+        # 无覆盖，退回只 pop/clear 也不会变红（与 #4203/#4248/#3923 同一复审判据）。
+        run: |
+          python -m pytest -q tests/runtime/im/test_issue_3735_feishu_session_lifecycle.py \
+                            tests/runtime/im/test_issue_3897_feishu_endpoint_session.py
+      - name: Bounded db_lock wait / hold watchdog / external-io gate regression (issue #4295)
+        # PR #2205 第 2 轮复审 Required：本单 46 例新增回归此前只在本地跑过——`make lint`
+        # 只执行 AST 门禁、不跑用例，CI 里没有任何 pytest step 登记，于是「等锁封顶 →
+        # 503」「持有看门狗 + fork 复位」「派生通知任务不继承前台预算」「锁内无外部 IO」
+        # 四条不变量被改坏都不会变红（与 #4203/#4248/#3923/#2158 同一复审判据）。
+        # 与 PR 描述「测试」段同一组命令，PR 上可直接复算用例数。
+        run: |
+          python -m pytest -q tests/kernel/test_issue_4295_*.py \
+                            tests/api/test_issue_4295_*.py

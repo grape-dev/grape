@@ -52,12 +52,18 @@ loki.process "nginx_502" {
     }
   }
 
+  // Issue #4081：同一派生计数器同时覆盖插件代理命名空间。应用侧
+  // `grape_http_requests_total` 的 route 标签是**路由模板**（旧构建 GET 落 SPA
+  // catch-all -> route="/{path}"，POST 未匹配 -> route="unmatched"），旧构建的
+  // 404/405 永远不满足 `route=~"/api/plugins/agent/.*"`；只有这里的 `path` 标签是
+  // nginx 访问日志里的真实请求路径，能兜住未升级构建（GrapePluginAgentEndpointMissing
+  // 第二分支依赖它）。
   stage.match {
-    selector = "{job=\"nginx-access\"} |~ \"/api/runtime/\""
+    selector = "{job=\"nginx-access\"} |~ \"/api/(runtime|plugins/agent)/\""
     stage.metrics {
       metric.counter {
         name        = "nginx_upstream_requests_total"
-        description = "nginx requests to worker runtime control plane"
+        description = "nginx requests to worker runtime control plane and plugin-agent endpoints"
         match_all   = false
         action      = "inc"
       }

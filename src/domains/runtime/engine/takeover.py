@@ -1987,35 +1987,19 @@ def _a2a_dispatch_base(runtime_id: int = 0, exclude: set[str] | None = None) -> 
       ``runtime_id>0`` 同样交由 ``_a2a_internal_base`` 区分本机 worker（回环基址，
       扫描重选）与真远程 worker（仅校验回连基址、best-effort）。
     ``exclude`` 用于 405 后排除坏基址重选。
+
+    Issue #4345：候选编排已下沉 ``src.api.a2a_dispatch.resolve_a2a_dispatch_target``，
+    与人工「重派」共用同一解析器（单向依赖，避免两份实现再次漂移）；本函数保留为
+    返回 ``base`` 的兼容入口，探测原语（``_probe_dispatchable`` /
+    ``_a2a_internal_base`` / 进程级缓存）仍是本模块唯一实现。
     """
-    global _A2A_DISPATCH_BASE_CACHE
-    excluded = {(b or "").rstrip("/") for b in (exclude or set())}
     try:
-        from src.kernel.prompt_builder import (A2A_TRUSTED_BASE_SOURCES,
-                                               resolve_a2a_base_with_source)
-        base, source = resolve_a2a_base_with_source(int(runtime_id or 0))
-        base = (base or "").strip().rstrip("/")
-        if base and base not in excluded and source in A2A_TRUSTED_BASE_SOURCES:
-            return base
-        if int(runtime_id or 0) > 0:
-            # 远程 worker：server_url 回连基址在 _a2a_internal_base 内校验
-            return _a2a_internal_base(int(runtime_id or 0), exclude=excluded)
-        cached = (_A2A_DISPATCH_BASE_CACHE or "").rstrip("/")
-        if cached and cached not in excluded:
-            # 已双重校验过的基址优先于不可信任的回退，避免每次 finish 重复探活+405 warning
-            return cached
-        if base and base not in excluded:
-            ok, detail = _probe_dispatchable(base)
-            if ok:
-                _A2A_DISPATCH_BASE_CACHE = base
-                log.info(f"takeover: a2a dispatch base = {base} ({source}; {detail})")
-                return base
-            log.warning(f"takeover: skip a2a dispatch candidate {base} "
-                        f"(source={source}; {detail})")
-            excluded.add(base)
-    except Exception as _e:  # noqa: BLE001 — 解析失败必须回退，不能阻断派发
-        log.debug(f"takeover: resolve_a2a_base_with_source skipped: {_e}")
-    return _a2a_internal_base(int(runtime_id or 0), exclude=excluded)
+        from src.api.a2a_dispatch import resolve_a2a_dispatch_target
+        return resolve_a2a_dispatch_target(int(runtime_id or 0),
+                                           exclude=exclude)["base"]
+    except Exception as _e:  # noqa: BLE001 — 共享解析器异常仍须回退本机候选
+        log.debug(f"takeover: shared a2a resolver unavailable: {_e}")
+        return _a2a_internal_base(int(runtime_id or 0), exclude=exclude)
 
 
 def _dispatch_next(*, repo_key: str, issue_number: str, next_agent: str, context: str,
