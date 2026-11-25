@@ -13,9 +13,18 @@ import json
 import os
 import time
 import uuid
+from enum import IntEnum
 
 from src.kernel.config import WORKSPACE_DIR, log
 from src.kernel.issue_ident import native_issue_number
+
+
+class DispatchContextStatus(IntEnum):
+    """批次 context 读取的 HTTP 语义化结果（Issue #4352）。"""
+
+    OK = 200
+    FORBIDDEN = 403
+    NOT_FOUND = 404
 
 _SECTION_CAPS = {
     "l0": 8 * 1024,
@@ -243,49 +252,79 @@ def load_snapshot_files(snapshot_id: str) -> dict[str, str]:
     return files
 
 
-def build_dispatch_context_bundle(org_id: str, dispatch_id: str) -> dict:
-    """CLI/API 读取入口：返回批次 + 快照 manifest + 快照正文。"""
-    from src.domains.mgmt import org_dispatch as od
+def _dispatch_visible_org_ids(dispatch: dict, targets: list[dict]) -> list[str]:
+    """批次可见组织集合：dispatch 归属组织 + 各目标仓库（子 Issue）当前所属组织。
+
+    子 Issue 的 ``issue.org_id`` 来自 ``managed_repos.org_id``；仓库跨组织重绑定后，
+    子 Issue 正文内嵌的是新的组织，而批次仍记在下派时的组织下。两者都应能读取同一
+    批次快照，避免把「跨组织可见」误判为「资源不存在」。
+    """
+    orgs: list[str] = []
+    dispatch_org = str((dispatch or {}).get("org_id") or "")
+    if dispatch_org:
+        orgs.append(dispatch_org)
+    try:
+        from src.domains.mgmt.user.org_db import get_repo_org_id
+    except Exception:  # noqa: BLE001 - 解析失败仅按 dispatch 组织判定可见性
+        get_repo_org_id = None  # type: ignore[assignment]
+    for target in targets or []:
+        repo_key = str((target or {}).get("repo_key") or "")
+        if not repo_key or get_repo_org_id is None:
+            continue
+        try:
+            org_id = str(get_repo_org_id(repo_key) or "")
+        except Exception:  # noqa: BLE001 - 单仓解析失败不阻断其它目标
+            continue
+        if org_id and org_id not in orgs:
+            orgs.append(org_id)
+    return orgs
+
+
+def _load_dispatch_bundle(request_org_id: str, dispatch: dict, targets: list[dict],
+                          *, snapshot_org: str = "") -> dict:
+    """按 (快照归属组织, dispatch_id) 读取或重建批次快照，返回 CLI/API 出参。
+
+    ``request_org_id`` 仅用于回显调用组织；``snapshot_org`` 决定快照取数/重建的组织，
+    缺省取批次归属组织。
+    """
     from src.kernel.session_manager import db, db_lock
 
-    org_id = str(org_id or "")
-    dispatch_id = str(dispatch_id or "")
+    request_org_id = str(request_org_id or "")
+    dispatch_id = str((dispatch or {}).get("id") or "")
+    snapshot_org = str(snapshot_org or (dispatch or {}).get("org_id") or "")
     with db_lock:
         c = db.cursor()
         row = c.execute(
             "SELECT id FROM grape_t_org_context_snapshot WHERE org_id=? AND dispatch_id=? "
-            "ORDER BY created_at DESC, id DESC LIMIT 1", (org_id, dispatch_id)).fetchone()
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (snapshot_org, dispatch_id)).fetchone()
     snapshot_id = str(row[0] or "") if row else ""
-    with db_lock:
-        c = db.cursor()
-        d = od._get_dispatch_row(c, dispatch_id)
-        targets = od._get_target_rows(c, dispatch_id) if d else []
-    if not d or str(d.get("org_id") or "") != org_id:
-        return {}
     if not snapshot_id:
-        payload = dict(d)
+        payload = dict(dispatch)
         payload["targets_requested"] = [
             t.get("repo_key") for t in targets if t.get("repo_key")]
-        snapshot_id = build_org_snapshot(org_id, payload)
-    snap = get_snapshot(snapshot_id)
+        snapshot_id = build_org_snapshot(snapshot_org, payload)
+    snap = get_snapshot(snapshot_id) if snapshot_id else {}
     files = load_snapshot_files(snapshot_id) if snapshot_id else {}
     # 快照对执行侧是不可变口径；CLI 人工读取时叠加当前 L3 需求文件，
     # 让验收后能看到最新 acceptance，而不是下派瞬间的空文件。
     try:
         from src.domains.mgmt import org_context_repo as repo_mod
 
-        _prefix = f"org-context/demands/{native_issue_number(d.get('org_issue_number'))}/"
-        for _rel, _content in (repo_mod._render_files(org_id) or {}).items():
+        _prefix = f"org-context/demands/{native_issue_number(dispatch.get('org_issue_number'))}/"
+        for _rel, _content in (repo_mod._render_files(snapshot_org) or {}).items():
             if str(_rel).startswith(_prefix):
                 files[_rel] = _content
-    except Exception as _e:
+    except Exception as _e:  # noqa: BLE001 - 叠加失败时保留快照原文
         log.warning(f"overlay current demand files failed dispatch={dispatch_id}: {_e}")
     return {
-        "org_id": org_id,
+        "org_id": request_org_id,
+        "dispatch_org_id": str(dispatch.get("org_id") or ""),
+        "snapshot_org_id": snapshot_org,
         "dispatch_id": dispatch_id,
-        "org_issue_number": native_issue_number(d.get("org_issue_number")),
-        "status": d.get("status") or "",
-        "title": (d.get("plan_json") and _json_title(d.get("plan_json"))) or "",
+        "org_issue_number": native_issue_number(dispatch.get("org_issue_number")),
+        "status": dispatch.get("status") or "",
+        "title": (dispatch.get("plan_json") and _json_title(dispatch.get("plan_json"))) or "",
         "snapshot": snap,
         "files": files,
         "targets": [
@@ -299,6 +338,46 @@ def build_dispatch_context_bundle(org_id: str, dispatch_id: str) -> dict:
             for t in targets
         ],
     }
+
+
+def dispatch_context_read(org_id: str,
+                          dispatch_id: str) -> tuple[dict, DispatchContextStatus]:
+    """HTTP 语义化读取入口：返回 (bundle, status)。
+
+    - NOT_FOUND：dispatch 不存在（资源不存在）；
+    - FORBIDDEN：dispatch 存在，但调用组织既非批次归属组织、也非任一目标仓库所属组织
+      （跨组织不可见），不再混报 ``Organization not found``；
+    - OK：可见，返回批次 + 快照 manifest + 快照正文。
+    """
+    from src.domains.mgmt import org_dispatch as od
+    from src.kernel.session_manager import db, db_lock
+
+    org_id = str(org_id or "")
+    dispatch_id = str(dispatch_id or "")
+    with db_lock:
+        c = db.cursor()
+        d = od._get_dispatch_row(c, dispatch_id)
+        targets = od._get_target_rows(c, dispatch_id) if d else []
+    if not d:
+        return {}, DispatchContextStatus.NOT_FOUND
+    if org_id not in _dispatch_visible_org_ids(d, targets):
+        return {}, DispatchContextStatus.FORBIDDEN
+    bundle = _load_dispatch_bundle(org_id, d, targets)
+    # 批次归属组织已不可渲染（组织迁移/删除）时，回退到当前可见的请求组织重建快照，
+    # 保证子 Issue 内嵌 org_id 仍能取到非空上下文。
+    if not (bundle.get("files") or {}):
+        dispatch_org = str(d.get("org_id") or "")
+        if org_id and org_id != dispatch_org:
+            fallback = _load_dispatch_bundle(org_id, d, targets, snapshot_org=org_id)
+            if fallback.get("files") or {}:
+                bundle = fallback
+    return bundle, 200
+
+
+def build_dispatch_context_bundle(org_id: str, dispatch_id: str) -> dict:
+    """CLI/API 读取入口：返回批次 + 快照 manifest + 快照正文（不可见/不存在返回 {}）。"""
+    bundle, status = dispatch_context_read(org_id, dispatch_id)
+    return bundle if status == DispatchContextStatus.OK else {}
 
 
 def _json_title(raw: str) -> str:

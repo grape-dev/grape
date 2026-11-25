@@ -404,6 +404,12 @@ def get_org_id_by_repo_key(repo_key: str) -> str:
         return str(row[0]) if row and row[0] else ""
 
 
+def get_repo_org_id(repo_key: str) -> str:
+    """repo_key → 托管组织，统一 ``"0"`` 哨兵与未归属为空串（Issue #4352）。"""
+    org_id = get_org_id_by_repo_key(repo_key)
+    return "" if org_id in ("", "0") else org_id
+
+
 _PROVISION_FIELDS = frozenset({
     "org_repo_key",
     "org_repo_provider",

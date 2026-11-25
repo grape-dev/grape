@@ -487,6 +487,23 @@ def _resolve_target_scene(repo_key: str, requested_scene_id: str = "",
 # 建单（复用 create_task_via_issue）
 # ---------------------------------------------------------------------------
 
+def _child_issue_org_id(repo_key: str, dispatch_org_id: str = "") -> str:
+    """子 Issue 所属组织：目标仓库当前托管组织，缺失时回退 dispatch 归属组织。
+
+    子 Issue 落库的 ``issue.org_id`` 由 ``managed_repos.org_id`` 权威决定；正文内嵌的
+    ``org_id`` 必须与之一致，否则 ``grape org dispatches context`` 会因组织不匹配而
+    无法读取同一批次快照（Issue #4352）。
+    """
+    org_id = ""
+    try:
+        from src.domains.mgmt.user.org_db import get_repo_org_id
+
+        org_id = str(get_repo_org_id(repo_key) or "")
+    except Exception as exc:  # noqa: BLE001 - 解析失败回退 dispatch 组织，不阻断建单
+        log.warning(f"org-dispatch: resolve child org failed repo={repo_key}: {exc}")
+    return org_id or str(dispatch_org_id or "")
+
+
 def _child_description(org_repo_key: str, org_issue_number, org_title: str,
                        description: str, context: dict | str | None, *,
                        org_id: str = "", dispatch_id: str = "") -> str:
@@ -504,12 +521,16 @@ def _child_description(org_repo_key: str, org_issue_number, org_title: str,
             "",
             "## 组织上下文",
             "组织硬规则、组织简介/架构、目标仓库目录、需求 brief、下派计划和验收结论"
-            "已生成该批次上下文快照，并物化到工作区 `.org-context/`；需要完整内容时执行：",
+            "由服务端生成该批次上下文快照，并通常在任务工作区物化为 `.org-context/`"
+            "（该目录存在时优先读取其中的 `rules.md` / `architecture.md` / `repos/`）。",
+            "若工作区未生成 `.org-context/`，需要完整内容时执行：",
             "",
             "```bash",
             f'grape org dispatches context --org_id "{org_id}" '
             f"--dispatch_id {dispatch_id} --json-out",
             "```",
+            "",
+            "命令失败时记录返回的 `request_id`，并读取同批次兄弟仓库 Issue 评论作为替代取证。",
             "",
             "优先级：组织硬规则 > 本次任务明确要求 > 目标仓库目录规则 > "
             "目标仓库仓库级规则 > 组织通用规范 > 组织知识/历史经验。",
@@ -584,7 +605,9 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
         return _mark_target_failed(target["id"], "BOT_TOKEN_MISSING: 目标仓库 Bot Token 未配置")
 
     child_title = f"[Org #{native_issue_number(dispatch['org_issue_number'])}] {title}"
-    scope_md = _target_scope_md(str(dispatch.get("org_id") or ""), repo_key)
+    dispatch_org_id = str(dispatch.get("org_id") or "")
+    context_org_id = _child_issue_org_id(repo_key, dispatch_org_id)
+    scope_md = _target_scope_md(dispatch_org_id, repo_key)
     child_description = (description or "")
     if scope_md:
         child_description = child_description.rstrip() + "\n" + scope_md
@@ -594,7 +617,7 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
         "description": _child_description(
             dispatch["org_repo_key"], native_issue_number(dispatch["org_issue_number"]),
             org_title or title, child_description, context,
-            org_id=str(dispatch.get("org_id") or ""),
+            org_id=context_org_id,
             dispatch_id=str(dispatch.get("id") or "")),
         "assignee": "",
         "scene_id": scene_id,
