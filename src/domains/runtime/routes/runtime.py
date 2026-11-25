@@ -209,7 +209,7 @@ def _auth_credential(request: Request) -> int:
     1 小时累计 >60 次 → 短期封禁（封禁期内直接 429）。只计鉴权失败，成功注册/心跳不受影响。
     """
     token = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
-    ip = _client_ip(request)
+    ip = _auth_failure_key(request)
     # 短期封禁期内直接 429（不计数，避免封禁被持续重试无限续期）
     _banned = auth_failure_gate.check_banned(ip)
     if _banned:
@@ -255,7 +255,7 @@ def _require_credential_ctx(request: Request) -> CredentialContext:
     Issue #4347：鉴权失败同样计入 IP 失败预算（429/短期封禁），拒绝日志按 IP 聚合。
     """
     token = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
-    ip = _client_ip(request)
+    ip = _auth_failure_key(request)
     _banned = auth_failure_gate.check_banned(ip)
     if _banned:
         raise _auth_throttled_exc(_banned)
@@ -299,11 +299,39 @@ def _require_credential_ctx(request: Request) -> CredentialContext:
 
 
 def _client_ip(request: Request) -> str:
-    """解析来源 IP（经 nginx 反代优先 X-Forwarded-For；仅展示用，不入唯一键，见 multi-runtime-instance-design §3.2）。"""
+    """解析来源 IP（经 nginx 反代优先 X-Forwarded-For；仅展示用，**不可作安全/限流唯一键**）。"""
     xff = request.headers.get("X-Forwarded-For", "")
     if xff:
         return xff.split(",")[0].strip()
     return request.client.host if request.client else ""
+
+
+def _trusted_proxy_ips() -> set:
+    """可信反向代理白名单：env `TRUSTED_PROXY_IPS`（逗号分隔），缺省信任本机回环。
+
+    回环对端只可能是本机代理（远端无法伪造 TCP 源地址），因此作为安全默认；
+    nginx 与 worker 分容器/跨机部署时必须显式配置代理所在 IP。
+    """
+    raw = (os.environ.get("TRUSTED_PROXY_IPS") or "").strip()
+    if not raw:
+        return {"127.0.0.1", "::1"}
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
+
+def _auth_failure_key(request: Request) -> str:
+    """鉴权失败预算/封禁唯一键：默认 TCP 对端；仅可信代理才采信 X-Forwarded-For。
+
+    客户端可自带/轮换 `X-Forwarded-For`，直接采信会让攻击者绕过计数或伪造他人
+    IP 触发封禁（复用 `grape_auth._get_client_ip` 的 P2-1 范式）。部署侧 nginx
+    已改为覆盖式 `X-Forwarded-For $remote_addr`，可信代理处的值才代表真实来源。
+    """
+    peer = request.client.host if request.client else ""
+    trusted = _trusted_proxy_ips()
+    if peer and peer in trusted:
+        xff = (request.headers.get("X-Forwarded-For", "") or "").split(",")[0].strip()
+        if xff:
+            return xff
+    return peer
 
 
 # ===== Issue #4347：鉴权失败统一出口（IP 失败预算 + 按 IP 聚合日志）=====
@@ -327,7 +355,7 @@ def _reject_auth_failure(request: Request, ip: str, token: str, detail_401: dict
       Loki/Grafana 检索（`|= "runtime credential rejected"` 仍可命中摘要）。
     """
     endpoint = request.url.path
-    prefix = token[:10] or "none"
+    prefix = token[:10] if token.startswith("rta_") else "none"
     outcome = auth_failure_gate.record_failure(ip, prefix, endpoint)
     try:
         if outcome.log_line:
