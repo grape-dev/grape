@@ -9,6 +9,10 @@
 
 出参结构 = gitcode 平台实际结构（与技能 `gitcode-api-reference.md` 一致，见 docs/openapi/10-git-repos.md）。
 """
+import os
+import re
+import threading
+
 from src.kernel.user_ids import has_user_id
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -629,11 +633,103 @@ def _issue_write_url(owner: str, repo: str, number, p: str) -> str:
     return _vcs_url(owner, repo, f"/issues/{number}", None, p)
 
 
+_UPSTREAM_LOG_WINDOW_DEFAULT = 60.0
+#: 上游失败日志窗口聚合器（Issue #3759）：key = provider + 仓库 + 归一资源 + 错误码。
+#: 数字路径段归一为 `{n}`，使 issues/62 与 issues/63 落同一个 key —— 否则告警量
+#: 会随该仓库 issue 数线性增长（验收项明确要求不随 issue 数增长）。
+_UPSTREAM_LOG_DEDUPER: Any = None
+_UPSTREAM_LOG_DEDUPER_LOCK = threading.Lock()
+_REPO_PATH_RE = None
+
+
+def _upstream_log_window_seconds() -> float:
+    try:
+        return max(1.0, float(os.environ.get("GRAPE_UPSTREAM_LOG_WINDOW_SECONDS", "") or
+                              _UPSTREAM_LOG_WINDOW_DEFAULT))
+    except (TypeError, ValueError):
+        return _UPSTREAM_LOG_WINDOW_DEFAULT
+
+
+def _upstream_deduper():
+    """惰性构造窗口去重器（window 可配，便于线上调参与测试）。"""
+    global _UPSTREAM_LOG_DEDUPER, _REPO_PATH_RE
+    if _UPSTREAM_LOG_DEDUPER is None:
+        with _UPSTREAM_LOG_DEDUPER_LOCK:
+            if _UPSTREAM_LOG_DEDUPER is None:
+                from src.kernel.log_dedupe import WindowDeduper
+                _UPSTREAM_LOG_DEDUPER = WindowDeduper(_upstream_log_window_seconds())
+                _REPO_PATH_RE = re.compile(r"/repos/([^/]+)/([^/]+)")
+    return _UPSTREAM_LOG_DEDUPER
+
+
+def _upstream_log_key(provider: str, url: str, status_code: Any) -> str:
+    """日志去重 key：provider + 仓库 + 归一资源（数字段→{n}）+ 错误码。"""
+    global _REPO_PATH_RE
+    path = str(url or "").split("?", 1)[0]
+    norm = re.sub(r"/\d+(?=/|$)", "/{n}", path)
+    if _REPO_PATH_RE is None:
+        with _UPSTREAM_LOG_DEDUPER_LOCK:
+            if _REPO_PATH_RE is None:
+                _REPO_PATH_RE = re.compile(r"/repos/([^/]+)/([^/]+)")
+    m = _REPO_PATH_RE.search(norm)
+    if m:
+        scope = f"{m.group(1)}/{m.group(2)}"
+    else:
+        # gitlab 走 /projects/{urlencoded}：整段作为 scope，仍按资源+错误码聚合。
+        scope = norm.split("://")[-1] if "://" in norm else norm
+    return f"{provider}:{scope}:{status_code}"
+
+
+def _is_permanent_upstream_status(status_code: Any) -> bool:
+    """Issue #3759：4xx 除 429 视为永久失败（429 限流属可重试）。"""
+    try:
+        code = int(status_code)
+    except (TypeError, ValueError):
+        return False
+    return 400 <= code < 500 and code != 429
+
+
+def _log_upstream_failure(method: str, provider: str, url: str, status_code: Any,
+                          detail: Any, kind: str = "upstream error") -> None:
+    """上游失败日志（窗口聚合 + 永久失败处置建议）。
+
+    - 窗口内首条：完整上游 URL/响应体（排障需要）+ `permanent`/`hint` 结构字段；
+    - 窗口内后续：只计数（debug），不再刷 WARNING；
+    - 窗口滚动：先补一条上一窗口的汇总（`folded=N`），再输出新首条。
+    """
+    permanent = _is_permanent_upstream_status(status_code)
+    try:
+        key = _upstream_log_key(provider, url, status_code)
+        decision = _upstream_deduper().note(key)
+    except Exception:  # noqa: BLE001 - 降噪层故障不得影响上游调用语义
+        log.warning(f"Git repo API {method} {url} {kind}: {detail}")
+        return
+    if not decision.emit_full:
+        log.debug(f"Git repo API {method} {url} {kind} (deduped folded={decision.folded} key={key})")
+        return
+    if decision.folded:
+        log.warning(
+            f"Git repo API upstream error window summary key={key} folded={decision.folded} "
+            f"permanent={permanent} window={_upstream_log_window_seconds():.0f}s "
+            f"hint=disable subscription or rebind provider")
+    hint = ("disable subscription / rebind provider "
+            "(POST /api/repos/{owner}/{repo}/vcs-health/reset clears the breaker)"
+            if permanent else "")
+    log.warning(f"Git repo API {method} {url} {kind}: {detail} "
+                f"| permanent={permanent} dedupe_key={key} folded_in_window=0 hint={hint}")
+
+
 def _vcs_req(provider: str, method: str, url: str, token: str, body: dict | None = None):
     """按 provider 注册表分发原生 API 调用（新增 provider=加模块）。
 
     Issue #549/#558：上游 Git 平台返回 >=400 时透传真实状态码与完整 message
     （404 → 404，403 → 403…，不截断），502 仅保留给代理自身故障（连接失败/超时/非上游异常）。
+
+    Issue #3759：上游失败日志按「仓库 + 资源 + 错误码」窗口聚合（默认 60s）。孤儿仓库卡
+    （上游已删）此前每小时打 76 条同样 404 WARNING，每条带完整响应体，永不收敛；现在
+    窗口内只留首条完整响应 + 计数，并在 message 里写明处置建议。永久失败（4xx 除 429）
+    由 `issue_poll_breaker` 在仓储读路径上落仓库级熔断台账，本函数只负责分类与降噪，
+    不改对外 HTTP 状态码语义（#549/#558 契约保持）。
     """
     try:
         _mod = _provider_module(provider)
@@ -643,12 +739,12 @@ def _vcs_req(provider: str, method: str, url: str, token: str, body: dict | None
     except HTTPException:
         raise
     except UpstreamAPIError as e:
-        log.warning(f"Git repo API {method} {url} upstream error: {e}")
+        _log_upstream_failure(method, provider, url, e.status_code, str(e))
         msg = e.message or f"{provider} API 上游错误 ({e.status_code})"
         raise HTTPException(status_code=e.status_code,
                             detail={"code": e.status_code, "message": msg})
     except UpstreamTimeoutError as e:
-        log.warning(f"Git repo API {method} {url} upstream timeout: {e}")
+        _log_upstream_failure(method, provider, url, 504, str(e), kind="upstream timeout")
         if method != "GET":
             # 写超时（Issue #1940，#2084 移植）：落地状态不确定 → 504 + uncertain + request_id
             # + 回读核对指引；读超时维持 502（读操作落地态无副作用）。
@@ -1252,7 +1348,39 @@ def create_issue(owner: str, repo: str, body: IssueCreateBody, user: dict = Depe
 @router.get("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_get", summary="Get issue", description="Returns a single issue.")
 def get_issue(owner: str, repo: str, number: int | str, user: dict = Depends(get_current_user_or_api_key),
               p: str = Depends(_provider)):
-    resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p), _repo_token(owner, repo, user, p))
+    # Issue #3759：孤儿仓库卡（上游已确认不存在）在熔断期内直接返回同一 404 语义，
+    # 不再逐 issue 打上游（此前一小时 76 条 404 WARNING、永不收敛）。
+    from src.domains.runtime.vcs import issue_poll_breaker as _breaker
+    from src.kernel.repo_key import to_repo_key
+    _rk = to_repo_key(f"{owner}/{repo}", p)
+    try:
+        _blocked, _st = _breaker.blocked(_rk)
+    except Exception:  # noqa: BLE001 - 熔断层故障一律 fail-open（继续打上游，不改 404 语义）
+        _blocked, _st = False, {}
+    if _blocked:
+        raise HTTPException(status_code=404, detail={
+            "code": 404,
+            "message": f"仓库 {owner}/{repo} 在上游不存在（vcs_missing，熔断中），"
+                       f"Issue #{number} 无法读取；恢复上游或重绑 provider 后自动恢复",
+            "vcs_status": "vcs_missing",
+            "vcs_missing_since": _st.get("vcs_missing_since") or "",
+            "vcs_next_probe_at": _st.get("vcs_next_probe_at") or "",
+            "breaker": True,
+        })
+    try:
+        resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p), _repo_token(owner, repo, user, p))
+    except HTTPException as _exc:
+        if _breaker.is_permanent_status(_exc.status_code):
+            try:
+                _breaker.note_permanent_failure(_rk, _exc.status_code,
+                                                operation=f"issues/{number}")
+            except Exception:  # noqa: BLE001 - 台账写失败不得改变 404/403 契约
+                pass
+        raise
+    try:
+        _breaker.note_recovery(_rk, operation=f"issues/{number}")
+    except Exception:  # noqa: BLE001
+        pass
     # Issue #1005：回显的 milestone 同样补 id（供 QA 断言），state 归一与列表口径一致。
     return _normalize_issue_milestone(resp)
 

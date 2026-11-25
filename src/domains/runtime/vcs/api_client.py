@@ -22,6 +22,35 @@ from src.domains.runtime.vcs.redact import redact_text, redact_url
 # 先脱敏后截断：截断只会切到已掩码的 ***，不会把凭据切成半截片段。
 _LOG_BODY_MAX = 500
 
+# ── Issue #3759：上游 4xx 失败日志窗口聚合 ────────────────────────────────────
+# key = 仓库 + 归一资源 + 错误码（数字段归一为 {n}，issues/62 与 issues/63 同 key）。
+# 目的：孤儿仓库卡的 404 不再因 issue 数线性放大 WARNING；窗口滚动时补一条折叠计数。
+_ERROR_LOG_DEDUPER = None
+_ERROR_LOG_LOCK = threading.Lock()
+
+
+def _error_log_key(url: str, status_code) -> str:
+    path = str(url or "").split("?", 1)[0]
+    norm = re.sub(r"/\d+(?=/|$)", "/{n}", path)
+    m = re.search(r"/(?:repos|projects)/([^/]+)(?:/([^/]+))?", norm)
+    scope = "/".join(g for g in (m.group(1), m.group(2)) if g) if m else norm
+    return f"{scope}:{status_code}"
+
+
+def _error_log_deduper():
+    global _ERROR_LOG_DEDUPER
+    if _ERROR_LOG_DEDUPER is None:
+        with _ERROR_LOG_LOCK:
+            if _ERROR_LOG_DEDUPER is None:
+                from src.kernel.log_dedupe import WindowDeduper
+                try:
+                    _win = max(1.0, float(os.environ.get(
+                        "GRAPE_UPSTREAM_LOG_WINDOW_SECONDS", "") or 60.0))
+                except (TypeError, ValueError):
+                    _win = 60.0
+                _ERROR_LOG_DEDUPER = WindowDeduper(_win)
+    return _ERROR_LOG_DEDUPER
+
 
 # ── 建单幂等：open 标题索引缓存（Issue #3250）────────────────────────────────
 # 非 github 平台没有标题过滤参数，只能 `state=open&per_page=50&page=N` 全量翻页：
@@ -944,18 +973,18 @@ class VcsApiClient:
         return self._request("GET", path)
 
 
-    def get_repo_info(self) -> dict:
+    def get_repo_info(self, timeout: int = 30) -> dict:
         """获取仓库信息。"""
         return self._request("GET", self._generic_path(
-            f"/repos/{self.owner}/{self.repo}", ""))
+            f"/repos/{self.owner}/{self.repo}", ""), timeout=timeout)
 
-    def repo_exists(self) -> bool:
+    def repo_exists(self, timeout: int = 30) -> bool:
         """探测仓库是否存在（Issue #340 代码仓删除感知）。
 
         404 → False（已删除）；200 → True；其他错误（403/网络）→ True（不误判，
         交由探活轮询/webhook 双通道兜底）。
         """
-        info = self.get_repo_info()
+        info = self.get_repo_info(timeout=timeout)
         if isinstance(info, dict) and str(info.get("error", "")).strip() == "HTTP 404":
             return False
         return True
@@ -1112,8 +1141,21 @@ class VcsApiClient:
                     err_body = e.read().decode()
                 except Exception:
                     pass
-                log.warning(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code}: "
-                            f"{redact_text(err_body)[:_LOG_BODY_MAX]}")
+                # Issue #3759：上游 4xx 在此同样逐次刷 WARNING（孤儿仓库卡 404 轮询的
+                # 另一半噪声源）。按「仓库 + 资源 + 错误码」窗口聚合，窗口内只留首条。
+                try:
+                    _dec = _error_log_deduper().note(
+                        _error_log_key(url, e.code))
+                except Exception:  # noqa: BLE001
+                    _dec = None
+                if _dec is None or _dec.emit_full:
+                    log.warning(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code}: "
+                                f"{redact_text(err_body)[:_LOG_BODY_MAX]}"
+                                + (f" | folded_prev_window={_dec.folded}" if _dec and _dec.folded
+                                   else ""))
+                else:
+                    log.debug(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code} "
+                              f"(deduped folded={_dec.folded})")
                 if _span is not None:
                     _span.set_attribute("http.status_code", e.code)
                     _span.set_attribute("vcs.result", "http_error")
