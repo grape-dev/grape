@@ -29,8 +29,7 @@ CACHE_VER = {
     'index.html': ('100', '53'),
     'admin.html': ('20261125-6', '20261114-23'),
     'register.html': ('77', '45'),
-    'forgot.html': ('77', '45'),
-}
+    'forgot.html': ('77', '45'),}
 
 # 各页面 cacheVer 的取法（三份 auth 页是内联 IIFE，admin 走 I18N.init）
 PAGE_PATTERN = {
