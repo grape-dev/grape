@@ -148,7 +148,7 @@ def test_s7b_adapter_task_user_id_wins(monkeypatch):
     """Issuer 的 user_id 直接生效，不再依赖 VCS 登录名查账号。"""
     calls = _patch_accounts(monkeypatch, {"alice": UID})
     monkeypatch.setenv("GRAPE_DISPATCH_USER_ID", "on")
-    assert rt_adapter.identity_for_actor("miumiu_020523", "", task_user_id=UID) == (UID, "task")
+    assert rt_adapter.identity_for_actor("test-user", "", task_user_id=UID) == (UID, "task")
     assert calls["n"] == 0
 
 
@@ -178,7 +178,7 @@ def test_s9c_issue_owner_identity_wins(monkeypatch):
     """Issue 创建人的 Grape 身份优先于 VCS 登录名（组织下派 403 回归）。"""
     monkeypatch.setattr(event_pipeline, "_get_issue_owner_id", lambda rk, num: UID)
     monkeypatch.setattr(event_pipeline, "resolve_actor_account",
-                        lambda evt, rk="": "miumiu_020523")
+                        lambda evt, rk="": "test-user")
     seen = {}
 
     def _identity(account, actor, task_user_id=""):
@@ -187,14 +187,14 @@ def test_s9c_issue_owner_identity_wins(monkeypatch):
 
     monkeypatch.setattr(rt_adapter, "identity_for_actor", _identity)
     evt = {"type": "issue_opened", "issue_id": "#2", "payload": {"issue_number": "2"}}
-    assert event_pipeline._dispatch_ident(evt, "gitcode:o/r") == (UID, "task", "miumiu_020523")
+    assert event_pipeline._dispatch_ident(evt, "gitcode:o/r") == (UID, "task", "test-user")
     assert seen["task_user_id"] == UID
 
 
 def test_s9d_scene_user_id_prefers_issue_owner(monkeypatch):
     """组织/普通流水线入队的 scene_user_id 优先使用 Issue 创建人 UUID。"""
     monkeypatch.setattr(event_pipeline, "_get_issue_owner_id", lambda rk, num: UID)
-    assert event_pipeline._scene_user_id("gitcode:o/r", "#4", "miumiu_020523") == UID
+    assert event_pipeline._scene_user_id("gitcode:o/r", "#4", "test-user") == UID
 
 
 def test_s9e_scene_user_id_falls_back_to_legacy_lookup(monkeypatch):
@@ -203,7 +203,7 @@ def test_s9e_scene_user_id_falls_back_to_legacy_lookup(monkeypatch):
 
     monkeypatch.setattr(engine_select, "_repo_user_id",
                         lambda rk, issue_creator="": 7)
-    assert event_pipeline._scene_user_id("gitcode:o/r", "#4", "miumiu_020523") == 7
+    assert event_pipeline._scene_user_id("gitcode:o/r", "#4", "test-user") == 7
 
 
 def test_s9f_scene_uid_sentinel_zero(monkeypatch):

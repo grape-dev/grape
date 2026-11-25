@@ -25,6 +25,12 @@ from src.kernel.repo_key import from_repo_key, parse_repo_key, to_repo_key
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime import public as runtime_public
 from src.domains.mgmt import public as mgmt_public
+from src.domains.mgmt.org_repo_map_present import ROLE_MAX_CHARS
+
+# <undecided: 下派提示词裁剪容量，沿用历史实现；待下派提示词回归基线后确认>
+DISPATCH_CORE_MAX = 5
+DISPATCH_OWNS_MAX = 5
+DISPATCH_NOT_OWNS_MAX = 6
 
 # dispatch 状态机
 DISPATCH_IN_FLIGHT = ("dispatching", "running", "aggregating")
@@ -532,18 +538,18 @@ def _target_scope_md(org_id: str, repo_key: str) -> str:
     core = [str(x.get("name") or "").strip() for x in (m.get("core_functions") or [])
             if isinstance(x, dict) and str(x.get("name") or "").strip()]
     if core:
-        lines.append("- 核心功能：" + "、".join(core[:5]))
+        lines.append("- 核心功能：" + "、".join(core[:DISPATCH_CORE_MAX]))
     responsibilities = m.get("core_responsibilities") or {}
     owns = [str(x) for x in (responsibilities.get("owns") or []) if str(x).strip()]
     not_owns = [str(x) for x in (responsibilities.get("not_owns")
                                  or m.get("not_owns") or []) if str(x).strip()]
     role = str(responsibilities.get("role") or "").strip()
     if owns:
-        lines.append("- 负责：" + "、".join(owns[:5]))
+        lines.append("- 负责：" + "、".join(owns[:DISPATCH_OWNS_MAX]))
     if not_owns:
-        lines.append("- 不负责：" + "、".join(not_owns[:6]))
+        lines.append("- 不负责：" + "、".join(not_owns[:DISPATCH_NOT_OWNS_MAX]))
     if role:
-        lines.append("- 组织角色：" + role[:300])
+        lines.append("- 组织角色：" + role[:ROLE_MAX_CHARS])
     lines.append("- 只改本仓职责内的部分；跨仓依赖通过组织上下文协调，不要越界修改其他仓库。")
     return "\n".join(lines)
 

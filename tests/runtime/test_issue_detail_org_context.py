@@ -25,10 +25,10 @@ def test_assemble_issue_exposes_repo_and_org_context():
     }
 
     out = _assemble_issue(
-        "gitcode:miumiu_020523/grape-test-team", "7", stage_map, {}, {}, {}
+        "gitcode:test-org/grape-test-team", "7", stage_map, {}, {}, {}
     )
 
-    assert out["repo_key"] == "gitcode:miumiu_020523/grape-test-team"
+    assert out["repo_key"] == "gitcode:test-org/grape-test-team"
     assert out["org_id"] == "org-uuid-7"
     assert out["number"] == 7
 
