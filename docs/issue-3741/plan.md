@@ -26,13 +26,23 @@
 - 误杀：判据只用「连续相同指纹」，不含时长；`no_progress_repeat_steps=0` 单独关闭指纹判据
   （只保留 #2793 活跃度判据），`no_progress_repeat_window_sec` 可显式收窄/放宽参与窗口。
 - 整体回滚：`no_progress_enabled=false`（任务 env > per_skill > per_repo > 顶层配置 > 进程 env）
-  只留诊断、不动任务，**并同时关闭本单新增的两条终止活跃任务路径**——poll 超时收口
-  （`_poll_dispatched_completion` 超时分支）与反向残留 sweep（`_reap_terminal_exec_running_tasks`）
-  都先过 `_no_progress_termination_enabled` 门禁，关闭时只写 exec failed / 日志。
+  只留诊断、不动任务，**并同时关闭本单新增的 poll 超时收口**
+  （`_poll_dispatched_completion` 超时分支）**与 failed exec 的反向回收**
+  （`_reap_terminal_exec_running_tasks` 的 failed 分支）——两者先过
+  `_no_progress_termination_enabled` 门禁，关闭时只写 exec failed / 日志。
+  用户取消（cancelled）的传播不受该开关约束：「exec 已取消但任务仍活跃」本身就是
+  本单要治的残留形态。
 - `no_progress_retries=0` = 不重派、命中即收口 `failed(reason=no_progress)`（不是「只诊断」；
   「只诊断」由 `no_progress_enabled=false` 承担），文档与实现同口径。
 - 收口竞争：所有终止写入都带 `started_at=?` 乐观条件（`update_task_status(expect_started_at=...)`），
   rowcount=0 即放弃；`_terminate_stuck_agent_task` 与 `_finalize_no_progress` 均按此口径收口，
   重派复位 `started_at` 后不会误杀新一轮执行。
-- 反向 sweep 误伤：仅匹配 `agent_task_id` 非空、exec 已终态且任务仍活跃的行，并留 60s 宽限；
-  失败指标带 JOIN 出的 `runtime_id`（写 0 会丢失引擎归因）。
+- 反向 sweep 误伤（PR #2160 复审 Required）：`agent_task_id` 与 `autopilot_executions`
+  是 1:N（重派回炉会把同一个 task 重新 claim），因此 ①只取该任务**最新**一条 exec
+  （`e.id = (SELECT MAX(id) ... WHERE agent_task_id = e.agent_task_id)`）；
+  ②`queued` 且 `started_at` 为空（已回炉未 claim）从活跃集排除；③用
+  `_exec_and_task_same_round()` 按时间区间判定 exec 与任务当前执行同期
+  （`agent_tasks.started_at` 是 claim 时刻、`exec.started_at` 是派发时刻，两者不做相等比较，
+  5s 容差只吸收落库间隔），并留 60s 宽限；失败指标带 JOIN 出的 `runtime_id`。
+- poll 超时同轮判据（同上复审）：轮询期间记住首次观察到的任务 `started_at`，超时时
+  与当前值比较——不一致说明任务已被回炉重派，只写 exec failed、不终止新一轮执行。

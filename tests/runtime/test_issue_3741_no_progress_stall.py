@@ -188,6 +188,15 @@ class TestRepeatStepsConfig:
         assert tt.no_progress_repeat_steps(t, cfg={"no_progress_repeat_steps": -3}) == 8
         assert tt.no_progress_repeat_steps(t, cfg={"no_progress_repeat_steps": "bad"}) == 8
 
+    def test_one_falls_back_to_default(self):
+        # PR #2160 复审 Nit：1 低于判据侧最小值 2，配置它等于静默关闭指纹判据，
+        # 因此按非法值回退默认（8），配置与生效保持一致。
+        t = {"skill": "s", "repo_key": "r"}
+        assert tt.no_progress_repeat_steps(t, cfg={"no_progress_repeat_steps": 1}) == 8
+        t_env = {"skill": "s", "repo_key": "r",
+                 "env_extra": json.dumps({"RUNTIME_NO_PROGRESS_REPEAT_STEPS": "1"})}
+        assert tt.no_progress_repeat_steps(t_env, cfg={"no_progress_repeat_steps": 5}) == 5
+
 
 # ── 指纹判据 ───────────────────────────────────────────────────
 
@@ -381,6 +390,52 @@ class TestReverseZombieExec:
         scheduler._reap_terminal_exec_running_tasks()
         assert _task_row(tid)[0] == "cancelled"
 
+    def test_queued_unclaimed_task_not_reaped(self):
+        # PR #2160 复审 Required ④：queued + started_at=NULL（已回炉未 claim）不属于该 exec
+        # 的任何一轮执行，旧 failed exec 不得把它收口。
+        tid, seq, eid = "t_i3741_rev_queued", SEQ_BASE + 34, SEQ_BASE + 34
+        _seed_runtime(busy=1)
+        _seed_task(tid, seq, status="queued", started_secs_ago=900)
+        with db_lock:
+            db.cursor().execute("UPDATE agent_tasks SET started_at=NULL WHERE id=?", (tid,))
+            db.commit()
+        _seed_exec(eid, tid, status="failed", started_secs_ago=900, completed_secs_ago=600)
+
+        assert scheduler._reap_terminal_exec_running_tasks() == 0
+        row = _task_row(tid)
+        assert row[0] == "queued"
+        assert "TERMINAL_EXEC_RUNNING_TASK" not in _codes(row[2])
+        assert _busy() == 1
+
+    def test_reclaimed_task_not_reaped_by_old_failed_exec(self):
+        # 同一 task 被重新 claim（started_at 变成新值、晚于旧 exec 终态），旧 failed exec
+        # 的终态不得把新一轮执行误收口。
+        tid, seq, eid = "t_i3741_rev_reclaim", SEQ_BASE + 35, SEQ_BASE + 35
+        _seed_runtime(busy=1)
+        _seed_task(tid, seq, started_secs_ago=10)                  # 新一轮 claim
+        _seed_exec(eid, tid, status="failed", started_secs_ago=900, completed_secs_ago=600)
+
+        assert scheduler._reap_terminal_exec_running_tasks() == 0
+        row = _task_row(tid)
+        assert row[0] == "running"
+        assert "TERMINAL_EXEC_RUNNING_TASK" not in _codes(row[2])
+        assert _busy() == 1
+
+    def test_old_failed_exec_ignored_when_task_has_newer_exec(self):
+        # 1:N 关联：只取该任务最新 exec。旧 exec 已 failed，但新 exec 仍 running，
+        # 旧终态不得终止任务（区别于上例的「无新 exec」形态）。
+        tid, seq = "t_i3741_rev_newer", SEQ_BASE + 36
+        old_eid, new_eid = SEQ_BASE + 36, SEQ_BASE + 37
+        _seed_runtime(busy=1)
+        _seed_task(tid, seq, started_secs_ago=10)
+        _seed_exec(old_eid, tid, status="failed", started_secs_ago=900, completed_secs_ago=600)
+        _seed_exec(new_eid, tid, status="running", started_secs_ago=10)
+
+        assert scheduler._reap_terminal_exec_running_tasks() == 0
+        row = _task_row(tid)
+        assert row[0] == "running"
+        assert "TERMINAL_EXEC_RUNNING_TASK" not in _codes(row[2])
+
     def test_grace_period_and_terminal_task_untouched(self):
         tid1, seq1, eid1 = "t_i3741_rev_young", SEQ_BASE + 32, SEQ_BASE + 32
         _seed_runtime(busy=1)
@@ -493,8 +548,10 @@ class TestRetriesZeroSemantics:
         exhaust = _diag(row[2], "NO_PROGRESS_EXHAUSTED")
         final = _diag(row[2], "NO_PROGRESS_FAILED")
         assert exhaust is not None and final is not None
-        # 两条诊断不得互相矛盾：EXHAUSTED 不能再声称「交给原失败路径」
-        assert "finalized as failed" in exhaust["note"]
+        # 两条诊断不得互相矛盾：EXHAUSTED 是「准备收口」的中性意图记录，
+        # 不得预先写死「已 finalized」（finalize 可能因执行已被取代而返回 False）
+        assert "finalizing as failed" in exhaust["note"]
+        assert "task finalized as failed" not in exhaust["note"]
         assert "original failure path" not in exhaust["note"]
         assert final["reason"] == "repeated_step"
 
@@ -532,6 +589,19 @@ class TestTerminationGates:
         assert row[0] == "running"
         assert "TERMINAL_EXEC_RUNNING_TASK" not in _codes(row[2])
         assert _busy() == 1
+
+    def test_reverse_sweep_cancelled_propagates_when_disabled(self):
+        # PR #2160 复审 Nit：用户取消（cancelled）的传播不受 no_progress_enabled 约束——
+        # 「exec 已取消但任务仍活跃」正是本单要治的残留，止血开关不应把它留下。
+        tid, seq, eid = "t_i3741_gate_cancel", SEQ_BASE + 52, SEQ_BASE + 52
+        _seed_runtime(busy=1)
+        self._disabled_task(tid, seq, started_secs_ago=900)
+        _seed_exec(eid, tid, status="cancelled", started_secs_ago=900, completed_secs_ago=600)
+
+        assert scheduler._reap_terminal_exec_running_tasks() == 1
+        row = _task_row(tid)
+        assert row[0] == "cancelled"
+        assert _busy() == 0
 
 
 # ── PR #2160 复审 ⑤：started_at 乐观条件 / 指标归因 ─────────────

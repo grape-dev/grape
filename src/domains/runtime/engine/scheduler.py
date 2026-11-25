@@ -2062,6 +2062,12 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
     """
     import time as _time
     _start = _time.time()
+    # PR #2160 复审 Required：记住本轮轮询期间首次观察到的任务执行（started_at）。
+    # agent_tasks.started_at 是 claim 时刻、exec.started_at 是派发时刻，两者本就不同值，
+    # 不能做相等比较；改用「轮询内同一执行」判据——超时时任务当前 started_at 必须仍是
+    # 轮询期间看到的那个值，否则说明任务已被 `_requeue_no_progress` 回炉并重新 claim，
+    # 新一轮执行不得被旧 exec 的超时终止误杀。
+    _pinned_started_at = None
     while _time.time() - _start < timeout:
         await asyncio.sleep(poll_interval)
         try:
@@ -2079,6 +2085,15 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
                     _atid, _started, _created = _erow
                     # Issue #1546：优先按 agent_task_id 直连，历史行受约束兜底；无命中跳过
                     row = _get_exec_agent_task(c, exec_id, _atid, _started, _created)
+                    if row and _pinned_started_at is None:
+                        try:
+                            _pin = c.execute(
+                                "SELECT started_at FROM agent_tasks WHERE id=?",
+                                (row[0],)).fetchone()
+                        except Exception:
+                            _pin = None
+                        if _pin and _pin[0]:
+                            _pinned_started_at = str(_pin[0])
             if not row:
                 continue
             _at_status = row[1] or ""
@@ -2146,6 +2161,7 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
     # 超时：Issue #3741——先把仍活跃的 agent_task 收口并释放引擎槽位，再写 exec failed。
     # 旧实现只写 exec failed，任务仍 running → 独占引擎被空转任务长期占用（报告 1.5h）。
     _stuck_task_id = None
+    _expected_started_at = ""
     try:
         with _rt_cursor_for("runtime") as c:
             _erow = c.execute(
@@ -2154,7 +2170,27 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
             if _erow:
                 _row = _get_exec_agent_task(c, exec_id, _erow[0], _erow[1], _erow[2])
                 if _row and (_row[1] or "") in _STUCK_ACTIVE_STATUSES:
-                    _stuck_task_id = _row[0]
+                    try:
+                        _cur = c.execute(
+                            "SELECT started_at FROM agent_tasks WHERE id=?",
+                            (_row[0],)).fetchone()
+                    except Exception:
+                        _cur = None
+                    _cur_started = str(_cur[0]) if _cur and _cur[0] else ""
+                    # 同轮判据（PR #2160 复审 Required）：
+                    #   ① queued/未 claim（started_at 空）不属于本 exec 的执行；
+                    #   ② 轮询期间曾观察到的 started_at 与当前不一致 → 任务已被回炉重派，
+                    #      新一轮由它自己的 exec/巡检负责，旧 exec 只写 failed 不终止任务。
+                    if not _cur_started:
+                        log.info(f"Autopilot poll exec {exec_id}: task {_row[0]} has no "
+                                 f"started_at (not claimed by this exec), skip terminate")
+                    elif _pinned_started_at and _cur_started != _pinned_started_at:
+                        log.info(f"Autopilot poll exec {exec_id}: task {_row[0]} re-claimed "
+                                 f"(started_at {_pinned_started_at} -> {_cur_started}), "
+                                 f"skip terminate")
+                    else:
+                        _stuck_task_id = _row[0]
+                        _expected_started_at = _cur_started
     except Exception as e:
         log.warning(f"Autopilot poll exec {exec_id}: timeout task lookup failed: {e}")
     if _stuck_task_id and not _task_no_progress_gate(_stuck_task_id):
@@ -2167,7 +2203,8 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
         try:
             if _terminate_stuck_agent_task(
                     _stuck_task_id, f"autopilot poll timeout {timeout}s",
-                    error_code="WORKER_TIMEOUT_TERMINATED"):
+                    error_code="WORKER_TIMEOUT_TERMINATED",
+                    expected_started_at=_expected_started_at):
                 log.warning(f"Autopilot poll exec {exec_id}: terminated stuck task "
                             f"{_stuck_task_id} and released its engine slot")
         except Exception as e:
@@ -2665,6 +2702,42 @@ TERMINAL_EXEC_REVERSE_GRACE_SECONDS = int(
 # 仍处于「可继续执行/等待上报」的任务状态——这些状态下才会被终止。
 _STUCK_ACTIVE_STATUSES = ("queued", "dispatched", "running", "pending_self_report")
 
+# Issue #3741（PR #2160 复审 Required）：判定「exec 与任务当前执行是否同一轮」的时间容差。
+# agent_tasks.started_at 是 claim 时刻、autopilot_executions.started_at 是派发时刻，
+# 同一轮两者本就相差数秒且不相等；容差只用来吸收这两个时钟的落库间隔，不用于放宽
+# 「重派后新执行」的识别（重派/重新 claim 相隔至少一个 no_progress 阈值，远大于 5s）。
+_ROUND_CLOCK_TOLERANCE_SECONDS = 5.0
+
+
+def _exec_and_task_same_round(exec_started_at, exec_terminal_at, task_started_at) -> bool:
+    """Issue #3741：exec 与其关联任务的「当前执行」是否属于同一轮。
+
+    `agent_task_id` 与 `autopilot_executions` 是 1:N：`_requeue_no_progress` 把同一个 task
+    置 queued/started_at=NULL 后会被重新 claim，旧 exec 的终态不能用来终止新一轮执行。
+    判据（时间区间包含，而非相等——两者时间戳语义不同，见上方常量注释）：
+
+    - `task_started_at` 为空：queued/尚未 claim → 无本轮执行身份，返回 False；
+    - 任务 claim 时刻早于 exec 派发时刻（超出容差）→ 属于更早的执行，返回 False；
+    - 任务 claim 时刻晚于 exec 终态时刻（超出容差）→ 旧 exec 结束后才开始的重新 claim，
+      属于新一轮，返回 False；
+    - 其余（落在 [exec.started_at, exec.terminal_at] 内）→ 同一轮，返回 True。
+
+    时间不可解析时保守返回 False（宁可下一轮再判，也不误杀）。
+    """
+    _task = _parse_iso_aware(task_started_at)
+    if _task is None:
+        return False
+    _begin = _parse_iso_aware(exec_started_at)
+    if _begin is None:
+        return False
+    _tol = timedelta(seconds=_ROUND_CLOCK_TOLERANCE_SECONDS)
+    if _task < _begin - _tol:
+        return False
+    _end = _parse_iso_aware(exec_terminal_at)
+    if _end is not None and _task > _end + _tol:
+        return False
+    return True
+
 
 def _terminate_stuck_agent_task(task_id, reason: str, *, status: str = "failed",
                                 error_code: str = "", cascade_trigger: str = "sweeper",
@@ -3019,8 +3092,11 @@ def _sweep_no_progress_tasks(now_epoch=None) -> int:
                         "threshold": threshold,
                         "requeues": len(prior),
                         "limit": limit,
+                        # PR #2160 复审 Nit：这里只是「准备收口」的意图记录，finalize 可能
+                        # 因执行已被替换而返回 False（见 `_finalize_no_progress` 乐观条件）；
+                        # note 必须中性，不得预先写死「已 finalized」与事实相反。
                         "note": "no-progress requeue limit reached; no further requeue, "
-                                "task finalized as failed(reason=no_progress)"})
+                                "finalizing as failed(reason=no_progress)"})
                 except Exception as _ae:
                     log.warning(f"no_progress: exhausted diagnostic failed for {tid}: {_ae}")
             # Issue #3741：重派上限耗尽后不再「留给原失败路径」——原路径要等 3600s 超时，
@@ -3233,14 +3309,22 @@ def _reap_terminal_exec_running_tasks() -> int:
     try:
         with _rt_cursor_for("runtime") as c:
             # JOIN 活跃任务做预过滤：避免 LIMIT 被大量正常终态 exec 占满而饿死老残留。
+            # PR #2160 复审 Required：一个 agent_task_id 可对应多条 exec（重派/重新 claim），
+            # 只取该任务**最新**一条 exec——否则旧 exec 的失败会误伤新一轮执行。
+            # queued 且 started_at 为空 = 已回炉但尚未被 claim，不属于任何 exec 的本轮执行，
+            # 从活跃集里排除（等它重新 claim 后由新 exec/巡检负责）。
             rows = c.execute(
                 "SELECT e.id, e.agent_task_id, e.status, e.completed_at, "
-                "e.created_at, e.started_at, t.skill, t.repo_key, t.env_extra, t.runtime_id "
+                "e.created_at, e.started_at, t.skill, t.repo_key, t.env_extra, t.runtime_id, "
+                "t.started_at "
                 "FROM autopilot_executions e "
                 "JOIN agent_tasks t ON t.id = e.agent_task_id "
                 "WHERE e.status IN ('failed', 'cancelled') "
                 "AND e.agent_task_id IS NOT NULL AND e.agent_task_id <> '' "
                 "AND t.status IN ('queued', 'dispatched', 'running', 'pending_self_report') "
+                "AND NOT (t.status = 'queued' AND (t.started_at IS NULL OR t.started_at = '')) "
+                "AND e.id = (SELECT MAX(e2.id) FROM autopilot_executions e2 "
+                "            WHERE e2.agent_task_id = e.agent_task_id) "
                 "ORDER BY e.id DESC LIMIT 50").fetchall()
     except Exception as e:
         log.warning(f"terminal-exec reverse sweep: scan failed: {e}")
@@ -3248,7 +3332,7 @@ def _reap_terminal_exec_running_tasks() -> int:
     _now = datetime.now(timezone.utc)
     reaped = 0
     for (_exec_id, _atid, _exec_status, _done, _created, _started,
-         _t_skill, _t_repo_key, _t_env_extra, _t_runtime_id) in rows or []:
+         _t_skill, _t_repo_key, _t_env_extra, _t_runtime_id, _t_started) in rows or []:
         _ref = (_parse_iso_aware(_done) or _parse_iso_aware(_created)
                 or _parse_iso_aware(_started))
         # 时间不可解析 → 保守跳过（无法确认是否已过宽限，宁可下一轮再判）
@@ -3256,21 +3340,30 @@ def _reap_terminal_exec_running_tasks() -> int:
             continue
         if (_now - _ref).total_seconds() < TERMINAL_EXEC_REVERSE_GRACE_SECONDS:
             continue
-        if not _no_progress_termination_enabled({
+        # PR #2160 复审 Required：先确认任务当前执行仍是这条 exec 的那一轮。
+        # queued(未 claim)/重新 claim 的新执行都不匹配 → 旧 exec 的终态不得终止它。
+        if not _exec_and_task_same_round(
+                _started or _created, _done or _created or _started, _t_started):
+            log.info(f"terminal-exec reverse sweep: task {_atid} is not on the same "
+                     f"execution round as exec {_exec_id}, skip (diagnostic only)")
+            continue
+        _target = "cancelled" if _exec_status == "cancelled" else "failed"
+        if _target == "failed" and not _no_progress_termination_enabled({
                 "skill": _t_skill or "", "repo_key": _t_repo_key or "",
                 "env_extra": _t_env_extra or "{}"}):
-            # Issue #3741（PR #2160 审查 ③）：反向 sweep 同样受 no_progress_enabled 门禁，
-            # 关闭时只留日志、不动任务（与 plan.md 的整体回滚口径一致）。
+            # Issue #3741（PR #2160 审查 ③）：failed exec 的反向回收受 no_progress_enabled
+            # 门禁，关闭时只留日志、不动任务。用户取消（cancelled）的传播不随该开关关闭——
+            # 「exec 已取消但任务仍活跃」本身就是本单要治的残留，不能因止血开关留下。
             log.info(f"terminal-exec reverse sweep: no_progress_enabled=false, "
                      f"skip task {_atid} of exec {_exec_id} (diagnostic only)")
             continue
-        _target = "cancelled" if _exec_status == "cancelled" else "failed"
         _reason = (f"autopilot execution {_exec_id} 已 {_exec_status}，"
                    "但任务仍在活跃；反向僵尸回收终止任务并释放引擎槽位")
         try:
             if not _terminate_stuck_agent_task(
                     _atid, _reason, status=_target,
-                    error_code="TERMINAL_EXEC_RUNNING_TASK"):
+                    error_code="TERMINAL_EXEC_RUNNING_TASK",
+                    expected_started_at=str(_t_started or "")):
                 continue
             reaped += 1
             log.warning(f"terminal-exec reverse sweep: exec {_exec_id} ({_exec_status}) "

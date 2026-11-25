@@ -312,6 +312,15 @@ def _non_negative_int(raw: Any) -> Optional[int]:
     return iv if iv >= 0 else None
 
 
+def _repeat_steps_value(raw: Any) -> Optional[int]:
+    """指纹判据步数阈值解析：0 = 显式关闭；1 是判据侧的最小值 2 之下，
+    配置它等于静默关闭（`task_activity._MIN_REPEAT_STEPS`），因此按非法值处理，
+    回退下一层/默认值——避免「配置与生效不一致」（PR #2160 复审 Nit）。
+    """
+    v = _non_negative_int(raw)
+    return None if v == 1 else v
+
+
 def _no_progress_field_from_entry(entry: Any, field: str) -> Any:
     """per_skill/per_repo 条目中的无进展字段；旧标量条目无该字段 → None。"""
     if isinstance(entry, dict):
@@ -381,12 +390,13 @@ def no_progress_repeat_steps(task: Dict[str, Any], cfg: Optional[Dict[str, Any]]
     """Issue #3741：解析「连续相同 tool+input 指纹」判据的步数阈值（0 = 关闭）。
 
     与 no_progress_retries 同一条配置链，0 是**合法值**（显式关闭指纹判据、只保留
-    #2793 的活跃度判据）；负数/非法字符串视为未配置，继续回退下一层。
+    #2793 的活跃度判据）；负数/非法字符串以及 1（低于判据侧最小值 2，等同静默关闭）
+    视为未配置，继续回退下一层。
     """
     if cfg is None:
         cfg = load_timeout_config()
     tenv = _task_env(task)
-    v = _non_negative_int(tenv.get(_NO_PROGRESS_REPEAT_STEPS_ENV))
+    v = _repeat_steps_value(tenv.get(_NO_PROGRESS_REPEAT_STEPS_ENV))
     if v is not None:
         return v
 
@@ -394,14 +404,14 @@ def no_progress_repeat_steps(task: Dict[str, Any], cfg: Optional[Dict[str, Any]]
     repo = str(task.get("repo_key") or "").strip()
     for section, key in (("per_skill", skill), ("per_repo", repo)):
         entry = _section_entry(cfg, section, key)
-        v = _non_negative_int(_no_progress_field_from_entry(entry, "no_progress_repeat_steps"))
+        v = _repeat_steps_value(_no_progress_field_from_entry(entry, "no_progress_repeat_steps"))
         if v is not None:
             return v
 
-    v = _non_negative_int(cfg.get("no_progress_repeat_steps"))
+    v = _repeat_steps_value(cfg.get("no_progress_repeat_steps"))
     if v is not None:
         return v
-    v = _non_negative_int(os.environ.get(_NO_PROGRESS_REPEAT_STEPS_ENV))
+    v = _repeat_steps_value(os.environ.get(_NO_PROGRESS_REPEAT_STEPS_ENV))
     if v is not None:
         return v
     return DEFAULT_NO_PROGRESS_REPEAT_STEPS
