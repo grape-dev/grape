@@ -7,14 +7,26 @@
 
 本守卫是静态的（AST 解析 db_setup），不依赖 MySQL 环境：
 1. 四条迁移必须注册，版本号与名称锁定，防止被后续 rebase 悄悄删掉；
-2. 两条建表迁移引用的 DDL 常量必须仍在模块内；
+2. 两条建表迁移引用的 DDL 常量必须仍在内存（D9 按域拆分后建表 DDL 住 owner 域
+   `schema_ddl.py`，db_setup 只 import —— 守卫随常量归属一起看 owner 模块）；
 3. 修复迁移必须带 allow_copy（否则 MySQL 上会重演假绿）。
+
+⚠ 2026-11-25（Issue #4339 顺带校正，非本 Issue 语义）：本文件在 HEAD 上已红——
+`_CUL_DDL`/`_SC_DDL` 随 D9 拆到 `src/domains/runtime/schema_ddl.py`（db_setup 仅
+import），而守卫仍要求它们在 db_setup 里定义；同时 `_registered()` 对
+`name=VerificationHashWidthMigration.NAME` 这类非字面量做 `ast.literal_eval` 会直接
+抛 ValueError。两处都是拆分后的守卫漂移，本次按归属校正指向、非字面量按「不参与
+阶段一断言」跳过，断言强度不变（仍要求常量含 CREATE TABLE IF NOT EXISTS）。
 """
 import ast
 import os
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 _DB_SETUP = os.path.join(ROOT, "src", "api", "db_setup.py")
+#: D9 按域拆分后的建表 DDL 归属模块（常量实际定义处，db_setup 只 import）。
+_OWNER_DDL_MODULES = tuple(
+    os.path.join(ROOT, "src", "domains", _d, "schema_ddl.py")
+    for _d in ("mgmt", "runtime", "insight"))
 
 _EXPECTED = {
     "202611140001": ("create-credential-usage-log-table", "_fn_create_credential_usage_log_table"),
@@ -39,7 +51,13 @@ def _registered():
         kw = {}
         for k in node.keywords:
             if k.arg in ("version", "name"):
-                kw[k.arg] = ast.literal_eval(k.value)
+                try:
+                    kw[k.arg] = ast.literal_eval(k.value)
+                except (ValueError, TypeError):
+                    # 非字面量（如 name=Cls.NAME）静态解析不出 → 不记录，本守卫只断言
+                    # _EXPECTED 里那四条字面量登记；绝不能因此让整条 AST 解析崩掉
+                    # （HEAD 上 202611190102 的 Attribute 形态就是这样把守卫打成红的）。
+                    continue
             elif k.arg == "fn" and isinstance(k.value, ast.Name):
                 kw["fn"] = k.value.id
         if kw.get("version"):
@@ -56,12 +74,27 @@ def test_stage1_migrations_still_registered():
         assert got_fn == fn, f"{version} fn 漂移：{got_fn} != {fn}"
 
 
+def _const_source(const: str):
+    """常量定义所在源码：(源码文本, 文件路径)；找不到返回 (None, None)。
+
+    D9 拆分后 `_CUL_DDL`/`_SC_DDL` 定义在 owner 域 `schema_ddl.py`，db_setup 只
+    `from ... import`（源码里是 `_CUL_DDL,` 而非 `_CUL_DDL = `），因此按定义处检索。
+    """
+    for path in (_DB_SETUP,) + _OWNER_DDL_MODULES:
+        src = open(path, encoding="utf-8").read()
+        if f"{const} = " in src:
+            return src, path
+    return None, None
+
+
 def test_stage1_ddl_constants_present():
-    src = open(_DB_SETUP, encoding="utf-8").read()
+    db_setup_src = open(_DB_SETUP, encoding="utf-8").read()
     for const in ("_CUL_DDL", "_SC_DDL"):
-        assert f"{const} = " in src, f"{const} 缺失——建表迁移会 NameError"
+        src, path = _const_source(const)
+        assert src is not None, f"{const} 缺失——建表迁移会 NameError"
         assert "CREATE TABLE IF NOT EXISTS" in src.split(f"{const} = ", 1)[1][:400], \
-            f"{const} 不含 CREATE TABLE IF NOT EXISTS（非幂等）"
+            f"{path} 的 {const} 不含 CREATE TABLE IF NOT EXISTS（非幂等）"
+        assert const in db_setup_src, f"{const} 未被 db_setup 引用（建表迁移会 NameError）"
 
 
 def test_trace_context_repair_uses_allow_copy():
