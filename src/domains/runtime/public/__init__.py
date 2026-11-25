@@ -1635,11 +1635,16 @@ def purge_runtime_credential(cid: str, detach_sessions: bool = True,
                             drop_capabilities: bool = True) -> dict[str, Any]:
     """吊销凭据：删凭据行 + 级联其引擎行（可选摘绑会话 / 删能力），**一个事务**。
 
-    返回 {rids, sessions, caps, engines, deleted}；mgmt 侧还要清理场景 JSON，
+    返回 {rids, sessions, chat_sessions, caps, engines, deleted}；mgmt 侧还要清理场景 JSON，
     所以把 rids 交回调用方（跨域边界不传 mgmt 表名）。
+
+    Issue #4045：`chat_agent_session` 与 `devops_agent_session` 同批摘绑（`runtime_id=0`），
+    **保留 `engine_uid`**——引擎行删除后 uid 虽不可解析，但保留「原绑的是哪台引擎」的可审计/
+    可重绑定线索，读路径可据此重解析（`session_manager._chat_config_row_engine`）。
     """
     cid_s = str(cid)
-    out: dict[str, Any] = {"rids": [], "sessions": 0, "caps": 0, "engines": 0, "deleted": 0}
+    out: dict[str, Any] = {"rids": [], "sessions": 0, "chat_sessions": 0,
+                           "caps": 0, "engines": 0, "deleted": 0}
     with _any_tx() as c:
         c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid_s,))
         rids = [int(r[0]) for r in c.fetchall()]
@@ -1650,6 +1655,11 @@ def purge_runtime_credential(cid: str, detach_sessions: bool = True,
                 c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
                           tuple(rids))
                 out["sessions"] = int(c.rowcount or 0)
+                # Issue #4045：chat 会话配置同事务摘绑（原缺口：只摘 devops 侧 → runtime_id 悬空
+                # 持续打 `get_chat_config: runtime_id=… 不存在` 并静默回落本机直连）
+                c.execute(f"UPDATE chat_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
+                          tuple(rids))
+                out["chat_sessions"] = int(c.rowcount or 0)
             if drop_capabilities:
                 c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({ph})", tuple(rids))
                 out["caps"] = int(c.rowcount or 0)
@@ -2506,6 +2516,10 @@ _ANY_QUERIES: dict[str, str] = {
         "WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) "
         "ORDER BY last_active_at DESC, id DESC"),
     'agent_runtime_name_by_uid': "SELECT name FROM agent_runtimes WHERE engine_uid=?",
+    # Issue #4045：uid 重解析需要同时拿到 id（回写 runtime_id）与 name（backend 派生）
+    'agent_runtime_row_by_uid': "SELECT id, name FROM agent_runtimes WHERE engine_uid=?",
+    # Issue #4045：读路径 uid 重解析命中后回写配置行的 runtime_id（按主键精确改一行）
+    'chat_config_runtime_id_backfill': "UPDATE chat_agent_session SET runtime_id=? WHERE id=?",
     'chat_config_upsert_uid': (
         "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, runtime_id, engine_uid, skill, "
         "skill_id, created_at, last_active_at) "

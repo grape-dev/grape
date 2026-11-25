@@ -2543,7 +2543,8 @@ def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depe
                 _csb_purge(_purged_rids, commit=False)
             db.commit()
             log.info(f"revoke {cid} via lib: engines={_purged.get('engines')} "
-                     f"sessions={_purged.get('sessions')} caps={_purged.get('caps')}")
+                     f"sessions={_purged.get('sessions')} chat_sessions={_purged.get('chat_sessions')} "
+                     f"caps={_purged.get('caps')}")
             return {"message": f"凭据 {cid} 已吊销并删除"}
         # 运行域半区（会话摘绑 + 能力 + 引擎行 + 凭据行）是 owner 域的组合原语，一次事务：
         # 单库拓扑回落进程库，三库拓扑走 owner 连接，与 lib 分支同一实现。
@@ -2553,7 +2554,8 @@ def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depe
             # mgmt 半区：清理场景 nodes_json 里对被删 runtime 的悬空引用（Issue #250）
             _cleanup_scene_engine_runtime_ids(_purged_rids)
         log.info(f"revoke {cid}: engines={_purged.get('engines')} "
-                 f"sessions={_purged.get('sessions')} caps={_purged.get('caps')}")
+                 f"sessions={_purged.get('sessions')} chat_sessions={_purged.get('chat_sessions')} "
+                 f"caps={_purged.get('caps')}")
     # 沙箱链级联（纯 DB：模板/绑定/Provider 删除 + 沙箱记录置 orphaned + 孤儿兜底）
     _sb_cleanup = _sb_revoke_cleanup(cid)
     return {"message": f"凭据 {cid} 已吊销并删除"}
