@@ -330,3 +330,43 @@ class TestMgmtBindingHint:
             assert get_repo_scene(repo_key) == scene_id
         finally:
             _cleanup(repo_key, [scene_id])
+
+
+class TestAlertWindowEnvRobustness:
+    """8. 告警窗口 env 解析健壮性（审查 R1）：非法/越界绝不炸导入期。"""
+
+    def test_default_when_unset_or_empty(self, monkeypatch):
+        import src.domains.runtime.engine.engine_select as es
+        monkeypatch.delenv("SCENE_MISSING_ALERT_WINDOW", raising=False)
+        assert es._scene_missing_alert_window_seconds() == 300
+        assert es._scene_missing_alert_window_seconds("") == 300
+        assert es._scene_missing_alert_window_seconds("   ") == 300
+
+    def test_default_when_not_an_integer(self):
+        import src.domains.runtime.engine.engine_select as es
+        for raw in ("5m", "300s", "abc", "12.5", "None"):
+            assert es._scene_missing_alert_window_seconds(raw) == 300, raw
+
+    def test_default_when_out_of_range(self):
+        import src.domains.runtime.engine.engine_select as es
+        for raw in ("0", "-1", "-300", "86401", "999999999"):
+            assert es._scene_missing_alert_window_seconds(raw) == 300, raw
+
+    def test_valid_value_is_honoured(self):
+        import src.domains.runtime.engine.engine_select as es
+        assert es._scene_missing_alert_window_seconds("120") == 120
+        assert es._scene_missing_alert_window_seconds(" 60 ") == 60
+        assert es._scene_missing_alert_window_seconds("86400") == 86400
+
+    def test_bad_env_does_not_break_module_import(self, monkeypatch):
+        """导入期不得抛异常：非法 env 下重新加载 engine_select 仍可用。"""
+        import importlib
+        import src.domains.runtime.engine.engine_select as es
+        monkeypatch.setenv("SCENE_MISSING_ALERT_WINDOW", "5m")
+        reloaded = importlib.reload(es)
+        try:
+            assert reloaded._SCENE_MISSING_ALERT_WINDOW_SECONDS == 300
+            assert callable(reloaded.get_scene_pool_engine_ids)
+        finally:
+            monkeypatch.delenv("SCENE_MISSING_ALERT_WINDOW", raising=False)
+            importlib.reload(es)

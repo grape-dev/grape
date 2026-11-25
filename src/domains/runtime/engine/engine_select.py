@@ -943,7 +943,38 @@ POOL_SOURCE_SCENE_MISSING = "scene_missing"
 # Issue #3790：scene_missing 告警收敛窗口（秒）+ 状态上限。
 # 生产实测未登记场景每小时 22 条无结构 WARNING（custom-ac64212e / grape-skill-dev /
 # grape_loop 三个场景），按 (repo_key, scene_id, agent_type) 合并为「每窗口 1 行 + 计数」。
-_SCENE_MISSING_ALERT_WINDOW_SECONDS = int(os.environ.get("SCENE_MISSING_ALERT_WINDOW", "300"))
+_SCENE_MISSING_ALERT_WINDOW_DEFAULT = 300
+_SCENE_MISSING_ALERT_WINDOW_MAX = 86400
+
+
+def _scene_missing_alert_window_seconds(raw: str | None = None) -> int:
+    """Issue #3790 审查 R1：`SCENE_MISSING_ALERT_WINDOW` 解析必须健壮。
+
+    原实现 `int(os.environ.get(...))` 在**模块导入期**执行：env 写成 `5m`/`300s`/空串/
+    负数会让整个 engine_select 导入抛 ValueError（派发链路全断）——「可观测性配置
+    炸掉主链路」。现口径：缺省/非法/越界（≤0 或 > 上限）一律回落默认 300 秒并留痕，
+    绝不在导入期抛异常。
+    """
+    if raw is None:
+        raw = os.environ.get("SCENE_MISSING_ALERT_WINDOW", "")
+    _txt = str(raw).strip()
+    if not _txt:
+        return _SCENE_MISSING_ALERT_WINDOW_DEFAULT
+    try:
+        _val = int(_txt)
+    except (TypeError, ValueError):
+        log.warning(f"SCENE_MISSING_ALERT_WINDOW={_txt!r} 非法（须为秒数整数），"
+                    f"回落默认 {_SCENE_MISSING_ALERT_WINDOW_DEFAULT}s")
+        return _SCENE_MISSING_ALERT_WINDOW_DEFAULT
+    if _val <= 0 or _val > _SCENE_MISSING_ALERT_WINDOW_MAX:
+        log.warning(f"SCENE_MISSING_ALERT_WINDOW={_val} 越界"
+                    f"（允许 1..{_SCENE_MISSING_ALERT_WINDOW_MAX}），"
+                    f"回落默认 {_SCENE_MISSING_ALERT_WINDOW_DEFAULT}s")
+        return _SCENE_MISSING_ALERT_WINDOW_DEFAULT
+    return _val
+
+
+_SCENE_MISSING_ALERT_WINDOW_SECONDS = _scene_missing_alert_window_seconds()
 _SCENE_MISSING_ALERT_MAX_KEYS = 512
 _SCENE_MISSING_ALERT_TTL_SECONDS = 3600
 _scene_missing_alert_state: dict = {}   # {(repo_key, scene_id, agent_type): {...}}
