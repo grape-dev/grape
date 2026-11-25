@@ -20,6 +20,10 @@ from src.domains.runtime.engine import stale_uid as _stale_uid
 # Issue #4082：`/runtimes/{runtime_id}/*` 非法 id 统一 400 的路由类
 from src.domains.runtime.routes.runtime_id_validation import RuntimeIdGuardRoute
 
+# Issue #4347：鉴权失败 IP 失败预算（>10/min → 429；>60/h → 短期封禁）
+# + 拒绝日志按 IP 聚合节流（每 IP 每分钟最多 1 条摘要）；纯进程内实现，无迁移。
+from src.domains.runtime.routes.auth_failure_budget import auth_failure_gate
+
 from src.api.time_utils import normalize_event_time
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine import service
@@ -199,10 +203,20 @@ _pkg_download_lock = threading.Lock()
 
 # ===== rta_ 凭据认证中间件（M3，D2 凭据隔离）=====
 def _auth_credential(request: Request) -> int:
-    """解析 Authorization: Bearer rta_... → sha256 → 查 runtime_credentials(status=active)。返回 credential_id。"""
+    """解析 Authorization: Bearer rta_... → sha256 → 查 runtime_credentials(status=active)。返回 credential_id。
+
+    Issue #4347：鉴权失败计入 IP 失败预算——同 IP >10 次/分钟 → 429（Retry-After）；
+    1 小时累计 >60 次 → 短期封禁（封禁期内直接 429）。只计鉴权失败，成功注册/心跳不受影响。
+    """
     token = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
+    ip = _client_ip(request)
+    # 短期封禁期内直接 429（不计数，避免封禁被持续重试无限续期）
+    _banned = auth_failure_gate.check_banned(ip)
+    if _banned:
+        raise _auth_throttled_exc(_banned)
     if not token.startswith("rta_"):
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "invalid runtime credential"})
+        _reject_auth_failure(request, ip, token,
+                             {"code": 401, "message": "invalid runtime credential"})
     h = hashlib.sha256(token.encode()).hexdigest()
     with db_lock:
         c = db.cursor()
@@ -211,11 +225,11 @@ def _auth_credential(request: Request) -> int:
     if not row:
         # 凭据校验失败要留痕：worker 侧只看到 401，服务端此前完全无记录，
         # 设备一直"离线"时无法判断是 token 抄错、还是根本没连上来。
-        try:
-            log.warning(f"runtime credential rejected: prefix={token[:10]}... ip={_client_ip(request)}")
-        except Exception:
-            pass
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "runtime credential revoked or not found"})
+        # Issue #4347：留痕改为按 IP 聚合摘要（每 IP 每分钟最多 1 条，含累计次数/
+        # 首末时间/prefix/endpoint 集合，保留 "runtime credential rejected" 前缀兼容
+        # 既有 Loki/Grafana 检索），终止 741 条/小时刷屏；超阈值升级 429/短期封禁。
+        _reject_auth_failure(request, ip, token,
+                             {"code": 401, "message": "runtime credential revoked or not found"})
     return row[0]
 
 
@@ -238,10 +252,16 @@ def _require_credential_ctx(request: Request) -> CredentialContext:
 
     解析 Authorization: Bearer rta_*** → sha256 → 查 runtime_credentials(status=active)。
     user scope 时关联 mgmt 的账号表解析 owner_id 为数值 ID（经 mgmt.public，不直查）。
+    Issue #4347：鉴权失败同样计入 IP 失败预算（429/短期封禁），拒绝日志按 IP 聚合。
     """
     token = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
+    ip = _client_ip(request)
+    _banned = auth_failure_gate.check_banned(ip)
+    if _banned:
+        raise _auth_throttled_exc(_banned)
     if not token.startswith("rta_"):
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "invalid runtime credential"})
+        _reject_auth_failure(request, ip, token,
+                             {"code": 401, "message": "invalid runtime credential"})
     h = hashlib.sha256(token.encode()).hexdigest()
     with db_lock:
         c = db.cursor()
@@ -262,7 +282,8 @@ def _require_credential_ctx(request: Request) -> CredentialContext:
         if row:
             row = (row[0], row[1], row[2], row[3], row[4], _ua_id)
     if not row:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "runtime credential revoked or not found"})
+        _reject_auth_failure(request, ip, token,
+                             {"code": 401, "message": "runtime credential revoked or not found"})
     _scope = (row[1] or "global").strip().lower()
     if _scope == "user" and row[5]:
         _owner_id = str(row[5])
@@ -283,6 +304,39 @@ def _client_ip(request: Request) -> str:
     if xff:
         return xff.split(",")[0].strip()
     return request.client.host if request.client else ""
+
+
+# ===== Issue #4347：鉴权失败统一出口（IP 失败预算 + 按 IP 聚合日志）=====
+def _auth_throttled_exc(retry_after: int) -> HTTPException:
+    """429（带 Retry-After 头）：分钟失败预算超限，或小时累计超限进入的短期封禁期内。"""
+    return HTTPException(
+        status_code=429,
+        detail={"code": 429,
+                "message": "too many runtime auth failures from this address, retry later",
+                "retry_after": retry_after},
+        headers={"Retry-After": str(retry_after)})
+
+
+def _reject_auth_failure(request: Request, ip: str, token: str, detail_401: dict) -> None:
+    """鉴权失败统一出口（只计鉴权失败，成功路径不受影响）：
+
+    - 计入 IP 失败预算：同 IP >10 次/分钟 → 429（Retry-After 指向窗口滑出）；
+      1 小时累计 >60 次 → 短期封禁（默认 600s），封禁期内在请求入口直接 429；
+    - 拒绝日志按 IP 聚合：每 IP 每分钟最多 1 条摘要（窗口累计次数 + 首末时间 +
+      prefix/endpoint 集合），保留 "runtime credential rejected" 前缀，兼容既有
+      Loki/Grafana 检索（`|= "runtime credential rejected"` 仍可命中摘要）。
+    """
+    endpoint = request.url.path
+    prefix = token[:10] or "none"
+    outcome = auth_failure_gate.record_failure(ip, prefix, endpoint)
+    try:
+        if outcome.log_line:
+            log.warning(outcome.log_line)
+    except Exception:
+        pass
+    if outcome.retry_after:
+        raise _auth_throttled_exc(outcome.retry_after)
+    raise HTTPException(status_code=401, detail=detail_401)
 
 
 class RuntimeRegBody(BaseModel):
