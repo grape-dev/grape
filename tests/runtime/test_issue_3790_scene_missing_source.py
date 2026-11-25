@@ -422,3 +422,119 @@ class TestFailedTaskRecordsSource:
             assert row and row[0] == ""
         finally:
             _cleanup(repo_key, [])
+
+
+class TestA2ABroadcastSourcePropagation:
+    """10. A2A 直派链路透传门禁来源（审查 R1：a2a_dispatch 广播分支）。"""
+
+    def test_broadcast_enqueue_carries_scene_missing(self, monkeypatch):
+        import src.api.a2a_dispatch as ad
+        import src.api.event_bus as event_bus
+        import src.domains.runtime.engine.engine_select as es
+        import src.domains.runtime.engine.service as svc
+        import src.domains.runtime.pipeline.event_pipeline as ep
+
+        captured = {}
+
+        def _boom(*a, **kw):
+            raise RuntimeError("force legacy dispatch")
+
+        monkeypatch.setattr(event_bus, "get_event_bus", _boom)
+        monkeypatch.setattr(es, "pick_engine", lambda *a, **kw: 0)
+        monkeypatch.setattr(es, "resolve_directive_engine",
+                            lambda *a, **kw: {"requested": 0, "runtime_id": 0,
+                                              "hit": False, "reason": "",
+                                              "engine_name": "", "tag_mismatch": False})
+        monkeypatch.setattr(svc, "get_execution_mode", lambda: svc.EXEC_MODE_REMOTE)
+        monkeypatch.setattr(ep, "is_plugin_mode", lambda: True)
+        monkeypatch.setattr(ep, "_scene_pool_gate",
+                            lambda *a, **kw: ("pool",
+                                              {"pool_engine_ids": "",
+                                               "pool_engine_source": "scene_missing"},
+                                              None))
+
+        def _fake_enqueue(*a, **kw):
+            captured.update(kw)
+            return "t_3790_bcast"
+
+        monkeypatch.setattr(ep, "_enqueue_pipeline_task", _fake_enqueue)
+
+        out = ad.run_a2a_dispatch(
+            "gitcode:test3790/r3790-a2a", 0, "sre", {"payload": {}},
+            skill_name="sre", issue_number="")
+        assert out["status"] == "ok", out
+        assert out.get("mode") == "broadcast", out
+        assert captured.get("pool_engine_source") == "scene_missing", \
+            f"A2A 广播入队丢弃了门禁来源：{captured!r}"
+
+
+class TestPipelineExecutorSourcePropagation:
+    """11. 事件驱动 A2A 入队透传门禁来源（审查 R1：pipeline_executor 插件分支）。"""
+
+    def test_plugin_enqueue_carries_scene_missing(self, monkeypatch):
+        import src.api.pipeline_executor as px
+        import src.domains.runtime.engine.engine_select as es
+        import src.domains.runtime.pipeline.event_pipeline as ep
+
+        captured = {}
+
+        monkeypatch.setattr(ep, "is_plugin_mode", lambda: True)
+        monkeypatch.setattr(es, "resolve_directive_engine",
+                            lambda *a, **kw: {"requested": 0, "runtime_id": 0,
+                                              "hit": False, "reason": "",
+                                              "engine_name": "", "tag_mismatch": False})
+        monkeypatch.setattr(es, "resolve_scene_user_scope",
+                            lambda *a, **kw: ("custom-ghost3790", 0))
+        monkeypatch.setattr(es, "pick_engine", lambda *a, **kw: 12)
+        monkeypatch.setattr(ep, "_scene_pool_gate",
+                            lambda *a, **kw: ("pool",
+                                              {"pool_engine_ids": "",
+                                               "pool_engine_source": "scene_missing"},
+                                              None))
+
+        def _fake_enqueue(*a, **kw):
+            captured.update(kw)
+            return "t_3790_px"
+
+        monkeypatch.setattr(ep, "_enqueue_pipeline_task", _fake_enqueue)
+
+        out = px._enqueue_via_pipeline(
+            "gitcode:test3790/r3790-px", 0, "sre", "sre", {"payload": {}},
+            0, "#3790", "sre")
+        assert out == {"task_id": "enqueued"}, out
+        assert captured.get("pool_engine_source") == "scene_missing", \
+            f"pipeline_executor 入队丢弃了门禁来源：{captured!r}"
+
+    def test_gate_exception_falls_back_to_plain_pool(self, monkeypatch):
+        """门禁异常 fail-open：回落既有池解析（来源空、广播语义不变）。"""
+        import src.api.pipeline_executor as px
+        import src.domains.runtime.engine.engine_select as es
+        import src.domains.runtime.pipeline.event_pipeline as ep
+
+        captured = {}
+
+        def _bad_gate(*a, **kw):
+            raise RuntimeError("gate boom")
+
+        monkeypatch.setattr(ep, "is_plugin_mode", lambda: True)
+        monkeypatch.setattr(es, "resolve_directive_engine",
+                            lambda *a, **kw: {"requested": 0, "runtime_id": 0,
+                                              "hit": False, "reason": "",
+                                              "engine_name": "", "tag_mismatch": False})
+        monkeypatch.setattr(es, "resolve_scene_user_scope", lambda *a, **kw: ("s", 0))
+        monkeypatch.setattr(es, "pick_engine", lambda *a, **kw: 12)
+        monkeypatch.setattr(ep, "_scene_pool_gate", _bad_gate)
+        monkeypatch.setattr(es, "get_scene_pool_engine_ids",
+                            lambda *a, **kw: "[12]")
+
+        def _fake_enqueue(*a, **kw):
+            captured.update(kw)
+            return "t_3790_px2"
+
+        monkeypatch.setattr(ep, "_enqueue_pipeline_task", _fake_enqueue)
+        out = px._enqueue_via_pipeline(
+            "gitcode:test3790/r3790-px2", 0, "sre", "sre", {"payload": {}},
+            0, "#3790", "sre")
+        assert out == {"task_id": "enqueued"}, out
+        assert captured.get("pool_engine_ids") == "[12]"
+        assert captured.get("pool_engine_source") == ""

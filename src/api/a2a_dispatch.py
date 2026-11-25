@@ -426,7 +426,43 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
     if engine_id == 0 and _is_plugin() and get_execution_mode() != EXEC_MODE_DIRECT:
         from src.domains.runtime.pipeline.event_pipeline import _enqueue_pipeline_task
         _be = backend or "opencode"
-        _pool_eids = get_scene_pool_engine_ids(_a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
+        # [#1208 A2A selector 修复 2026-11-12] 兜底广播分支补三分叉 gate（同 run_pipeline 口径）
+        # Issue #3790：门禁是池语义的唯一解析口——池名单与来源（scene_missing）一并取回，
+        # 不再「先单独取池、再 gate 二次解析」，避免来源被丢弃 + 告警重复计数一次。
+        _pool_sel_a2a = ""
+        _pool_src_a2a = ""
+        _pool_eids = ""
+        _gate_resolved = False
+        try:
+            from src.domains.runtime.pipeline.event_pipeline import _scene_pool_gate
+            _gm_a2a, _gp_a2a, _gf_a2a = _scene_pool_gate(
+                _a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
+            if _gm_a2a == "selector":
+                _pool_sel_a2a = _gp_a2a["pool_selector"]
+                _pool_eids = ""
+                _gate_resolved = True
+            elif _gm_a2a == "pool":
+                _pool_eids = _gp_a2a["pool_engine_ids"]
+                # Issue #3790：门禁上抛来源必须透传——否则入队按「带 scene 上下文」推导成
+                # scene，scene_missing 退化为普通场景绑定（运营无法区分「未注册/离线」）
+                _pool_src_a2a = _gp_a2a.get("pool_engine_source", "") or ""
+                _gate_resolved = True
+            elif _gf_a2a:
+                log.warning(f"A2A: scene={_a2a_scene} agent={agent_name} selector zero-hit, "
+                            f"skip enqueue (Issue #1208): {_gf_a2a}")
+                try:
+                    from src.api.event_pipeline import _fail_event
+                    _fail_event(seq, _gf_a2a)
+                except Exception:
+                    from src.api.event_store import update_event_status
+                    update_event_status(seq, "failed")
+                return {"status": "failed", "seq": seq, "agent": agent_name, "error": _gf_a2a}
+        except Exception as _gate_e:
+            log.warning(f"A2A: selector gate failed (fail-open): {_gate_e}")
+        if not _gate_resolved:
+            # 门禁异常 fail-open：回落既有池解析（无来源标记），广播语义不变
+            _pool_eids = get_scene_pool_engine_ids(
+                _a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
         if _pool_eids is None:
             # Issue #259 方案A：场景派发失败 → 不入队，事件置 failed 并明确提示
             # Issue #541：报错区分「场景仓内不存在 / 未绑定引擎 / 引擎全部离线」
@@ -451,27 +487,6 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             except Exception:
                 pass
             return {"status": "failed", "seq": seq, "agent": agent_name, "error": _err541}
-        # [#1208 A2A selector 修复 2026-11-12] 兜底广播分支补三分叉 gate（同 run_pipeline 口径）
-        _pool_sel_a2a = ""
-        try:
-            from src.domains.runtime.pipeline.event_pipeline import _scene_pool_gate
-            _gm_a2a, _gp_a2a, _gf_a2a = _scene_pool_gate(
-                _a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
-            if _gm_a2a == "selector":
-                _pool_sel_a2a = _gp_a2a["pool_selector"]
-                _pool_eids = ""
-            elif _gf_a2a:
-                log.warning(f"A2A: scene={_a2a_scene} agent={agent_name} selector zero-hit, "
-                            f"skip enqueue (Issue #1208): {_gf_a2a}")
-                try:
-                    from src.api.event_pipeline import _fail_event
-                    _fail_event(seq, _gf_a2a)
-                except Exception:
-                    from src.api.event_store import update_event_status
-                    update_event_status(seq, "failed")
-                return {"status": "failed", "seq": seq, "agent": agent_name, "error": _gf_a2a}
-        except Exception as _gate_e:
-            log.warning(f"A2A: selector gate failed (fail-open): {_gate_e}")
         _enq_args = (
             repo_key, seq, agent_name, _be, skill_name or agent_name, evt,
             skill_id, skill_path or "", engine_id,
@@ -481,7 +496,7 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             _bcast_task_id = _enqueue_pipeline_task(
                 *_enq_args,
                 pool_engine_ids=_pool_eids, user_id=_a2a_scene_uid,
-                pool_selector=_pool_sel_a2a,
+                pool_selector=_pool_sel_a2a, pool_engine_source=_pool_src_a2a,
             )
         except TypeError as _te:
             # 混合版本滚动升级：a2a_dispatch 已带 pool_selector，但进程内 event_pipeline
