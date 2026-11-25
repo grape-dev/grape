@@ -47,7 +47,11 @@ def migrate(conn: Any = None) -> int:
     with _ds.db_lock:
         cursor = target.cursor()
         try:
+            # 存量库不跑老轨 _create_tables()，新表由本迁移建（见 insight 侧同款说明）。
+            from src.domains.runtime.schema_ddl import _AUTOPILOT_PAYLOAD_GUARD_DDL
+            cursor.execute(_AUTOPILOT_PAYLOAD_GUARD_DDL)
             if not _table_exists(cursor, OLD_TABLE):
+                target.commit()
                 return 0
             cols = ", ".join(COLUMNS)
             if _is_mysql_backend():

@@ -48,7 +48,12 @@ def migrate(conn: Any = None) -> int:
     with _ds.db_lock:
         cursor = target.cursor()
         try:
+            # 存量库不跑老轨 _create_tables()（只在新装库首跑），新表必须由本迁移建，
+            # 否则 DDL 里的新名字永远不落地（PR #2157 部署实测 1146）。
+            from src.domains.insight.schema_ddl import _OBS_WEBHOOK_REJECTS_DDL
+            cursor.execute(_OBS_WEBHOOK_REJECTS_DDL)
             if not _table_exists(cursor, OLD_TABLE):
+                target.commit()
                 return 0
             cols = ", ".join(COLUMNS)
             if _is_mysql_backend():

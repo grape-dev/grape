@@ -12854,26 +12854,26 @@ register_migration(
 )
 
 
-def _migration_202611250011_payload_guard_uuid_pk() -> None:
+def _migration_202611250013_payload_guard_uuid_pk() -> None:
     """A6/A12：旧表（自增 id、无 grape_t_ 前缀）→ `grape_t_autopilot_payload_guard`（UUID 主键）。"""
     from src.domains.runtime.migrations.payload_guard_uuid_pk import migrate
 
     migrate()
 
 
-def _postcheck_202611250011_payload_guard_uuid_pk() -> None:
+def _postcheck_202611250013_payload_guard_uuid_pk() -> None:
     from src.domains.runtime.migrations.payload_guard_uuid_pk import converged
 
     converged()
 
 
 register_migration(
-    version="202611250011",
+    version="202611250013",
     name="payload-guard-uuid-pk",
     kind="cleanup",
     domains=("runtime",),
-    fn=_migration_202611250011_payload_guard_uuid_pk,
-    post_check=_postcheck_202611250011_payload_guard_uuid_pk,
+    fn=_migration_202611250013_payload_guard_uuid_pk,
+    post_check=_postcheck_202611250013_payload_guard_uuid_pk,
 )
 
 
@@ -12922,25 +12922,25 @@ register_migration(
 # ===== PR #2157 架构守护：表名前缀 + 字符串 UUID 主键（A6/A12）=====
 # 旧表（自增 id、无 grape_t_ 前缀）若已落库，搬行到新表并生成 UUID 主键后 DROP 旧表；
 # 未落库的库由 schema_ddl 的 CREATE IF NOT EXISTS 直接建新表，本迁移空转即盖章。
-def _migration_202611250010_webhook_rejects_uuid_pk() -> None:
+def _migration_202611250012_webhook_rejects_uuid_pk() -> None:
     from src.domains.insight.migrations.webhook_rejects_uuid_pk import migrate
 
     migrate()
 
 
-def _postcheck_202611250010_webhook_rejects_uuid_pk() -> None:
+def _postcheck_202611250012_webhook_rejects_uuid_pk() -> None:
     from src.domains.insight.migrations.webhook_rejects_uuid_pk import converged
 
     converged()
 
 
 register_migration(
-    version="202611250010",
+    version="202611250012",
     name="webhook-rejects-uuid-pk",
     kind="cleanup",   # 内含 DROP TABLE（危险 DDL，只走 _destructive_ddl）
     domains=("insight",),
-    fn=_migration_202611250010_webhook_rejects_uuid_pk,
-    post_check=_postcheck_202611250010_webhook_rejects_uuid_pk,
+    fn=_migration_202611250012_webhook_rejects_uuid_pk,
+    post_check=_postcheck_202611250012_webhook_rejects_uuid_pk,
 )
 
 
