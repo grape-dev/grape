@@ -2143,7 +2143,29 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
         except Exception as e:
             log.warning(f"Autopilot poll exec {exec_id}: query failed: {e}")
 
-    # 超时
+    # 超时：Issue #3741——先把仍活跃的 agent_task 收口并释放引擎槽位，再写 exec failed。
+    # 旧实现只写 exec failed，任务仍 running → 独占引擎被空转任务长期占用（报告 1.5h）。
+    _stuck_task_id = None
+    try:
+        with _rt_cursor_for("runtime") as c:
+            _erow = c.execute(
+                "SELECT agent_task_id, started_at, created_at "
+                "FROM autopilot_executions WHERE id=?", (exec_id,)).fetchone()
+            if _erow:
+                _row = _get_exec_agent_task(c, exec_id, _erow[0], _erow[1], _erow[2])
+                if _row and (_row[1] or "") in _STUCK_ACTIVE_STATUSES:
+                    _stuck_task_id = _row[0]
+    except Exception as e:
+        log.warning(f"Autopilot poll exec {exec_id}: timeout task lookup failed: {e}")
+    if _stuck_task_id:
+        try:
+            if _terminate_stuck_agent_task(
+                    _stuck_task_id, f"autopilot poll timeout {timeout}s",
+                    error_code="WORKER_TIMEOUT_TERMINATED"):
+                log.warning(f"Autopilot poll exec {exec_id}: terminated stuck task "
+                            f"{_stuck_task_id} and released its engine slot")
+        except Exception as e:
+            log.warning(f"Autopilot poll exec {exec_id}: terminate stuck task failed: {e}")
     _update_execution_result(exec_id, "failed", error=f"worker 执行超时 ({timeout}s)")
     _notify_subscribers(_exec_task_id(exec_id), exec_id, "failed",
                         f"worker 执行超时 ({timeout}s)", {})
@@ -2628,6 +2650,171 @@ def _requeue_no_progress(task_id, started_at, diagnostic) -> bool:
         return False
 
 
+# Issue #3741：exec 已终态但 agent_task 仍活跃的反向残留 sweep 宽限（秒）。
+# 正常链路里 exec 终态与任务终态几乎同时写入；留 60s 给轮询/完成回写收敛，
+# 超时仍未收敛才判定为僵尸残留。
+TERMINAL_EXEC_REVERSE_GRACE_SECONDS = int(
+    os.environ.get("TERMINAL_EXEC_REVERSE_GRACE_SECONDS", "60"))
+
+# 仍处于「可继续执行/等待上报」的任务状态——这些状态下才会被终止。
+_STUCK_ACTIVE_STATUSES = ("queued", "dispatched", "running", "pending_self_report")
+
+
+def _terminate_stuck_agent_task(task_id, reason: str, *, status: str = "failed",
+                                error_code: str = "", cascade_trigger: str = "sweeper") -> bool:
+    """Issue #3741：把仍活跃的 agent_task 收口为终态（failed/cancelled）。
+
+    收敛口径与 `terminate_active_agents` 一致：`update_task_status` 内部负责
+    释放 busy 槽（TASK_TERMINAL_STATUSES + runtime_id>0）、事件级联终态与会话 token 失效；
+    这里只补一条带 error_code 的结构化诊断，让「为什么被终止」在任务详情/exec cause 可查。
+
+    乐观条件：只有 queued/dispatched/running/pending_self_report 才动；已终态返回 False，
+    避免覆盖 worker 真实自报结果（终态幂等由 update_task_status 再次兜底）。
+    REMOTE 任务终止后，worker 侧 sid watchdog 会在 ≤60s 内发现服务端终态并杀掉引擎进程。
+    """
+    from src.domains.runtime.engine.transient_retry import (
+        TASK_ERROR_SLOTS, parse_task_errors,
+    )
+    try:
+        from src.domains.runtime.engine.service import update_task_status
+    except Exception as e:
+        log.warning(f"terminate_stuck: import update_task_status failed: {e}")
+        return False
+    _tid = str(task_id)
+    try:
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT status, errors FROM agent_tasks WHERE id=?", (_tid,)).fetchone()
+    except Exception as e:
+        log.warning(f"terminate_stuck: read task {_tid} failed: {e}")
+        return False
+    if not row:
+        return False
+    _cur_status, _raw_errors = row
+    if (_cur_status or "") not in _STUCK_ACTIVE_STATUSES:
+        return False
+    errs = parse_task_errors(_raw_errors)
+    errs.append({
+        "error_code": error_code or "TASK_TERMINATED_STUCK",
+        "task_id": _tid,
+        "previous_status": _cur_status,
+        "reason": reason,
+    })
+    try:
+        update_task_status(
+            _tid, status, exit_code=-1,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            errors=json.dumps(errs[-TASK_ERROR_SLOTS:], ensure_ascii=False),
+            cascade_trigger=cascade_trigger)
+    except Exception as e:
+        log.warning(f"terminate_stuck: finalize task {_tid} failed: {e}")
+        return False
+    # 并发确认：读取活跃到调用终态之间 worker 可能已自报 completed，update_task_status
+    # 的终态幂等会跳过 → 此时不得报告「已终止」（否则调用方会误同步 exec/打点）。
+    try:
+        with db_lock:
+            _after = db.cursor().execute(
+                "SELECT status FROM agent_tasks WHERE id=?", (_tid,)).fetchone()
+    except Exception:
+        return False
+    return bool(_after and (_after[0] or "") == status)
+
+
+def _fail_exec_for_agent_task(task_id, error: str, error_code: str = "") -> int:
+    """Issue #3741：按 agent_task_id 反查仍在运行/dispatched 的 autopilot exec 并收口 failed。
+
+    无进展收口发生在巡检线程，轮询协程可能还停在 running；把 exec 一并收口，
+    避免 exec 侧再等 3600s 才失败（报告中的「failed 但仍在跑」反向残留）。
+    """
+    _tid = str(task_id)
+    try:
+        with _rt_cursor_for("runtime") as c:
+            rows = c.execute(
+                "SELECT id FROM autopilot_executions "
+                "WHERE agent_task_id=? AND status IN ('running', 'dispatched') "
+                "ORDER BY id DESC LIMIT 5", (_tid,)).fetchall()
+    except Exception as e:
+        log.warning(f"no_progress: reverse lookup exec for task {_tid} failed: {e}")
+        return 0
+    marked = 0
+    for (_eid,) in rows or []:
+        try:
+            _update_execution_result(_eid, "failed", error=error, error_code=error_code)
+            _notify_subscribers(_exec_task_id(_eid), _eid, "failed", error[:500], {})
+            marked += 1
+        except Exception as e:
+            log.warning(f"no_progress: mark exec {_eid} failed for task {_tid} failed: {e}")
+    return marked
+
+
+def _finalize_no_progress(task_id, started_at, diagnostic) -> bool:
+    """Issue #3741：重派上限耗尽后把无进展任务收口为 failed（不再无限留 running）。
+
+    与 `_requeue_no_progress` 共用乐观并发条件（status='running' AND started_at=?），
+    保证只收口「本轮观察到的那个执行」；rowcount=0 表示执行已被 worker 自报/被其它
+    路径收口，直接放弃，不覆盖真实终态。
+
+    收口顺序：先写任务终态（update_task_status 内释放 busy 槽 + 事件级联），再同步
+    autopilot exec——exec 的终态幂等不会阻断任务侧资源释放。
+    """
+    from src.domains.runtime.engine.transient_retry import (
+        TASK_ERROR_SLOTS, parse_task_errors,
+    )
+    try:
+        from src.domains.runtime.engine.service import update_task_status
+    except Exception as e:
+        log.warning(f"no_progress: import update_task_status failed: {e}")
+        return False
+    try:
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT errors, runtime_id FROM agent_tasks "
+                "WHERE id=? AND status='running' AND started_at=?",
+                (task_id, started_at)).fetchone()
+            if not row:
+                return False
+            _raw_errors, _runtime_id = row
+            errs = parse_task_errors(_raw_errors)
+            errs.append(dict(diagnostic))
+    except Exception as e:
+        log.warning(f"no_progress: finalize task {task_id} read failed: {e}")
+        return False
+    try:
+        update_task_status(
+            task_id, "failed", exit_code=-1,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            errors=json.dumps(errs[-TASK_ERROR_SLOTS:], ensure_ascii=False),
+            cascade_trigger="sweeper")
+    except Exception as e:
+        log.warning(f"no_progress: finalize task {task_id} failed: {e}")
+        return False
+    # 并发确认：worker 在「读到 running」与「写终态」之间完成时，update_task_status
+    # 的终态幂等会跳过 → 不得再把对应的 success exec 误改为 failed。
+    try:
+        with db_lock:
+            _after = db.cursor().execute(
+                "SELECT status FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+    except Exception:
+        return False
+    if not _after or (_after[0] or "") != "failed":
+        return False
+    if diagnostic.get("repeats"):
+        _err_text = (f"NO_PROGRESS(repeated_step): tool={diagnostic.get('tool', '')} "
+                     f"fingerprint={diagnostic.get('step_fingerprint', '')} "
+                     f"repeats={diagnostic.get('repeats')} "
+                     f"steps={diagnostic.get('first_seq')}-{diagnostic.get('last_seq')}")
+    else:
+        _err_text = (f"NO_PROGRESS(no_activity): silent {diagnostic.get('silent_sec')}s >= "
+                     f"threshold {diagnostic.get('threshold')}s")
+    _fail_exec_for_agent_task(task_id, _err_text, error_code="NO_PROGRESS")
+    try:
+        from src.domains.insight.public import record_task_failed
+        record_task_failed(str(task_id), "autopilot", _runtime_id, "no_progress")
+    except Exception as _me:
+        log.debug(f"no_progress: record_task_failed metric failed: {_me}")
+    return True
+
+
 def _record_no_progress_scan_failure(exc: Exception) -> None:
     """记录一次扫描失败：指标累加 + 连续计数，达到阈值升级 ERROR（Issue #3772）。"""
     global _NO_PROGRESS_SCAN_FAILURE_STREAK
@@ -2667,7 +2854,9 @@ def _sweep_no_progress_tasks(now_epoch=None) -> int:
     返回本轮成功重派次数。
     """
     from src.domains.runtime.engine import task_timeout as tt
-    from src.domains.runtime.engine.task_activity import has_no_recent_activity
+    from src.domains.runtime.engine.task_activity import (
+        has_no_recent_activity, repeated_tool_steps,
+    )
     from src.domains.runtime.engine.transient_retry import (
         TASK_ERROR_SLOTS, _append_task_error, parse_task_errors,
     )
@@ -2700,6 +2889,7 @@ def _sweep_no_progress_tasks(now_epoch=None) -> int:
             enabled = tt.no_progress_enabled(task, cfg)
             threshold, _src = tt.no_progress_timeout_sec(task, cfg)
             limit = tt.no_progress_retries(task, cfg)
+            repeat_steps = tt.no_progress_repeat_steps(task, cfg)
         except Exception:
             continue
         _started = _parse_iso_aware(started_at)
@@ -2708,13 +2898,20 @@ def _sweep_no_progress_tasks(now_epoch=None) -> int:
         silent_sec = now - _started.timestamp()
         if silent_sec < threshold:
             continue
+        # Issue #3741：进展判据与活跃度判据并列——空转任务每 ~115s 仍写一条 tool_use，
+        # 活跃度恒为 true，只有「连续 N 步 tool+input 指纹相同」才能识别。
+        repeated = None
         try:
             with db_lock:
+                _cursor = db.cursor()
                 no_activity = has_no_recent_activity(
-                    db.cursor(), tid, threshold, now_epoch=now)
+                    _cursor, tid, threshold, now_epoch=now)
+                if not no_activity and repeat_steps > 0:
+                    repeated = repeated_tool_steps(
+                        _cursor, tid, threshold, repeat_steps, now_epoch=now)
         except Exception:
             continue
-        if not no_activity:
+        if not no_activity and repeated is None:
             continue
         errs = parse_task_errors(errors)
         if not enabled:
@@ -2750,20 +2947,59 @@ def _sweep_no_progress_tasks(now_epoch=None) -> int:
                                 "left to the original failure path"})
                 except Exception as _ae:
                     log.warning(f"no_progress: exhausted diagnostic failed for {tid}: {_ae}")
-            log.info(f"no_progress: task {tid} requeue limit reached "
-                     f"(requeues={len(prior)}, limit={limit}); not requeued")
+            # Issue #3741：重派上限耗尽后不再「留给原失败路径」——原路径要等 3600s 超时，
+            # 期间空转任务继续占用独占引擎。此处直接收口 failed(reason=no_progress)。
+            _final_diag = {
+                "error_code": "NO_PROGRESS_FAILED",
+                "task_id": tid,
+                "reason": "repeated_step" if repeated else "no_activity",
+                "silent_sec": round(silent_sec),
+                "threshold": threshold,
+                "requeues": len(prior),
+                "limit": limit,
+                "note": "no-progress requeue limit reached; "
+                        "task finalized as failed(reason=no_progress)",
+            }
+            if repeated:
+                _final_diag.update({
+                    "repeats": repeated["repeats"],
+                    "repeat_threshold": repeat_steps,
+                    "tool": repeated["tool"],
+                    "step_fingerprint": repeated["fingerprint"],
+                    "first_seq": repeated["first_seq"],
+                    "last_seq": repeated["last_seq"],
+                })
+            if _finalize_no_progress(tid, started_at, _final_diag):
+                _detail = (f"steps={_final_diag.get('first_seq')}-{_final_diag.get('last_seq')} "
+                           f"repeats={_final_diag.get('repeats')}"
+                           if repeated else
+                           f"silent={_final_diag.get('silent_sec')}s")
+                log.warning(
+                    f"no_progress: task {tid} finalized as failed(reason=no_progress) "
+                    f"after {len(prior)} requeue(s); "
+                    f"reason={'repeated_step' if repeated else 'no_activity'} {_detail}")
             continue
         diagnostic = {
             "error_code": "NO_PROGRESS_REQUEUE",
             "task_id": tid,
+            "reason": "repeated_step" if repeated else "no_activity",
             "silent_sec": round(silent_sec),
             "threshold": threshold,
             "attempt": len(prior) + 1,
             "limit": limit,
             "superseded_started_at": started_at,
-            "note": "running task had no new task_messages within threshold; old execution "
+            "note": "running task showed no progress within threshold; old execution "
                     "superseded (started_at reset) and requeued once",
         }
+        if repeated:
+            diagnostic.update({
+                "repeats": repeated["repeats"],
+                "repeat_threshold": repeat_steps,
+                "tool": repeated["tool"],
+                "step_fingerprint": repeated["fingerprint"],
+                "first_seq": repeated["first_seq"],
+                "last_seq": repeated["last_seq"],
+            })
         if _requeue_no_progress(tid, started_at, diagnostic):
             requeued += 1
             log.info(f"no_progress: task {tid} silent {silent_sec:.0f}s >= {threshold:.0f}s "
@@ -2899,6 +3135,69 @@ def _reap_zombie_executions() -> None:
     except Exception as _ze:
         log.warning(f"Autopilot zombie recovery error: {_ze}")
 
+def _reap_terminal_exec_running_tasks() -> int:
+    """Issue #3741：反向僵尸回收——exec 已终态（failed/cancelled）但 agent_task 仍活跃。
+
+    既有 `_reap_zombie_executions` 只扫 exec 在 running/dispatched 的行，做
+    `agent_tasks → exec` 单向同步；exec 一旦 failed 就退出扫描范围，
+    「exec failed + agent_tasks running」的反向残留无人处理（报告中的空转 36 分钟）。
+
+    判据与保护：
+    - 仅匹配 `agent_task_id` 非空的执行（历史空值行无法权威关联，跳过）；
+    - exec 终态时间距今 ≥ TERMINAL_EXEC_REVERSE_GRACE_SECONDS（默认 60s）才动，
+      避免与正常收口链路（poll/complete 回写）抢；
+    - 任务状态必须仍是 queued/dispatched/running/pending_self_report；
+    - exec 终态语义映射：cancelled → 任务 cancelled（用户终止），failed → 任务 failed。
+
+    返回本轮收口的任务数。
+    """
+    try:
+        with _rt_cursor_for("runtime") as c:
+            # JOIN 活跃任务做预过滤：避免 LIMIT 被大量正常终态 exec 占满而饿死老残留。
+            rows = c.execute(
+                "SELECT e.id, e.agent_task_id, e.status, e.completed_at, "
+                "e.created_at, e.started_at "
+                "FROM autopilot_executions e "
+                "JOIN agent_tasks t ON t.id = e.agent_task_id "
+                "WHERE e.status IN ('failed', 'cancelled') "
+                "AND e.agent_task_id IS NOT NULL AND e.agent_task_id <> '' "
+                "AND t.status IN ('queued', 'dispatched', 'running', 'pending_self_report') "
+                "ORDER BY e.id DESC LIMIT 50").fetchall()
+    except Exception as e:
+        log.warning(f"terminal-exec reverse sweep: scan failed: {e}")
+        return 0
+    _now = datetime.now(timezone.utc)
+    reaped = 0
+    for _exec_id, _atid, _exec_status, _done, _created, _started in rows or []:
+        _ref = (_parse_iso_aware(_done) or _parse_iso_aware(_created)
+                or _parse_iso_aware(_started))
+        # 时间不可解析 → 保守跳过（无法确认是否已过宽限，宁可下一轮再判）
+        if _ref is None:
+            continue
+        if (_now - _ref).total_seconds() < TERMINAL_EXEC_REVERSE_GRACE_SECONDS:
+            continue
+        _target = "cancelled" if _exec_status == "cancelled" else "failed"
+        _reason = (f"autopilot execution {_exec_id} 已 {_exec_status}，"
+                   "但任务仍在活跃；反向僵尸回收终止任务并释放引擎槽位")
+        try:
+            if not _terminate_stuck_agent_task(
+                    _atid, _reason, status=_target,
+                    error_code="TERMINAL_EXEC_RUNNING_TASK"):
+                continue
+            reaped += 1
+            log.warning(f"terminal-exec reverse sweep: exec {_exec_id} ({_exec_status}) "
+                        f"still had active task {_atid} -> terminated as {_target}")
+            try:
+                from src.domains.insight.public import record_task_failed
+                record_task_failed(str(_atid), "autopilot", 0,
+                                   "terminal_exec_running_task")
+            except Exception as _me:
+                log.debug(f"terminal-exec reverse sweep: metric failed: {_me}")
+        except Exception as e:
+            log.warning(f"terminal-exec reverse sweep: task {_atid} failed: {e}")
+    return reaped
+
+
 async def scheduler_loop():
     """Autopilot 调度主循环——每 60 秒扫描到期任务。
 
@@ -2956,6 +3255,11 @@ async def scheduler_loop():
             await asyncio.to_thread(_reap_zombie_executions)
         except Exception as _ze2:
             log.warning(f"Autopilot zombie recovery error: {_ze2}")
+        # Issue #3741：反向残留——exec 已终态但 agent_task 仍活跃 → 终止任务、释放槽位
+        try:
+            await asyncio.to_thread(_reap_terminal_exec_running_tasks)
+        except Exception as _rte:
+            log.warning(f"Autopilot terminal-exec reverse sweep error: {_rte}")
         # pending_self_report 超时兜底（Issue #537 P0-1）：worker 未在阈值内自报 → timeout_failed
         try:
             await asyncio.to_thread(_sweep_pending_self_report_timeouts)
