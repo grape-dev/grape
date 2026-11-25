@@ -124,6 +124,9 @@ def mysql_semantics(monkeypatch):
         yield _MySQLSemanticsCursor(state, log)
 
     monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: d == "runtime")
+    # Issue #4375：`_any_cursor` 已收口到内核唯一路由判定 `route_of`（经 `cursor_for`），
+    # 拓扑模拟必须同步把 runtime 域钉到 `domain`，否则按「单库拓扑」落进程主库。
+    monkeypatch.setattr(db_registry, "route_of", lambda d: "domain" if d == "runtime" else "local")
     monkeypatch.setattr(db_registry, "cursor", fake_cursor)
     monkeypatch.setattr(db_registry, "transaction", fake_tx)
     return state, log

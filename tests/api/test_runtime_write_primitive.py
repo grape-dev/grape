@@ -44,8 +44,13 @@ def install(monkeypatch, cur):
 
 
 def install_own(monkeypatch, cur):
-    """自有 DSN 拓扑（`_any_cursor` 走 db_registry.cursor，autocommit 不提交）。"""
+    """自有 DSN 拓扑（`_any_cursor` 走 db_registry.cursor，autocommit 不提交）。
+
+    Issue #4375：`_any_cursor` 已收口到内核唯一路由判定 `route_of`（经 `cursor_for`），
+    拓扑模拟必须把路由钉到 `domain`，只 patch `uses_own_dsn` 会按「单库拓扑」落到进程主库。
+    """
     monkeypatch.setattr(db_registry, "uses_own_dsn", lambda _d: True)
+    monkeypatch.setattr(db_registry, "route_of", lambda _d: "domain")
     return install(monkeypatch, cur)
 
 

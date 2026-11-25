@@ -139,6 +139,8 @@ def test_mgmt_cross_domain_write_routes_to_runtime_connection(monkeypatch):
         yield _Cur()
 
     monkeypatch.setattr(db_registry, "uses_own_dsn", lambda _d: True)
+    # Issue #4375：`_any_cursor` 收口到内核 `route_of`，拓扑模拟同步钉住路由判定
+    monkeypatch.setattr(db_registry, "route_of", lambda _d: "domain")
     monkeypatch.setattr(db_registry, "cursor", _cursor)
 
     assert rt.delete_autopilot_executions_by_task_any(42) == 1
