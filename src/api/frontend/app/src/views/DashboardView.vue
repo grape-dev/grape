@@ -446,12 +446,20 @@
           </div>
           <div class="adv-row">
             <span class="adv-label">{{ t('work_branch') }}</span>
+            <input
+              v-model="existingBranchSearch"
+              :placeholder="t('branch_search_placeholder')"
+              class="dbv-branch-search"
+            />
             <select v-model="advWorkBranch" class="adv-select">
               <option v-if="!branches.length" :value="detailWorkBranch || 'main'">
                 {{ detailWorkBranch || 'main' }}
               </option>
+              <option v-else-if="!filteredBranches.length" disabled value="">
+                {{ t('branch_no_match') }}
+              </option>
               <option
-                v-for="br in branches"
+                v-for="br in filteredBranches"
                 :key="br.name"
                 :value="br.name"
                 :selected="br.name === detailWorkBranch"
@@ -465,9 +473,19 @@
           </div>
           <div v-if="newBranchOpen" class="dbv-newbranch">
             <input v-model="newBranchName" :placeholder="t('branch_name')" class="dbv-nb-input" />
+            <input
+              v-model="newBranchRefSearch"
+              :placeholder="t('branch_search_placeholder')"
+              class="dbv-nb-search"
+            />
             <select v-model="newBranchRef" class="dbv-nb-sel">
               <option v-if="!branches.length" value="main">main</option>
-              <option v-for="br in branches" :key="br.name" :value="br.name">{{ br.name }}</option>
+              <option v-else-if="!filteredNewBranchRefs.length" disabled value="">
+                {{ t('branch_no_match') }}
+              </option>
+              <option v-for="br in filteredNewBranchRefs" :key="br.name" :value="br.name">
+                {{ br.name }}
+              </option>
             </select>
             <button class="ap-btn" @click="createNewBranch()">{{ t('create') }}</button>
             <button class="ap-btn" @click="newBranchOpen = false">{{ t('cancel') }}</button>
@@ -1335,6 +1353,7 @@
 <script setup>
 import { providerFromRepoKey } from '../lib/repo-provider.js'
 import { stripRepoPrefix as stripRepoPrefixShared } from '../lib/repo-key.js'
+import { filterBranchesByPrefix } from '../lib/branchFilter.js'
 import { pluginsEnabled } from '../lib/features.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 
@@ -1493,6 +1512,14 @@ const inlineName = ref('')
 const inlineDesc = ref('')
 // 高级选项
 const branches = ref([])
+const existingBranchSearch = ref('')
+const newBranchRefSearch = ref('')
+const filteredBranches = computed(() =>
+  filterBranchesByPrefix(branches.value, existingBranchSearch.value)
+)
+const filteredNewBranchRefs = computed(() =>
+  filterBranchesByPrefix(branches.value, newBranchRefSearch.value)
+)
 const advWorkBranch = ref('main')
 const detailWorkBranch = ref('')
 const newBranchOpen = ref(false)
@@ -1952,6 +1979,8 @@ function t(key, vars) {
     work_branch: '工作分支',
     create_branch: '新建分支',
     branch_name: '分支名',
+    branch_search_placeholder: '搜索分支（前缀匹配，忽略大小写）',
+    branch_no_match: '无匹配分支',
     custom_config: '自定义配置',
     add_config: '添加配置项',
     label_skill: '技能',
@@ -2931,6 +2960,8 @@ function loadBranches(owner, name) {
     .get('/scenes/branches/' + owner + '/' + name + branchQS(owner, name))
     .then(function (b) {
       branches.value = (b && b.branches) || []
+      existingBranchSearch.value = ''
+      newBranchRefSearch.value = ''
     })
     .catch(function () {
       branches.value = []
@@ -2967,6 +2998,8 @@ function createNewBranch() {
       branches.value = (b && b.branches) || []
       advWorkBranch.value = newBranchName.value.trim()
       newBranchName.value = ''
+      newBranchRefSearch.value = ''
+      existingBranchSearch.value = ''
       newBranchOpen.value = false
     })
     .catch(function (e) {
@@ -5096,6 +5129,21 @@ onBeforeUnmount(function () {
   background: var(--bg);
   font-family: inherit;
   color: var(--t);
+}
+.dbv-branch-search,
+.dbv-nb-search {
+  width: 200px;
+  padding: 7px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  font-size: 13px;
+  outline: none;
+  background: var(--bg);
+  font-family: inherit;
+  color: var(--t);
+}
+.dbv-nb-search {
+  width: 140px;
 }
 .dbv-nb-sel {
   width: 120px;

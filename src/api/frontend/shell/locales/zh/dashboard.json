@@ -138,6 +138,8 @@
   "branch_name_empty": "分支名不能为空",
   "branch_created": "分支已创建",
   "branch_required": "工作分支不能为空",
+  "branch_search_placeholder": "搜索分支（前缀匹配，忽略大小写）",
+  "branch_no_match": "无匹配分支",
   "adv_options_saved": "高级选项已保存",
   "edit": "编辑",
   "delete_scene": "删除场景",
