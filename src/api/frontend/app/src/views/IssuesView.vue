@@ -1200,11 +1200,13 @@ const STATUS_LABELS = computed(() => {
   })
   return out
 })
+// #4234 状态色走主题语义 token（QA Medium：原硬编码 hex 不随暗色主题适配）：
+// 进行中=accent、待输入=橙、待审核/完成=绿、未开始/已取消=次级文本色。
 const STATUS_COLORS = {
   pending: 'var(--t3)',
-  in_progress: '#3b82f6',
-  awaiting_input: '#f59e0b',
-  pending_review: '#10b981',
+  in_progress: 'var(--a)',
+  awaiting_input: 'var(--or)',
+  pending_review: 'var(--g)',
   done: 'var(--g)',
   cancelled: 'var(--t3)',
 }
@@ -1218,13 +1220,15 @@ const STAGE_LABELS = computed(() => ({
   done: t('status.tag_completed') || '已完成',
   '': '—',
 }))
+// 阶段标签色同走语义 token：vod=粉、issue=红、coding=accent、qa=紫、sre=橙、
+// 待审核/完成=绿。
 const STAGE_COLORS = {
-  vod: '#ec4899',
-  issue: '#ef4444',
-  coding: '#3b82f6',
-  qa: '#a855f7',
-  sre: '#f59e0b',
-  pending_review: '#10b981',
+  vod: 'var(--pk)',
+  issue: 'var(--r)',
+  coding: 'var(--a)',
+  qa: 'var(--pu)',
+  sre: 'var(--or)',
+  pending_review: 'var(--g)',
   done: 'var(--g)',
   '': 'var(--t3)',
 }
