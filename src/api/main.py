@@ -835,13 +835,17 @@ from src.api.exception_handlers import install_exception_handlers
 
 # ===== 三层健康检查（Issue #596 P1：抽至 src/api/health_endpoints.py）=====
 # /health /healthz /readyz /health/realtime /api/ping 已在上方 install_health_endpoints(app) 处注册。
-@app.get("/metrics")
-async def metrics():
-    """Prometheus 指标端点已禁用——无外部 Prometheus 消费，且无认证暴露 API 路由结构有安全风险。
-    如需启用，配置 METRICS_ADDR 并添加认证后取消下方注释。
-    """
-    from fastapi.responses import JSONResponse
-    return JSONResponse({"error": "metrics endpoint disabled"}, status_code=404)
+# Issue #3757：`server_common.attach_health(readiness=True)` 已注册 /metrics；这里再注册
+# 一份会同时污染 app.routes 与 schema 生成（Duplicate Operation ID metrics_metrics_get）。
+# 保留 stub 作为唯一兜底：仅在未被装配时注册（此前它是被先注册者完全遮蔽的死代码）。
+if not server_common.has_route(app, "/metrics"):
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus 指标端点已禁用——无外部 Prometheus 消费，且无认证暴露 API 路由结构有安全风险。
+        如需启用，配置 METRICS_ADDR 并添加认证后取消下方注释。
+        """
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "metrics endpoint disabled"}, status_code=404)
 
 def _check_and_sync_templates() -> bool:
     """检查 project-templates.json + examples/ 是否存在，缺失则自动从 grape-template 仓库拉取。

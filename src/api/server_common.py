@@ -46,6 +46,10 @@ __all__ = [
     "include_selected",
     "check_and_sync_templates",
     "attach_internal_routes",
+    "has_route",
+    "assert_route_registry_unique",
+    "route_registry_conflicts",
+    "RouteRegistryConflict",
 ]
 
 
@@ -1089,6 +1093,7 @@ def include_selected(
     router,
     methods=None,
     paths=None,
+    exclude_ops=None,
 ) -> None:
     """把已有 APIRouter 中满足条件（HTTP method / 路径子串）的路由挂到 app 上。
 
@@ -1096,9 +1101,13 @@ def include_selected(
     不复制 handler、不改共享路由文件。mount 后的路由对象保留原有 path/methods/
     dependencies/openapi 元数据。
 
-    - methods: 允许的 HTTP method 集合（如 {"GET"} / {"POST"}）；None=全部
-    - paths:   路径子串过滤器（任一命中即挂载）；None=全部
+    - methods:     允许的 HTTP method 集合（如 {"GET"} / {"POST"}）；None=全部
+    - paths:       路径子串过滤器（任一命中即挂载）；None=全部
+    - exclude_ops: 需要排除的 `(METHOD, path)` 集合（Issue #3757）。用于「同一批
+      handler 已被另一个 router 挂过」的场景——交集若补挂进来，同一端点会进
+      `app.routes` 两遍，契约的 operationId / (method,path) 唯一性随之失守。
     """
+    _excluded = {(str(m).upper(), p) for m, p in (exclude_ops or set())}
     routes = []
     for r in router.routes:
         if not isinstance(r, APIRoute):
@@ -1107,11 +1116,110 @@ def include_selected(
             continue
         if paths is not None and not any(p in r.path for p in paths):
             continue
+        if _excluded and any((str(m).upper(), r.path) in _excluded for m in (r.methods or set())):
+            continue
         routes.append(r)
     if routes:
         from fastapi import APIRouter
         sub = APIRouter(routes=routes)
         app.include_router(sub)
+
+
+def has_route(app: FastAPI, path: str, method: str = None) -> bool:
+    """幂等装配判定：app 上是否已注册该 path（可选限 method）（Issue #3757）。
+
+    用途：同一批端点被两个装配函数（`attach_health` / `attach_frontend` 与
+    `install_health_endpoints` / `install_spa_routes`）依次装配时，先注册者才是
+    生效实现（Starlette 按注册顺序匹配），第二份必须跳过而非再注册一遍。
+    """
+    _m = str(method).upper() if method else None
+    for route in getattr(app, "routes", []) or []:
+        if getattr(route, "path", None) != path:
+            continue
+        if _m is None:
+            return True
+        methods = {str(m).upper() for m in (getattr(route, "methods", None) or set())}
+        if _m in methods:
+            return True
+    return False
+
+
+class RouteRegistryConflict(RuntimeError):
+    """路由注册表违反契约唯一性（Issue #3757）。"""
+
+
+def _contract_surface_ops(app: FastAPI) -> list:
+    """列出进 OpenAPI 契约的路由 `(METHOD, path, operation_id)`（Issue #3757）。
+
+    口径与 `openapi.py` 对齐：只算 `/api/` 前缀且 `include_in_schema` 不为 False 的
+    路由（内部端点 / 健康探针 / SPA 兜底不进契约，也不是 operationId 警告的来源）。
+    `app.routes` 在 fastapi>=0.140 是 `_IncludedRouter` 惰性包装，必须复用
+    `openapi._iter_routes` 展开——直接读 `r.path` 会取不到 APIRoute，门禁假绿。
+    """
+    from src.api.openapi import _iter_routes
+
+    ops = []
+    for route in getattr(app, "routes", []) or []:
+        for r in _iter_routes(route):
+            if getattr(r, "include_in_schema", True) is False:
+                continue
+            path = getattr(r, "path", None)
+            if not path or not str(path).startswith("/api/"):
+                continue
+            for m in (getattr(r, "methods", None) or set()):
+                ops.append((str(m).upper(), path, getattr(r, "operation_id", None)))
+    return ops
+
+
+def route_registry_conflicts(app: FastAPI) -> list:
+    """返回契约面重复注册项（空列表 = 唯一性成立）。
+
+    FastAPI 对 operationId 重复只打 `UserWarning`，schema 里后写覆盖前写：契约的
+    唯一性承诺实际失守但进程照常启动（Issue #3757 实测 456 个 id 各告警一次）。
+    """
+    from collections import Counter
+
+    ops = _contract_surface_ops(app)
+    errors = []
+    seen_ops = {}
+    seen_ids = {}
+    for method, path, operation_id in ops:
+        key = (method, path)
+        if key in seen_ops:
+            errors.append(f"duplicate route registration: {method} {path}")
+        else:
+            seen_ops[key] = method
+        # operation_id 缺省时 FastAPI 用 route.unique_id 作契约 id；这里只校验
+        # 显式声明的 id（隐式 id 由 `(method,path)` 唯一性覆盖）。
+        if not operation_id:
+            continue
+        if operation_id in seen_ids:
+            errors.append(
+                f"duplicate operationId '{operation_id}' at "
+                f"{seen_ids[operation_id]} and {method} {path}")
+        else:
+            seen_ids[operation_id] = f"{method} {path}"
+    if errors:
+        _dupe = Counter(e.split(":")[0] for e in errors)
+        errors.append(f"contract surface: {len(ops)} operations, "
+                      f"{len(set((m, p) for m, p, _ in ops))} distinct (method,path), "
+                      f"{len(set(i for _, _, i in ops if i))} distinct operationId "
+                      f"({dict(_dupe)})")
+    return errors
+
+
+def assert_route_registry_unique(app: FastAPI) -> None:
+    """启动自检：契约面 (method,path) 与 operationId 必须严格唯一（Issue #3757）。
+
+    应用组装完成后调用（本仓入口：`src/api/grape_server.py`）。重复即抛
+    `RouteRegistryConflict` fail-fast，不再依赖 FastAPI 的 UserWarning。
+    """
+    conflicts = route_registry_conflicts(app)
+    if not conflicts:
+        return
+    raise RouteRegistryConflict(
+        f"route registry violates contract uniqueness ({len(conflicts)} conflict line(s)): "
+        + " | ".join(conflicts))
 
 
 def attach_internal_routes(app: FastAPI, domain: str) -> None:

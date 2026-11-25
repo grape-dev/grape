@@ -5,7 +5,7 @@ Issue #699 Phase 4 四进程拆分：本进程把 main.py 的「用户面」职�
 只启动 Mgmt 进程定时任务（设计 §5.1 / §5.5 / §10）。
 """
 
-import sys, os
+import asyncio, sys, os
 
 from src.kernel.config import log
 
@@ -591,6 +591,9 @@ app.include_router(git_repo_router)
 
 # 运行域用户面路由（设计 §5.5 跨进程分配）
 from src.domains.runtime.routes import events, chat, issues, pipeline, task_logs, runtime
+# 运行视图端点（A 进程用户面视图）：runtime_view 与 runtime.py 同一实现源，
+# 只重新注册视图 GET/PUT 端点，与 runtime.router 的全量挂载互斥（避免 405 歧义）。
+from src.domains.runtime.routes.runtime_view import view_router as runtime_view_router
 
 app.include_router(events.router)        # 事件查看/操作（GET 查看 + 用户面操作）
 
@@ -603,7 +606,18 @@ app.include_router(pipeline.router)      # 仓库流水线展示
 app.include_router(task_logs.router)     # 任务日志查看 / SSE 流（TC-4.10）
 
 # runtime 只读端点（runtime_view 语义：Mgmt 查看 install / machine-health / task-status）
-server_common.include_selected(app, runtime.router, methods={"GET"})
+# Issue #3757：view_router 已注册的 (method,path) 必须从本子集排除——两者是同一批
+# handler 的两次注册，交集会让同一端点同时进 app.routes 两遍（Duplicate Operation ID
+# 的一半来源就是这里的 15 条 GET 交集）。
+_RUNTIME_VIEW_OPS = {
+    (str(m).upper(), r.path)
+    for r in runtime_view_router.routes
+    for m in (getattr(r, "methods", None) or set())
+}
+server_common.include_selected(app, runtime.router, methods={"GET"},
+                               exclude_ops=_RUNTIME_VIEW_OPS)
+app.include_router(runtime_view_router)
+
 # 接管会话（weekly-11）：任务接管是一等资源，路由在管理域，只有 mgmt 进程提供
 from src.domains.mgmt.routes import takeover as takeover_api  # noqa: E402
 app.include_router(takeover_api.router)
@@ -623,6 +637,17 @@ app.include_router(health.router)
 from src.domains.mgmt.routes import knowledge
 
 app.include_router(knowledge.router)
+
+# 可观测性面板（/api/obs/*）：Issue #3757 前只由文件末尾的「第二套注册」循环挂载，
+# 合并注册清单时并入本清单，否则 observability 路由面整体 404。
+from src.domains.insight.routes import observability
+
+app.include_router(observability.router)
+
+# Issue #3757：本文件的路由注册以以上单一清单为唯一事实源（append-only）。
+# 禁止再追加第二套 app.include_router(...) 循环/清单——同一 router 挂两次会让
+# 契约的 operationId 唯一性与 (method,path) 唯一性双双失守（FastAPI 只打
+# UserWarning，schema 里后写覆盖前写）。启动自检见 assert_route_registry_unique 调用。
 
 # ===== Issue-45: OpenAPI 定制渲染 =====
 from src.api.openapi import custom_openapi
@@ -650,39 +675,13 @@ server_common.attach_health(app, service_name="server", readiness=True)
 
 server_common.attach_frontend(app)
 
-import sys, os, asyncio
-
-# Issue #455：主服务要求 Python >= 3.10（与 main.py 一致的防御）
-from src.api.version_check import ensure_python_version
-
-from fastapi import FastAPI, Request
-
+# ===== 可观察性中间件 / 请求日志（与 main.py 同款，单一实现源）=====
+# Issue #3757：以下 import 块是「第二套路由注册」整段移植进本文件时的残留。
+# 与上方注册段重复的 import（sys/os/asyncio、ensure_python_version、FastAPI/Request、
+# 各路由模块、admin_router、git_repo_router、runtime_view_router）已删除——正是这些
+# 重复 import 让后来者能再写出第二套 include_router 循环，重复注册与重复 import 同源。
 from fastapi.middleware.cors import CORSMiddleware
 
-from fastapi.responses import JSONResponse
-
-from fastapi.staticfiles import StaticFiles
-
-from src.domains.mgmt.routes import (
-    auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, knowledge, devstage, feedback, autopilot, orgs, community, patrol,
-)
-
-from src.domains.insight.routes import (
-    dashboard, search, health, latency, observability,
-)
-
-from src.domains.runtime.routes import (
-    events, chat, pipeline, issues, task_logs,
-)
-
-from src.domains.mgmt.admin.routes import router as admin_router
-
-from src.api.git_repo_api import router as git_repo_router
-
-# runtime.py 的用户面端点（GET machine-health/tasks/install + PUT 标签设置）——A 加载
-from src.domains.runtime.routes.runtime_view import view_router as runtime_view_router
-
-# ===== 可观察性中间件 / 请求日志（与 main.py 同款，单一实现源）=====
 from src.domains.insight.observability import metrics_middleware, start_metrics_server, metrics_enabled
 
 from src.api.middleware import install_request_middleware
@@ -702,30 +701,15 @@ def _check_and_sync_templates() -> bool:
     from src.api.main import _check_and_sync_templates as _check
     return _check()
 
-"""Grape 工作台服务 — 用户面向 API（A 进程，Issue #596 P1）。
-
-三进程拆分（docs/weekly-09/grape-three-process-split-design.md §4.1.1）：
-- A（本文件，:38080）：用户交互、配置管理、数据展示、IM 集成、可观测性面板；
-- B（grape_event_server.py，:38081）：Webhook 接收、事件归一化、路由判定、任务入队；
-- C（grape_worker_server.py，:38082）：任务认领、Agent 执行、心跳、结果回传。
-
-A 进程职责：
-1. 加载 25 个用户面路由 + admin + git-repo + runtime 用户面视图端点
-   （runtime_view.py：GET machine-health/tasks 列表/install 下载 + PUT 标签设置）；
-2. 启动 A 归属的定时任务（设计文档 §6 分配表：lease sweep / knowledge sync /
-   skill sync / feedback reconcile / upload cleanup / cooldown / active user
-   tracker / server metrics / obs 三循环 + master logging / knowledge migrate /
-   D32 迁移 / table_maintenance 的 task_messages 部分）；
-3. IM WebSocket BotManager（飞书长连接，§10.7：归 A）；
-4. 启动安全门禁、模板自愈、help.html、OpenAPI 契约落盘；
-5. SPA / 静态文件服务（与原 main.py 一致）。
-
-单进程兼容模式：`src/api/main.py` 保留（加载全部路由 + 全部定时任务），
-`uvicorn src.api.main:app` 行为不变。多进程模式用本入口。
-
-启动：
-    uvicorn src.api.grape_server:app --host 0.0.0.0 --port 38080 --workers 1
-"""
+# A 进程职责（Issue #596 P1 / 设计 docs/weekly-09/grape-three-process-split-design.md §4.1.1）：
+# 1. 用户面路由（上方单一注册清单：mgmt + runtime 用户面视图 + insight 数据面
+#    + observability + admin + git-repo）；
+# 2. A 归属定时任务（server_tasks.start_mgmt_tasks，§6 分配表）；
+# 3. IM WebSocket BotManager（飞书长连接，§10.7 归 A）；
+# 4. 安全门禁、模板自愈、help.html、OpenAPI 契约落盘；
+# 5. SPA / 静态文件服务（与原 main.py 一致）。
+# 单进程兼容模式：`uvicorn src.api.main:app` 行为不变；多进程用本入口
+# `uvicorn src.api.grape_server:app --host 0.0.0.0 --port 38080 --workers 1`。
 
 im_engine = None
 
@@ -737,17 +721,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ===== 用户面路由注册（25 个 + admin + git-repo + runtime 视图）=====
-for r in [
-    grape_auth.router, auth.router, repos.router, admin_router, git_repo_router,
-    dashboard.router, agents.router, events.router, chat.router, settings.router,
-    skills.router, search.router, pipeline.router, scenes.router, templates.router,
-    issues.router, feishu_onboard.router, feishu_card.router, task_logs.router,
-    knowledge.router, health.router, devstage.router, latency.router, feedback.router,
-    autopilot.router, orgs.router, community.router, observability.router, patrol.router,
-    runtime_view_router,
-]:
-    app.include_router(r)
+# ===== Issue #3757：路由注册清单唯一性 =====
+# 本文件的用户面路由以 526 行起的单一清单为唯一事实源（append-only）；唯一性由装配
+# 末尾的 assert_route_registry_unique(app) 在启动期 fail-fast 校验。
 
 metrics_middleware(app)
 
@@ -769,9 +745,20 @@ install_request_middleware(app)
 
 install_exception_handlers(app)
 
+# Issue #3757：以下两个装配函数与上方 attach_health / attach_frontend 是同一批端点的
+# 两份实现（main.py 尾块移植残留）。幂等由装配函数自己保证——已注册的 (method,path)
+# 不再重复挂载（health_endpoints._health_get / spa._spa_get），因此这里仍照原样调用，
+# 只补装各自独有的端点（/api/ping、/faro/collect）。
 install_health_endpoints(app, service_name="server")
 
 install_spa_routes(app)
+
+# ===== Issue #3757：契约唯一性启动自检（最后一步）=====
+# 原「第二套注册」循环（30 个 router，与上方清单交集 28 个）已删除：它就是 456 个
+# 重复 operationId 的来源。唯一性由以下 fail-fast 保证，而不是靠 FastAPI 的
+# UserWarning（warning 不阻断启动，schema 里后写覆盖前写，CLI 命令映射静默串位）。
+# 必须留在装配末尾：任何在其后注册的 /api/ 路由都逃过自检。
+server_common.assert_route_registry_unique(app)
 
 if __name__ == "__main__":
     import uvicorn

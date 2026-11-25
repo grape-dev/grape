@@ -36,6 +36,22 @@ def _is_loopback(request: Request) -> bool:
     return False
 
 
+def _health_get(app: FastAPI, path: str, **kwargs):
+    """幂等 GET 注册装饰器（Issue #3757）。
+
+    四进程入口既调 `server_common.attach_health`（四进程统一装配）又调本函数
+    （legacy 共享出口）：同一 path 被注册两遍，Starlette 先注册者生效、第二份是
+    死代码，但 `app.routes` 与契约唯一性都会被污染。已注册（同 method+path）即跳过，
+    返回原函数对象，不丢 handler。
+    """
+    def deco(fn):
+        from src.api.server_common import has_route
+        if not has_route(app, path, "GET"):
+            app.add_api_route(path, fn, methods=["GET"], **kwargs)
+        return fn
+    return deco
+
+
 def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None:
     """在 app 上注册 /health /healthz /readyz /health/realtime /api/ping。
 
@@ -43,9 +59,12 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
       健康响应携带（§4.7）；
     - IM 状态读取走 `app.state.im_engine`（A 进程装配新引擎；
       B/C 无 IM，realtime 不报 im 字段）。
+
+    幂等（Issue #3757）：已由 `server_common.attach_health` / `build_app` 注册过的
+    (method,path) 不再重复注册。
     """
 
-    @app.get("/health")
+    @_health_get(app, "/health")
     async def health(request: Request):
         """Liveness：进程存活，不检查 DB（K8s livenessProbe 用）。
 
@@ -72,8 +91,8 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
     _readiness_cache = {"result": None, "expires_at": 0}
     _READINESS_CACHE_TTL = 3  # 秒
 
-    @app.get("/healthz")
-    @app.get("/readyz")
+    @_health_get(app, "/healthz")
+    @_health_get(app, "/readyz")
     async def readiness(request: Request):
         """Readiness：DB 连通 + 表结构完整性，3s 缓存。"""
         if not _is_loopback(request):
@@ -139,7 +158,7 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
         _readiness_cache["expires_at"] = now + _READINESS_CACHE_TTL
         return resp
 
-    @app.get("/health/realtime")
+    @_health_get(app, "/health/realtime")
     async def health_realtime(request: Request):
         """运维诊断：IM bot 状态、任务队列深度、runtime 在线数。"""
         if not _is_loopback(request):
@@ -191,7 +210,7 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
 
         return result
 
-    @app.get("/api/ping", include_in_schema=False)
+    @_health_get(app, "/api/ping", include_in_schema=False)
     async def api_ping():
         """前端会话保活轻量探针（无鉴权、不查 DB、零 IO）。"""
         return {"ok": True, "ts": datetime.now(timezone.utc).isoformat()}
