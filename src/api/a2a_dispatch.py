@@ -534,7 +534,8 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             return {"status": "ok", "seq": 0, "agent": agent_name}
     kind = runtime_execution_kind(engine_id)
     if kind == EXEC_MODE_DIRECT:
-        from src.domains.runtime.pipeline.event_pipeline import start_direct_agent, _create_direct_task, _execute_agent
+        from src.domains.runtime.pipeline.event_pipeline import _create_direct_task
+        from src.domains.runtime.engine.direct_executor import start_direct_agent, _execute_agent
         _issue_id = f"#{issue_number}" if issue_number else ""
         evt["_skill_id"] = skill_id
         _a2a_task_id = _create_direct_task(repo_key, seq, agent_name, _be,

@@ -32,6 +32,7 @@ import tempfile
 import zipfile
 
 import httpx
+from src.kernel.category import canonical_category_slug
 from src.kernel.config import log
 from src.kernel.owner_db import db_pair as _db_pair
 
@@ -127,15 +128,71 @@ def _refresh_category_dict_cache() -> None:
         logger.warning(f"Scene sync: category_dict map unavailable: {exc}")
 
 
-def _resolve_scene_category(scene_data: dict) -> tuple[int, int]:
+def _record_unresolved(sink: dict, slug: str, scene_name: str) -> None:
+    """按同步轮聚合未命中 slug（Issue #3796）：slug → {count, scenes 样例 ≤3}。
+
+    循环内的未命中只降 debug 进 sink，轮末由调用方发 1 条聚合 WARNING，
+    替代「每场景每 tick 一条」的刷屏（原 696 条/小时）。
+    """
+    entry = sink.setdefault(slug, {"count": 0, "scenes": []})
+    entry["count"] += 1
+    if scene_name and scene_name not in entry["scenes"] and len(entry["scenes"]) < 3:
+        entry["scenes"].append(scene_name)
+
+
+def _resolve_scene_category(scene_data: dict, miss_sink: dict | None = None,
+                            scene_name: str = "") -> tuple[int, int]:
     """按场景 JSON 的分类 slug 解析 (cat_l1_id, cat_l2_id)。
 
     解析口径统一在 src.kernel.category（与 skill_sync 共用）；未命中返回 (0, 0)，
-    由调用方保留库内旧值（不写 0 制造脏数据）。
+    由调用方保留库内旧值（不写 0 制造脏数据）。Issue #3796：
+    - legacy 别名在 lookup_slug 内生效（skill-dev/iac/general 等落收敛后 1xxx）；
+    - miss_sink 提供时未命中降 debug + 进 sink（轮末聚合告警），缺省保持原 WARNING。
     """
     from src.kernel.category import resolve_category_slugs  # noqa: PLC0415
-    return resolve_category_slugs(scene_data, _category_dict_cache,
-                                  logger=logger, label="Scene sync")
+
+    def _on_miss(slug: str) -> None:
+        _record_unresolved(miss_sink, slug, scene_name)  # type: ignore[arg-type]
+
+    return resolve_category_slugs(
+        scene_data, _category_dict_cache, logger=logger, label="Scene sync",
+        on_miss=_on_miss if miss_sink is not None else None)
+
+
+def _resolve_scene_category_id(scene_data: dict, miss_sink: dict | None = None,
+                               scene_name: str = "") -> int:
+    """按 scene.json 分类解析 `category_id`（scene_category 旧表口径）。
+
+    与 `_resolve_scene_category` 同口径：先直查后 legacy 别名；`category` 为 path 形态
+    （"l1/l2"）时**逐段解析**并取最深的命中段——原实现用整串查 `_cat_cache`，path 形态
+    恒未命中、每轮进聚合告警（PR #1982 审查 Optional）。全部未命中返回 0，调用方保留
+    库内旧值；`miss_sink` 提供时进轮级聚合（键取整串，与 category_dict 路径口径一致），
+    缺省保持原 WARNING（与 category_dict 路径对称）。
+    """
+    from src.kernel.category import scene_category_slug_values  # noqa: PLC0415
+
+    info = scene_data if isinstance(scene_data, dict) else {}
+    category_id = 0
+    for value in scene_category_slug_values(info) or ["general"]:
+        hit = _cat_cache.get(value, 0)
+        if not hit:
+            aliased = canonical_category_slug(value)
+            if aliased != value:
+                hit = _cat_cache.get(aliased, 0)
+        if hit:
+            category_id = hit  # 逐段覆盖：path 形态下更具体的段优先
+
+    if category_id:
+        return category_id
+    raw = str(info.get("category") or "general").strip() or "general"
+    if miss_sink is not None:
+        _record_unresolved(miss_sink, raw, scene_name)
+        logger.debug(f"Scene sync: {scene_name} category slug '{raw}' "
+                     f"unresolved in scene_category (aggregated per round)")
+    else:
+        logger.warning(f"Scene sync: {scene_name} category slug '{raw}' "
+                       f"not found in scene_category, category_id=0 (keep existing)")
+    return 0
 
 
 def _compute_scene_hash(scene_dir: str) -> str:
@@ -630,7 +687,12 @@ async def sync_official_scenes(repo_root: str | None = None):
         if not _cat_cache:
             log.warning("Scene sync: scene_category slug cache is empty, category_id will be 0 (unclassified)")
 
-        stats = {"added": 0, "updated": 0, "skipped": 0, "failed": 0, "stale_official": 0}
+        stats = {"added": 0, "updated": 0, "skipped": 0, "failed": 0, "stale_official": 0,
+                 "backfilled": 0}
+
+        # Issue #3796：分类 slug 未命中按同步轮聚合（slug → {count, scenes 样例}），
+        # 轮末有未命中才发 1 条 WARNING；category_dict 与 scene_category 两条路径共用。
+        unresolved: dict[str, dict] = {}
 
         # P46.1 完成守卫 + 仓库场景集收集（与遍历同一份 listing）
         traversal_complete = True
@@ -700,11 +762,10 @@ async def sync_official_scenes(repo_root: str | None = None):
                 # d. content_hash
                 content_hash = _compute_scene_hash(scene_path)
 
-                # e. category slug → id
-                category_slug = scene_data.get("category", "general")
-                category_id = _cat_cache.get(category_slug, 0)
-                if category_id == 0:
-                    logger.warning(f"Scene sync: {name} category slug '{category_slug}' not found in scene_category, using 0 (unclassified)")
+                # e. category slug → id（category_id 走 scene_category 表口径）。
+                # Issue #3796：先直查后 legacy 别名 + path 形态逐段解析（与 category_dict
+                # 路径同口径），未命中只进轮级 sink（循环内 debug），轮末聚合 1 条 WARNING。
+                category_id = _resolve_scene_category_id(scene_data, unresolved, name)
 
                 # f. 查 DB
                 version = scene_data.get("version", "1.0.0")
@@ -720,7 +781,7 @@ async def sync_official_scenes(repo_root: str | None = None):
                 _tag_items = [{"name": str(t).strip(), "source": "auto"}
                               for t in _raw_tags if str(t).strip()]
                 tags_json = encode_tags(_tag_items, limit=MAX_TAGS)
-                cat_l1_id, cat_l2_id = _resolve_scene_category(scene_data)
+                cat_l1_id, cat_l2_id = _resolve_scene_category(scene_data, unresolved, name)
                 author = scene_data.get("author", "")
                 nodes_json = json.dumps(nodes, ensure_ascii=False)
                 preset_custom_fields = json.dumps(scene_data.get("custom_fields", []), ensure_ascii=False)
@@ -739,8 +800,9 @@ async def sync_official_scenes(repo_root: str | None = None):
                     # 一级命中：二级一并写入（0 表示重置旧二级，避免跨父级脏数据）
                     _content_fields["cat_l2_id"] = cat_l2_id
                 market_id, action = _persist_scene_row(name, _content_fields, stats)
-                if action == "skipped":
-                    # 内容没变不重建，但绑定可能是坏的（历史 skill_id=0）→ 检查并自愈
+                if action in ("skipped", "backfilled"):
+                    # 内容没变不重建（backfilled 只动了分类列），但绑定可能是坏的
+                    # （历史 skill_id=0）→ 检查并自愈
                     _repair_scene_skill_ref_if_unresolved(name, market_id, nodes)
                     continue
                 _apply_scene_icon(name, market_id, icon_file_data, icon_file_ext)
@@ -754,12 +816,22 @@ async def sync_official_scenes(repo_root: str | None = None):
                 # P46.1 完成守卫：中途异常 → 仓库场景集不完整，跳过本轮 stale 检测
                 traversal_complete = False
 
+        # Issue #3796：轮末聚合未命中（每轮 ≤1 条 WARNING，slug→次数 + 样例场景；
+        # 文案避开「not found in category_dict/scene_category」字面量，防 LogQL 误计）。
+        if unresolved:
+            _summary = ", ".join(
+                f"'{slug}'×{v['count']} hits (scenes: {', '.join(v['scenes'])})"
+                for slug, v in sorted(unresolved.items()))
+            logger.warning(f"Scene sync: unresolved category slugs this round "
+                           f"(kept existing categories): {_summary}")
+
         # P46.1 stale 检测（只读，铁律 1.0：零 DB 写；守卫失败最坏=本轮没有报告）
         stats["stale_official"] = _detect_stale_official_scenes(repo_scene_names, traversal_complete)
 
         log.info(
             f"Scene sync done: added={stats['added']}, updated={stats['updated']}, "
-            f"skipped={stats['skipped']}, failed={stats['failed']}, stale_official={stats['stale_official']}"
+            f"skipped={stats['skipped']}, backfilled={stats['backfilled']}, "
+            f"failed={stats['failed']}, stale_official={stats['stale_official']}"
         )
 
         # 7. 初始化精选场景（提取为独立函数，token 缺失时也能调用）
@@ -773,10 +845,28 @@ async def sync_official_scenes(repo_root: str | None = None):
             shutil.rmtree(os.path.dirname(tmp_dir), ignore_errors=True)
 
 
+def _scene_upsert_key(name: str, fields: dict) -> str:
+    """跨域写幂等键：内容哈希 + 分类目标（Issue #3796，PR #1982 审查 Required）。
+
+    只含哈希的键是**永久去重**的：存量场景 `scene.json` 不变时每轮都返回 duplicate，
+    mgmt 侧 `upsert_scene_content` 根本不执行 → 幂等层里的分类回填永远跑不到，
+    Spec 验收「同步一轮后旧 slug 场景落 1xxx」在线上三库拓扑不成立。
+
+    因此把分类目标（`category_id`/`cat_l1_id`/`cat_l2_id`）并入键：目标变化 → 新键 →
+    重新执行一次（mgmt 侧自行比对库内值，无需变更时返回 skipped，不写内容列）；
+    同内容同分类目标仍保持去重，跨域写日志行不会随每轮同步增长。
+    """
+    return (f"scene-upsert:{name}:{fields.get('content_hash') or ''}"
+            f":{int(fields.get('category_id') or 0)}"
+            f":{int(fields.get('cat_l1_id') or 0)}"
+            f":{int(fields.get('cat_l2_id') or 0)}")
+
+
 def _persist_scene_row(name: str, fields: dict, stats: dict) -> tuple[int, str]:
     """写入/更新场景内容，返回 (scene_id, action)。
 
-    action ∈ {"skipped", "updated", "added"}；skipped 时 scene_id 为已存在的行 id。
+    action ∈ {"skipped", "updated", "added", "backfilled"}；skipped 时 scene_id 为
+    已存在的行 id；backfilled 表示内容未变、只有分类列被回填（Issue #3796）。
     只更新内容列，`is_active` 保留库内既有值（admin 设置不被覆盖）。
     """
     content_hash = fields["content_hash"]
@@ -792,9 +882,10 @@ def _persist_scene_row(name: str, fields: dict, stats: dict) -> tuple[int, str]:
             _out.update(_mg_scene.upsert_scene_content(name, fields))
 
         # payload 必须带完整 fields：失败意图要能被 drain 按幂等内容重放
-        # （只带 name/hash 时补偿端无内容可写，等于登记了一条永远补不了的意图）
+        # （只带 name/hash 时补偿端无内容可写，等于登记了一条永远补不了的意图）。
+        # Issue #3796：键含分类目标，否则存量场景跨域写被永久去重、分类回填不执行。
         _res = _xw_scene.submit(
-            "mgmt", "scene_upsert", f"scene-upsert:{name}:{content_hash}",
+            "mgmt", "scene_upsert", _scene_upsert_key(name, fields),
             {"name": name, "content_hash": content_hash, "fields": fields}, _apply_scene)
         if _res.get("status") == "failed":
             # 与原路径失败语义一致：抛出去由调用方计 failed 并跳过 icon/ref 重建
@@ -802,10 +893,14 @@ def _persist_scene_row(name: str, fields: dict, stats: dict) -> tuple[int, str]:
         if _res.get("status") == "duplicate":
             stats["skipped"] += 1
             return int(_out.get("id") or 0) or int(_mg_scene.get_official_scene_id(name) or 0), "skipped"
-        _action = {"inserted": "added", "updated": "updated",
-                   "skipped": "skipped"}.get(str(_out.get("action") or ""), "updated")
+        _action = {"inserted": "added", "updated": "updated", "skipped": "skipped",
+                   "backfilled": "backfilled"}.get(str(_out.get("action") or ""), "updated")
         stats[_action] += 1
         _sid = int(_out.get("id") or 0) or int(_mg_scene.get_official_scene_id(name) or 0)
+        if _action == "backfilled":
+            log.info(f"Scene sync: backfilled category '{name}' "
+                     f"({', '.join(_out.get('backfilled') or [])}) (lib)")
+            return _sid, "backfilled"
         log.info(f"Scene sync: {_action} '{name}' v{fields['version']} (lib)")
         return _sid, _action
 
@@ -818,6 +913,12 @@ def _persist_scene_row(name: str, fields: dict, stats: dict) -> tuple[int, str]:
     if action == "skipped":
         stats["skipped"] += 1
         return scene_id, "skipped"
+    if action == "backfilled":
+        # Issue #3796：内容未变、只有分类列被回填——不写 version 告警、不上 icon、不重建 ref
+        stats["backfilled"] = int(stats.get("backfilled") or 0) + 1
+        log.info(f"Scene sync: backfilled category '{name}' "
+                 f"({', '.join(_res_write.get('backfilled') or [])})")
+        return scene_id, "backfilled"
     # owner 侧动作名（inserted/updated）→ 本模块对外口径（added/updated），与 lib 路径一致
     action = {"inserted": "added", "updated": "updated"}.get(action, "updated")
     if action == "updated":

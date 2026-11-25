@@ -30,6 +30,14 @@ from src.kernel.config import log
 
 from src.kernel.session_manager import db, db_lock
 
+# Issue #3733：空指令 → 显式不可派发状态。状态值与原因文案的单一事实源在 mgmt 域
+# （`src/domains/mgmt/autopilot_state.py`，纯常量模块、零依赖，不会引入环）；
+# 本模块禁止另写一份字符串，否则界面原因与调度器状态会漂移。
+from src.domains.mgmt.autopilot_state import (  # noqa: E402
+    AUTOPILOT_EMPTY_INSTRUCTION_REASON as _MGMT_EMPTY_INSTRUCTION_REASON,
+    AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION as _MGMT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+)
+
 # autopilot_executions 归 runtime 域（configs/table_ownership.json）。三库拓扑下
 # 手动触发跑在 mgmt 进程（grape-server），进程库（session_manager.db）是 mgmt 库，
 # 表不在 → 1146「Table doesn't exist」，execution 永远建不出来（定时触发在 worker
@@ -52,6 +60,66 @@ _AUTOPILOT_CAUSE_TAIL_MAX = 300
 _AUTOPILOT_EXIT_CODE_UNKNOWN = -1
 
 _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id 集合
+
+# Issue #3763：autopilot_executions 归 runtime 域；缺表必须显式失败/告警，不能静默吞掉。
+_AUTOPILOT_EXECUTIONS_TABLE = "autopilot_executions"
+_AUTOPILOT_EXECUTIONS_DOMAIN = "runtime"
+
+
+class AutopilotSchemaError(RuntimeError):
+    """autopilot_executions 缺表（拓扑/迁移缺陷）——必须 fail-fast，不得被普通 except 吞掉。"""
+
+
+def _autopilot_executions_table_present() -> bool:
+    """探测 autopilot_executions 是否存在于 runtime owner 库。
+
+    探针走 runtime 域游标（#2075）：三库拓扑下取 runtime 自有 DSN，mgmt 进程
+    手动触发时也能看到 owner 库里的真实表状态，不会把进程库缺表误判为迁移缺失。
+    探针自身异常按「存在」处理（fail-safe）：连接抖动不应被误判成缺表而停机；
+    真正缺表时 INSERT 仍会报 1146，由 _create_execution 兜底包装为 AutopilotSchemaError。
+    """
+    try:
+        from src.kernel.session_manager import _is_mysql_backend
+        with _rt_cursor_for("runtime") as c:
+            if _is_mysql_backend():
+                row = c.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema=DATABASE() AND table_name=?",
+                    (_AUTOPILOT_EXECUTIONS_TABLE,)).fetchone()
+            else:
+                row = c.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (_AUTOPILOT_EXECUTIONS_TABLE,)).fetchone()
+        return bool(row)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Autopilot: autopilot_executions presence probe failed: {e}")
+        return True
+
+
+def _assert_autopilot_executions_table() -> None:
+    """缺表 → 抛 AutopilotSchemaError（含表名与期望域），供启动/每 tick 显式告警。"""
+    if _autopilot_executions_table_present():
+        return
+    raise AutopilotSchemaError(
+        f"{_AUTOPILOT_EXECUTIONS_TABLE} 表缺失（期望域={_AUTOPILOT_EXECUTIONS_DOMAIN}）："
+        "当前库不存在该表，autopilot 无法写入执行记录。请确认 worker/event 运行在 "
+        "runtime 库，并已完成 202611240003 create-autopilot-executions-table 迁移")
+
+
+def _is_missing_table_error(exc: BaseException) -> bool:
+    """识别本表的「表不存在」错误（MySQL 1146 / SQLite no such table），避免误包其它 DB 错误。"""
+    text = str(exc).lower()
+    if "no such table" in text:
+        return True
+    return (
+        _AUTOPILOT_EXECUTIONS_TABLE in text
+        and any(k in text for k in ("1146", "doesn't exist", "does not exist"))
+    )
+
+
+# 进程内「已经知道这个任务处于该不可派发状态」的记忆：只用于省掉重复 DB 往返 /
+# 重复留痕，**不是判重权威**（权威是库内 `dispatch_state`，跨进程/跨重启可见）。
+_NOT_DISPATCHABLE_SEEN: dict[int, str] = {}
 
 # ── Issue #3800：环境性失败（绑定引擎离线/悬空）分类 + 退避 + 熔断 ────────────
 #
@@ -116,7 +184,22 @@ PENDING_SELF_REPORT_TIMEOUT_SECONDS = int(os.environ.get("PENDING_SELF_REPORT_TI
 PENDING_NO_SESSION_TIMEOUT_SECONDS = int(
     os.environ.get("PENDING_NO_SESSION_TIMEOUT_SECONDS", "600"))
 
+# 自报已到、引擎流结束信号丢失时的收敛：没有额外宽限数值，判据就是「执行流已静默超过活跃窗」。
+# 设计上任务终态由 stream_end 定案、self_report 只记结论（tasks.py /tasks/complete 返回
+# pending_finalize=true）。worker 的 stream_end 一丢（ACP 桥断开、网关 5xx、进程被杀），
+# 任务就只剩「自报在、流没结束」这一种状态，没人再写终态，只能等超时判死 —— 实测
+# 2026-11-24 issue #5：self_reported=1、42 条消息、结论齐全，仍被 PENDING_NO_SESSION_TIMEOUT
+# 判 timeout_failed。收敛条件只复用既有信号：self_reported=1 且最后一条执行消息已经超过
+# _PENDING_STREAM_ACTIVE_WINDOW_SECONDS（与豁免同一窗口）。这同时保证「自报后仍在产出」
+# 的任务不会被提前定案：任何新消息都会把静默计时清零。
+
 ZOMBIE_OFFLINE_GRACE_SECONDS = int(os.environ.get("ZOMBIE_OFFLINE_GRACE_SECONDS", "300"))
+
+# Issue #3772：no_progress 扫描连续失败计数（成功即清零）。
+# 扫描异常此前只打一条 WARNING 后 return 0 —— 检测停摆不可观测；连续 5 次
+# （扫描周期 60s，约 5 分钟）升级 ERROR，并配合 grape_no_progress_scan_failures_total。
+_NO_PROGRESS_SCAN_FAILURE_STREAK = 0
+_NO_PROGRESS_SCAN_FAILURE_ALERT_THRESHOLD = 5
 
 # Issue #1546：派发协程尚未 enqueue_task 落库时回收器已开跑，年轻执行（<120s）本轮跳过回收，
 # 避免「回收器抢在真任务落库前判定终态」的竞态；时区解析规则同 _get_exec_agent_task。
@@ -1287,6 +1370,44 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
         log.warning(f"Autopilot: update execution {exec_id} failed: {e}")
 
 
+def _mark_not_dispatchable(task_id: int, state: str, reason: str,
+                           db_state: str = "") -> bool:
+    """把任务标记为「不可派发」（库内状态为跨进程权威），返回**状态是否真的变更**。
+
+    Issue #3733：拦截语义不变，但「拦截」不能再只靠每 tick 一条 WARNING 表达——
+    线上 1 小时 240 条 ≈ 每 15s 一条，而扫描间隔常量是 60s，说明有多个持调度器副本，
+    仅进程内去重会按副本数残留噪音。因此：
+
+    - `db_state` = 本 tick 刚读到的库内状态。已是目标状态 → **不写库**、**不打 WARNING**
+      （只在本进程首次观察到时记一条 INFO，便于排查「谁标的」）；
+    - 否则调 `set_autopilot_dispatch_state_any`，其返回值本身就是「变更行数」：
+      `>0` = 真的从别的状态转进来 → 返回 True，调用方留痕一次；`0` = 并发副本抢先写过；
+    - 进程内 `_NOT_DISPATCHABLE_SEEN` 只在「库内已一致」时省掉 DB 往返，
+      **不阻断**「用户补齐指令后又清空」的重新标记（那条路径 db_state 会变回空串）。
+
+    指令补齐后（库内不再是空指令）本函数不再被调用，状态由 mgmt 路由清空，cron 派发恢复。
+    """
+    tid = int(task_id)
+    if db_state == state:
+        if _NOT_DISPATCHABLE_SEEN.get(tid) != state:
+            _NOT_DISPATCHABLE_SEEN[tid] = state
+            log.info(f"Autopilot: task {tid} is not dispatchable ({state}): {reason}")
+        return False
+    try:
+        from src.domains.mgmt import public as _mgmt_public
+        changed = int(_mgmt_public.set_autopilot_dispatch_state_any(
+            tid, state, reason) or 0) > 0
+    except Exception as _e:  # noqa: BLE001 状态写失败不得阻断调度
+        # 写失败仍要「每 tick 重试」（下面不短路写路径），但**只留痕一次**——
+        # 否则库不可写时又会退回每 tick 一条 WARNING 的老毛病。
+        if _NOT_DISPATCHABLE_SEEN.get(tid) != state:
+            _NOT_DISPATCHABLE_SEEN[tid] = state
+            log.warning(f"Autopilot: task {tid} dispatch state write failed: {_e}")
+        return False
+    _NOT_DISPATCHABLE_SEEN[tid] = state
+    return changed
+
+
 def _enqueue_failure_code(exc: BaseException) -> str:
     """入队异常 → 失败分类（Issue #3963）。
 
@@ -1349,19 +1470,28 @@ def _read_exec_state(exec_id: int) -> tuple[str, str, str]:
         log.warning(f"Autopilot: read execution {exec_id} state failed: {e}")
         return ("unknown", "", "")
 
+
 def _get_enabled_tasks() -> list[dict]:
-    """获取所有启用的 autopilot 任务。"""
-    # autopilot_tasks 归 mgmt：走归属域任意拓扑原语（列序与原查询逐字一致）
+    """获取所有启用的 autopilot 任务（空指令任务被跳过并标记为「不可派发」）。"""
+    # autopilot_tasks 归 mgmt：走归属域任意拓扑原语（列序与原查询逐字一致，
+    # Issue #3733 的状态三列追加在末尾；Issue #3800 的五列在其前面：r[13..17]，
+    # 故状态三列按 r[18..20] 定位）
     from src.domains.mgmt import public as _mgmt_public
     rows = _mgmt_public.list_enabled_autopilot_tasks_any()
     tasks = []
-    skipped: list[str] = []
     for r in rows:
         # 指令为空的任务不能派发：创建端已经拒收空指令（mgmt 路由 instruction_not_empty），
         # 但存量行（历史数据/直接改库）仍然 enabled，调度器不拦的话会按 cron 反复生成
         # 空壳 execution 与空壳 agent_task（实测每 30 分钟一次，且执行必然空转失败）。
+        # Issue #3733：跳过时把「不可派发」写成库内状态，只在状态变更那一刻留痕一次。
         if not (r[4] or "").strip():
-            skipped.append(f"{r[0]}({r[1]})")
+            if _mark_not_dispatchable(
+                    r[0], _MGMT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+                    _MGMT_EMPTY_INSTRUCTION_REASON,
+                    r[18] if len(r) > 18 else ""):
+                log.warning(
+                    f"Autopilot: task {r[0]}({r[1]}) enabled but has empty instruction, "
+                    f"marked as not dispatchable（补齐指令即恢复 cron 派发）")
             continue
         tasks.append({
             "id": r[0], "name": r[1], "repo_key": r[2],
@@ -1378,11 +1508,9 @@ def _get_enabled_tasks() -> list[dict]:
             "offline_since": (r[15] or "") if len(r) > 15 else "",
             "backoff_until": (r[16] or "") if len(r) > 16 else "",
             "circuit_paused": 1 if (len(r) > 17 and r[17]) else 0,
+            # Issue #3733：不可派发状态（库内权威，用于判重与出参原因）
+            "dispatch_state": r[18] if len(r) > 18 else "",
         })
-    if skipped:
-        log.warning(
-            f"Autopilot: skipped {len(skipped)} enabled task(s) with empty instruction: "
-            f"{', '.join(skipped)}（补齐指令或停用后再派发）")
     return tasks
 
 def _is_cron_due(cron_expr: str, last_run: str) -> bool:
@@ -1557,16 +1685,31 @@ def _backoff_active(task: dict, now=None) -> bool:
     return (now if now is not None else _scheduler_now()) < until
 
 def _create_execution(task_id: int, agent_type: str, params_json: str = "") -> int:
-    """创建执行记录，返回 execution_id。params_json 记录本次一次性触发参数。"""
+    """创建执行记录，返回 execution_id。params_json 记录本次一次性触发参数。
+
+    Issue #3763：缺表属拓扑/迁移缺陷，必须 fail-fast（AutopilotSchemaError，含表名与
+    期望域），并 `from` 保留原始异常；不得以普通运行期异常被 _execute_task 外层吞掉。
+    """
     now_str = datetime.now().astimezone().isoformat()
+    _assert_autopilot_executions_table()
+    # 写路径走 runtime 域游标（#2075）：三库拓扑取 runtime 自有 DSN（autocommit）；
+    # 本地路由由 write=True 自动提交，禁止再显式 db.commit()。
     with _rt_cursor_for("runtime", write=True) as c:
-        c.execute(
-            "INSERT INTO autopilot_executions "
-            "(task_id, status, retry_count, started_at, created_at, agent_type, params_json) "
-            "VALUES (?, 'running', 0, ?, ?, ?, ?)",
-            (task_id, now_str, now_str, agent_type, params_json or "")
-        )
-        return c.lastrowid
+        try:
+            c.execute(
+                "INSERT INTO autopilot_executions "
+                "(task_id, status, retry_count, started_at, created_at, agent_type, params_json) "
+                "VALUES (?, 'running', 0, ?, ?, ?, ?)",
+                (task_id, now_str, now_str, agent_type, params_json or "")
+            )
+            return c.lastrowid
+        except Exception as e:
+            if _is_missing_table_error(e):
+                raise AutopilotSchemaError(
+                    f"{_AUTOPILOT_EXECUTIONS_TABLE} 表缺失（期望域="
+                    f"{_AUTOPILOT_EXECUTIONS_DOMAIN}）：创建执行记录失败；原始异常: {e}"
+                ) from e
+            raise
 
 def _update_execution(exec_id: int, status: str, result: str = "", error: str = "",
                       retry_count: Optional[int] = None):
@@ -1958,9 +2101,18 @@ async def _execute_task(task: dict):
     """执行单个 autopilot 任务（含重试逻辑）。"""
     task_id = task["id"]
     if not (task.get("instruction") or "").strip():
-        # 手动触发也走这里：空指令不可能产出有意义的任务，直接拒绝并留痕，
+        # 手动触发也走这里：空指令不可能产出有意义的任务，直接拒绝并落库状态，
         # 不要建 execution/agent_task 再在 agent 侧空转（见 _get_enabled_tasks 同名守卫）。
-        log.warning(f"Autopilot: task {task_id} has empty instruction, refuse to dispatch")
+        # Issue #3733：拒绝不再只靠 WARNING 表达——写状态（幂等）+ 只在状态变更时留痕一次，
+        # 且**不写 last_run_at、不建 execution**（本函数在守卫之前没有副作用）。
+        if _mark_not_dispatchable(
+                task_id, _MGMT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+                _MGMT_EMPTY_INSTRUCTION_REASON, task.get("dispatch_state") or ""):
+            log.warning(
+                f"Autopilot: task {task_id} has empty instruction, refuse to dispatch"
+                f"（已标记为不可派发，补齐指令即恢复）")
+        else:
+            log.debug(f"Autopilot: task {task_id} still not dispatchable (empty instruction)")
         return
     if task_id in _RUNNING_TASKS:
         log.info(f"Autopilot: task {task_id} already running, skip")
@@ -2089,6 +2241,8 @@ async def _execute_task(task: dict):
                 task.update({"consecutive_failures": 0, "last_error_code": "",
                              "offline_since": "", "backoff_until": "", "circuit_paused": 0})
             _update_task_run_info(task_id, next_run)
+    except AutopilotSchemaError as e:
+        log.error(f"Autopilot: task {task_id} FAIL-FAST（拓扑/迁移缺陷）: {e}")
     except Exception as e:
         log.error(f"Autopilot: task {task_id} execution exception: {e}")
     finally:
@@ -2117,13 +2271,16 @@ def _offline_duration_seconds(last_seen_at: str):
     except Exception:
         return None
 
-# Issue #1071：活跃流豁免窗口——pending 任务 task_messages 最新写入距 now < 600s 视为
-# 「执行中」（worker 还在产出执行流），跳过本轮判死。600s 与调度扫描周期（60s）量级
-# 匹配，避免无限豁免；真沉默任务最多延迟一轮（60s 扫描 + 600s 静默窗）被回收。
-_PENDING_STREAM_ACTIVE_WINDOW_SECONDS = 600
+# Issue #1071：活跃流豁免窗口——pending 任务 task_messages 最新写入距 now < 窗口视为
+# 「执行中」（worker 还在产出执行流），跳过本轮判死。窗口与事件侧 sweeper 共用同一份定义
+# （`liveness.PENDING_STREAM_ACTIVE_WINDOW_SECONDS`，默认 600s，env 可覆盖）——两处各写一份
+# 会在运维调 env 后分叉成「任务判死、事件还 running」。
+from src.domains.runtime.engine.liveness import (  # noqa: E402
+    PENDING_STREAM_ACTIVE_WINDOW_SECONDS as _PENDING_STREAM_ACTIVE_WINDOW_SECONDS,
+)
 
 def _pending_self_report_stream_active(cursor, task_id: str) -> bool:
-    """活跃流豁免判据（Issue #1071）：task_messages 最新一条写入距 now < 600s → True。
+    """活跃流豁免判据（Issue #1071）：task_messages 最新一条写入距 now < 活跃窗 → True。
 
     返回 False（回退原判死逻辑，Spec：数据缺失不豁免，宁可误回收不留死任务）：
     - 该任务在 task_messages 无任何记录（执行流从未产出，无法证明在跑）；
@@ -2146,6 +2303,42 @@ def _pending_self_report_stream_active(cursor, task_id: str) -> bool:
     except Exception as _e:
         log.warning(f"pending stream activity check failed for task {task_id}: {_e}")
         return False
+
+def _task_has_execution_trace(cursor, task_id: str, runtime_session_id: str,
+                              issue_session_id: str = "") -> bool:
+    """任务是否真的建立过引擎会话（判「从未执行」的唯一判据）。
+
+    历史实现只看 `agent_tasks.runtime_session_id`，但这一列在 pipeline/ACP 链路上**不写**：
+    实测全库 21375 条任务只有 4575 条非空，issue 类 3325 条只有 228 条非空 —— 于是
+    「有 42 条执行消息、结论齐全」的任务照样被当成「从未建立会话」，走 600s 短窗判死
+    （2026-11-24 issue #5）。判据改为三选一，任一成立即算有执行痕迹：
+
+    1. agent_tasks.runtime_session_id 非空（非 ACP 引擎的常规写法）；
+    2. task_messages 有该任务的任何一条记录（执行流本身，最可靠）；
+    3. issue_agent_session.runtime_session_id 非空（会话指针落在 issue 会话上）。
+    """
+    if str(runtime_session_id or "").strip():
+        return True
+    try:
+        cursor.execute(
+            "SELECT 1 FROM task_messages WHERE task_id=? LIMIT 1", (task_id,))
+        if cursor.fetchone():
+            return True
+    except Exception as _e:
+        log.warning(f"session trace: task_messages probe failed for {task_id}: {_e}")
+    _isid = str(issue_session_id or "").strip()
+    if _isid:
+        try:
+            cursor.execute(
+                "SELECT runtime_session_id FROM issue_agent_session WHERE id=?",
+                (_isid,))
+            row = cursor.fetchone()
+            if row and str(row[0] or "").strip():
+                return True
+        except Exception as _e2:
+            log.warning(f"session trace: issue session probe failed for {task_id}: {_e2}")
+    return False
+
 
 def _parse_pending_since(value: str) -> float | None:
     """pending_since → epoch 秒。
@@ -2199,17 +2392,24 @@ def _sweep_pending_self_report_timeouts() -> int:
     _reason = (f"[PENDING_SELF_REPORT_TIMEOUT] worker 在 {PENDING_SELF_REPORT_TIMEOUT_SECONDS}s 内未自报完成/失败"
                f"且执行流静默超 {_PENDING_STREAM_ACTIVE_WINDOW_SECONDS}s"
                f"（pending_self_report 超时），判 timeout_failed")
-    _reason_no_session = (f"[PENDING_NO_SESSION_TIMEOUT] 任务认领后从未建立引擎会话"
-                          f"（runtime_session_id 为空、无任务消息），{PENDING_NO_SESSION_TIMEOUT_SECONDS}s 内"
-                          f"无任何执行痕迹，判 timeout_failed —— 通常意味着认领方跑的是旧代码或引擎 spawn 失败")
+    _reason_no_session = (f"[PENDING_NO_SESSION_TIMEOUT] 任务认领后没有留下任何执行痕迹"
+                          f"（runtime_session_id/issue 会话指针为空、task_messages 无记录），"
+                          f"{PENDING_NO_SESSION_TIMEOUT_SECONDS}s 内无任何进展，判 timeout_failed"
+                          f" —— 通常意味着认领方跑的是旧代码或引擎 spawn 失败")
+    _reason_self_reported = (f"[SELF_REPORTED_STREAM_LOST] agent 已自报结构化结论，但引擎流结束"
+                             f"信号（stream_end）未送达且执行流已静默超 "
+                             f"{_PENDING_STREAM_ACTIVE_WINDOW_SECONDS}s，按自报结论收敛为 completed"
+                             f"（保留 agent 原始 result_text）")
     marked = 0
     _ended = []
+    _self_reported_only = []
     try:
         _pending_rows = []
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT id, event_seq, runtime_id, pending_since, runtime_session_id FROM agent_tasks "
+                "SELECT id, event_seq, runtime_id, pending_since, runtime_session_id, "
+                "self_reported, issue_session_id FROM agent_tasks "
                 "WHERE status='pending_self_report' AND pending_since IS NOT NULL "
                 "AND pending_since != ''"
             )
@@ -2224,10 +2424,8 @@ def _sweep_pending_self_report_timeouts() -> int:
                     _ts = None
                 if not _ts:
                     continue
-                _has_session = bool(str(_r[4] or "").strip())
-                _limit = _cutoff_ts if _has_session else max(_cutoff_ts, _cutoff_short)
-                if float(_ts) > _limit:
-                    continue
+                # 「是否真的跑过」看执行痕迹（消息/会话指针），不看单列 runtime_session_id
+                _has_session = _task_has_execution_trace(c, _r[0], _r[4], _r[6])
                 # 活跃流豁免（Issue #1071）：执行流 <600s 内仍在写入 → 任务在跑，
                 # 跳过判死等下轮（同一事务内查询，不加额外锁、每候选一条主键查询开销小）。
                 if _pending_self_report_stream_active(c, _r[0]):
@@ -2243,6 +2441,16 @@ def _sweep_pending_self_report_timeouts() -> int:
                 if _ended_ok:
                     _ended.append(_r[0])
                     continue
+                # 自报已在、只是 stream_end 丢了 → 按自报结论收敛（worker 的 ACP 桥断开时
+                # self_report 能过、stream_end 过不来，任务只能干等判死；实测 2026-11-24
+                # issue #5）。走到这里已满足「执行流静默超活跃窗」，不再引入额外宽限数值；
+                # 自报后又产出新消息会回到上面的活跃流豁免，不会被提前定案。
+                if (_r[5] or 0) == 1:
+                    _self_reported_only.append(_r[0])
+                    continue
+                _limit = _cutoff_ts if _has_session else max(_cutoff_ts, _cutoff_short)
+                if float(_ts) > _limit:
+                    continue
                 # 下游按 4 元组解包；把「无会话」标记塞进第 4 位之外的 map
                 _pending_rows.append((_r[0], _r[1], _r[2], _r[3], _has_session))
             rows = _pending_rows
@@ -2256,7 +2464,19 @@ def _sweep_pending_self_report_timeouts() -> int:
                 log.info(f"sweeper: task {_etid} stream ended normally -> completed (self-report was lost)")
             except Exception as _ee:
                 log.warning(f"sweeper: converge ended task {_etid} failed: {_ee}")
-        rows = [r for r in rows if r[0] not in set(_ended)]
+        # 自报已在、stream_end 丢失、执行流已静默超活跃窗 → 按自报结论收敛（不动 result_text）
+        for _rtid in _self_reported_only:
+            try:
+                update_task_status(_rtid, "completed", exit_code=0,
+                                   errors=json.dumps([_reason_self_reported], ensure_ascii=False),
+                                   completed_at=_now, cascade_trigger="sweeper")
+                marked += 1
+                log.info(f"sweeper: task {_rtid} self-reported, stream_end missing "
+                         f"-> completed (stream silent > {_PENDING_STREAM_ACTIVE_WINDOW_SECONDS}s)")
+            except Exception as _re:
+                log.warning(f"sweeper: converge self-reported task {_rtid} failed: {_re}")
+        rows = [r for r in rows
+                if r[0] not in set(_ended) and r[0] not in set(_self_reported_only)]
         _reasons = {_r[0]: (_reason if _r[4] else _reason_no_session) for _r in rows}
         for tid, evt_seq, _rt_id, _ps, _hs in rows:
             _why = _reasons.get(tid, _reason)
@@ -2356,6 +2576,28 @@ def _requeue_no_progress(task_id, started_at, diagnostic) -> bool:
         return False
 
 
+def _record_no_progress_scan_failure(exc: Exception) -> None:
+    """记录一次扫描失败：指标累加 + 连续计数，达到阈值升级 ERROR（Issue #3772）。"""
+    global _NO_PROGRESS_SCAN_FAILURE_STREAK
+    _NO_PROGRESS_SCAN_FAILURE_STREAK += 1
+    try:
+        from src.domains.insight.public import record_no_progress_scan_failure
+        record_no_progress_scan_failure()
+    except Exception as _me:
+        # 指标上报失败不得影响扫描主流程，但要留可诊断痕迹（非静默吞噬）。
+        log.debug(f"no_progress: record scan failure metric failed: {_me}")
+    if _NO_PROGRESS_SCAN_FAILURE_STREAK == _NO_PROGRESS_SCAN_FAILURE_ALERT_THRESHOLD:
+        log.error(
+            "no_progress: scan failed %d consecutive times; NO_PROGRESS detection is down "
+            "(last error: %s)", _NO_PROGRESS_SCAN_FAILURE_STREAK, exc)
+
+
+def _reset_no_progress_scan_failure_streak() -> None:
+    """扫描成功即清零连续失败计数。"""
+    global _NO_PROGRESS_SCAN_FAILURE_STREAK
+    _NO_PROGRESS_SCAN_FAILURE_STREAK = 0
+
+
 def _sweep_no_progress_tasks(now_epoch=None) -> int:
     """Issue #2793：running 无新日志/无进展超时自愈巡检。
 
@@ -2386,12 +2628,17 @@ def _sweep_no_progress_tasks(now_epoch=None) -> int:
         with db_lock:
             c = db.cursor()
             # 仅按 status 过滤，时间比较全部在 Python 侧（不在 SQL 内对时间列做函数运算）。
-            rows = list(c.execute(
+            # 显式 fetchall（不依赖 cursor 隐式迭代协议）：MySQLCompatCursor 曾缺
+            # __iter__ → list(cursor) 在 MySQL 后端必抛 TypeError，扫描整体失效（Issue #3772）。
+            c.execute(
                 "SELECT id, event_seq, runtime_id, started_at, skill, repo_key, env_extra, errors "
-                "FROM agent_tasks WHERE status='running'"))
+                "FROM agent_tasks WHERE status='running'")
+            rows = c.fetchall()
     except Exception as e:
         log.warning(f"no_progress: scan running tasks failed: {e}")
+        _record_no_progress_scan_failure(e)
         return 0
+    _reset_no_progress_scan_failure_streak()
     requeued = 0
     for row in rows or []:
         tid, evt_seq, _rt_id, started_at, skill, repo_key, env_extra, errors = row
@@ -2605,35 +2852,48 @@ async def scheduler_loop():
 
     P1-D (Issue #357): Distributed lock ensures only one worker runs the
     scheduler loop when uvicorn uses --workers N (prevents duplicate task dispatch).
+    Issue #3742: 锁 CM 不跳过 body，未拿到锁必须在此消费 `acquired` 跳过本轮扫描，
+    否则每个 worker 都会对同一批到期任务各派发一次。
     """
     from src.domains.runtime.engine.task_lock import run_with_distributed_lock
     log.info("Autopilot scheduler loop started (60s interval)")
     while True:
+        # Issue #3763：每 tick 先做表存在性自检；缺表 → 显式 ERROR（含表名/期望域）并跳过本轮，
+        # 不再进入派发后被 _create_execution 的 1146 吞成普通 ERROR。
         try:
-            async with run_with_distributed_lock("autopilot_scheduler", ttl=120):
-                # 这些调用都是同步 pymysql：直接在事件循环里跑会把整个 worker 卡住
-                # （health 不响应、心跳落不了库、引擎被判失联）。2026-11-15 实测：
-                # MainThread 停在 _reap_zombie_executions，本机 worker 38083 全部端点超时，
-                # 远端心跳经网关落到它身上一起挂住，表现为该凭据失联。
-                tasks = await asyncio.to_thread(_get_enabled_tasks)
-                for task in tasks:
-                    task_id = task["id"]
-                    if task_id in _RUNNING_TASKS:
-                        continue
-                    # autopilot_tasks 归 mgmt：last_run 走归属域任意拓扑原语
-                    from src.domains.mgmt import public as _mgmt_public
-                    row = await asyncio.to_thread(
-                        _mgmt_public.autopilot_task_last_run_any, task_id)
-                    last_run = row[0] if row else ""
-                    # Issue #3800：派发裁决（熔断自愈 / cron 到期 / 退避闸门）抽成
-                    # `_scan_task_once`，生产循环与假时钟回归走同一条判定路径。
-                    try:
-                        decision = await asyncio.to_thread(_scan_task_once, task, last_run)
-                    except Exception as _de:
-                        log.warning(f"Autopilot: task {task_id} dispatch decision failed: {_de}")
-                        continue
-                    if decision == "dispatch":
-                        asyncio.ensure_future(_execute_task(task))
+            await asyncio.to_thread(_assert_autopilot_executions_table)
+        except AutopilotSchemaError as _se:
+            log.error(f"Autopilot tick aborted — 拓扑/迁移缺陷: {_se}")
+            await asyncio.sleep(_SCHEDULER_INTERVAL)
+            continue
+        try:
+            async with run_with_distributed_lock("autopilot_scheduler", ttl=120) as acquired:
+                if acquired:
+                    # 这些调用都是同步 pymysql：直接在事件循环里跑会把整个 worker 卡住
+                    # （health 不响应、心跳落不了库、引擎被判失联）。2026-11-15 实测：
+                    # MainThread 停在 _reap_zombie_executions，本机 worker 38083 全部端点超时，
+                    # 远端心跳经网关落到它身上一起挂住，表现为该凭据失联。
+                    tasks = await asyncio.to_thread(_get_enabled_tasks)
+                    for task in tasks:
+                        task_id = task["id"]
+                        if task_id in _RUNNING_TASKS:
+                            continue
+                        # autopilot_tasks 归 mgmt：last_run 走归属域任意拓扑原语
+                        from src.domains.mgmt import public as _mgmt_public
+                        row = await asyncio.to_thread(
+                            _mgmt_public.autopilot_task_last_run_any, task_id)
+                        last_run = row[0] if row else ""
+                        # Issue #3800：派发裁决（熔断自愈 / cron 到期 / 退避闸门）抽成
+                        # `_scan_task_once`，生产循环与假时钟回归走同一条判定路径。
+                        try:
+                            decision = await asyncio.to_thread(_scan_task_once, task, last_run)
+                        except Exception as _de:
+                            log.warning(f"Autopilot: task {task_id} dispatch decision failed: {_de}")
+                            continue
+                        if decision == "dispatch":
+                            asyncio.ensure_future(_execute_task(task))
+                else:
+                    log.debug("Autopilot scheduler: skipped scan, another worker holds the lock")
         except Exception as e:
             log.warning(f"Autopilot scheduler loop error: {e}")
 
@@ -2665,6 +2925,12 @@ def start_scheduler():
     if _scheduler_task and not _scheduler_task.done():
         log.info("Autopilot scheduler already running")
         return
+    # Issue #3763：启动期显式自检；缺表只影响 autopilot 子系统，不阻断 worker 其它任务，
+    # 因此记录 ERROR 后仍启动 loop（迁移补齐后下一 tick 自愈）。
+    try:
+        _assert_autopilot_executions_table()
+    except AutopilotSchemaError as e:
+        log.error(f"Autopilot startup schema check failed: {e}")
     _scheduler_task = asyncio.ensure_future(scheduler_loop())
     log.info("Autopilot scheduler started")
 
@@ -2704,7 +2970,20 @@ async def trigger_task_now(task_id: int, params: dict | None = None) -> dict:
         "offline_since": (row[15] or "") if len(row) > 15 else "",
         "backoff_until": (row[16] or "") if len(row) > 16 else "",
         "circuit_paused": 1 if (len(row) > 17 and row[17]) else 0,
+        # Issue #3733：不可派发状态（库内权威，用于判重与出参原因）
+        "dispatch_state": row[18] if len(row) > 18 else "",
     }
+    if not (task["instruction"] or "").strip():
+        # Issue #3733：手动触发拒绝必须「有状态、有原因」，而不是每次调用一条 WARNING。
+        # 在建协程之前返回 → 不建 execution、不写 last_run_at（两者都在 _execute_task 里）。
+        # 路由按 result["ok"]=False 转 409，界面直接展示 message。
+        if _mark_not_dispatchable(
+                task["id"], _MGMT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+                _MGMT_EMPTY_INSTRUCTION_REASON, task.get("dispatch_state") or ""):
+            log.warning(
+                f"Autopilot: task {task['id']} has empty instruction, refuse manual trigger"
+                f"（已标记为不可派发，补齐指令即恢复）")
+        return {"ok": False, "message": _MGMT_EMPTY_INSTRUCTION_REASON}
     if task["id"] in _RUNNING_TASKS:
         return {"ok": False, "message": "task already running"}
     task["_run_params"] = dict(params or {})

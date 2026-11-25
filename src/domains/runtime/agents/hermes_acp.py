@@ -277,6 +277,17 @@ class HermesACPBackend:
             _SHARED_HOME_LOCK.acquire()
             _locked = True
 
+        # Issue #3773：在拉起 hermes 子进程之前治理 state.db，避免 VACUUM 与
+        # 运行中的引擎抢写锁。清理成功则保留 session_id 走 resume；仅清理失败 /
+        # 清理后仍超阈值（已归档重建）才放弃 resume。
+        _skip_resume = False
+        _state_db_health = None
+        if session_id:
+            _state_db_health, _skip_resume = _check_state_db_before_resume(
+                iso_home, session_id, label=label, shared_home_mode=_shared_home_mode)
+            if _skip_resume:
+                session_id = ""
+
         proc_env = dict(env) if env else os.environ.copy()
         proc_env["HERMES_HOME"] = iso_home
         proc_env["HERMES_YOLO_MODE"] = "1"
@@ -564,18 +575,11 @@ class HermesACPBackend:
             yield ("step_start", "Step 1 started (session: ACP)")
             cwd_arg = cwd if cwd else "."
             if session_id:
-                from src.domains.runtime.engine.context_compaction import check_state_db_size
-                _skip_resume = check_state_db_size(iso_home, threshold_mb=50.0)
-                if _skip_resume:
-                    log.warning(f"{label}hermes ACP state.db too large, skipping resume to avoid context overflow")
-                    session_id = ""
-                    result, err = client.request("session/new", {
-                        "cwd": cwd_arg, "mcpServers": [],
-                    }, timeout=100)
-                else:
-                    result, err = client.request("session/resume", {
-                        "cwd": cwd_arg, "sessionId": session_id, "mcpServers": [],
-                    }, timeout=100)
+                # _skip_resume=True 时上游已把 session_id 置空，这里只可能是 resume；
+                # resume 失败才回落 session/new（死分支 _skip_resume 已删除）。
+                result, err = client.request("session/resume", {
+                    "cwd": cwd_arg, "sessionId": session_id, "mcpServers": [],
+                }, timeout=100)
                 if err:
                     log.warning(f"{label}hermes ACP resume {session_id[:12]}... failed: {err}, creating new")
                     result, err = client.request("session/new", {
@@ -1537,6 +1541,30 @@ def _done_result(exit_code, text, session_id, errors, stderr) -> dict:
         "exit_code": exit_code, "text": text,
         "oc_session_id": session_id, "errors": errors, "stderr": stderr,
     }
+
+
+def _check_state_db_before_resume(iso_home: str, session_id: str, label: str = "",
+                                  shared_home_mode: bool = False):
+    """Issue #3773：拉起 hermes 前治理 state.db，返回 (health, skip_resume)。
+
+    把本次即将 resume 的 ``session_id`` 并入保护集，避免它不在“最近 N 个”时被
+    清理掉后 resume 失败回落 session/new 且不计 ACP_RESUME_SKIPPED。
+    """
+    from src.domains.runtime.engine.context_compaction import check_state_db_size
+    from src.domains.runtime.engine.state_db_maintenance import record_resume_skipped
+
+    protect = [session_id] if session_id else None
+    health = check_state_db_size(iso_home, protect_session_ids=protect)
+    if health.skip_resume:
+        log.warning(
+            f"{label}ACP_RESUME_SKIPPED reason={health.reason or 'unknown'} "
+            f"db={health.db_path} bytes={health.after_bytes} "
+            f"mode={'shared' if shared_home_mode else 'isolated'} "
+            f"hermes ACP state.db too large, skipping resume to avoid context overflow"
+        )
+        record_resume_skipped(health.reason or "unknown")
+        return health, True
+    return health, False
 
 # ── issue #439：overlay home 条目分类（替代全量 symlink）──
 # 可写状态目录白名单：per-task 真实目录。Windows 提权引擎下 symlink 是 reparse

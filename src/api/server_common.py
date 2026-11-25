@@ -25,6 +25,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.routing import APIRoute
 
 from src.api.version_check import ensure_python_version
+# Issue #4248：全局异常处理器的唯一实现（本模块 build_app 只装配、不再内联一份）
+from src.api.exception_handlers import install_exception_handlers
 # Issue #3395：前端功能开关单一下发源（shell HTML 注入 window.__FEATURES__）
 from src.api.frontend_flags import apply_feature_flags
 # Issue #2784：契约版本号单一来源（健康探针与 /openapi.json 必须是同一个号）
@@ -159,13 +161,10 @@ def build_app(
         """前端会话保活 / Failed to fetch 恢复预检的轻量探针（无鉴权、不查 DB、浏览器可达）。"""
         return {"ok": True, "ts": _dt.now(_tz.utc).isoformat()}
 
-    @app.exception_handler(Exception)
-    async def global_exception_handler(request: Request, exc: Exception):
-        # Issue #380/#395: 异常原文（含 DB/SQL 错误细节）不回显给客户端——原文仅落服务端日志，
-        # 响应体返回通用文案 + request_id（便于关联排障）
-        log.warning(f"API error ({request.url.path}): {exc}")
-        rid = request.scope.get("request_id", "-")
-        return JSONResponse(status_code=500, content={"code": 500, "message": "服务器内部错误，请稍后重试", "request_id": rid})
+    # Issue #4248：全局兜底处理器只有一份实现（exception_handlers.py），此处只做装配。
+    # 各入口在 build_app 之后再次调用 install_exception_handlers 是幂等的 no-op，
+    # 不再出现「后注册覆盖前者、改动落在不生效的那份」。
+    install_exception_handlers(app)
 
     return app
 
@@ -390,6 +389,8 @@ def _attach_request_log(app: FastAPI) -> None:
                         _log.debug(msg, extra=extra)
                     else:
                         _log.error(msg, extra=extra)
+                # 499（客户端中止）无需单列：它已由下方 `status >= 400` 记 warning，
+                # 本就不进 5xx ERROR / 错误率（Issue #4248）。
                 elif status == 401:
                     if path.startswith("/api/runtime/"):
                         _log.warning(msg, extra=extra)

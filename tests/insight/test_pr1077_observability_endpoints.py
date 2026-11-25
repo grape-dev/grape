@@ -180,8 +180,16 @@ def test_worker_manifest_ships_otel_client():
     from src import worker_package
 
     manifest = list(worker_package.MANIFEST)
-    assert "src/domains/insight/observability/__init__.py" in manifest
-    assert "src/domains/insight/observability/otel.py" in manifest
+
+    def _covered(path: str) -> bool:
+        """MANIFEST 既可用文件条目，也可用目录条目（含结尾 /）覆盖子树。"""
+        return any(path == e or (e.endswith("/") and path.startswith(e))
+                   for e in manifest)
+
+    assert _covered("src/domains/insight/observability/__init__.py"), \
+        f"worker MANIFEST 未覆盖 observability 包入口: {manifest}"
+    assert _covered("src/domains/insight/observability/otel.py"), \
+        f"worker MANIFEST 未覆盖 otel 客户端: {manifest}"
 
 
 def test_agent_tasks_trace_context_has_schema_migration():

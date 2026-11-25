@@ -10,8 +10,9 @@
 
 from __future__ import annotations
 
-from src.kernel.otel import *  # noqa: F401,F403
 from src.kernel.otel import (  # noqa: F401
+    _RelayBackoffPolicy,
+    _RelaySpanExporter,
     current_trace_context_headers,
     end_db_span,
     external_call_span,
@@ -22,5 +23,6 @@ from src.kernel.otel import (  # noqa: F401
     snapshot_trace_context,
     start_db_span,
     start_external_span,
+    relay_failure_kind,
     start_task_span,
 )

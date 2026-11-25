@@ -420,13 +420,15 @@ def get_credentials(user_id: "int | str", include_unreadable: bool = False) -> l
     # 改用 get_user_identities_with_tokens 读取解密后的 token。
     try:
         from src.domains.mgmt.auth.grape_account_db import get_user_identities_with_tokens
-        for ident in get_user_identities_with_tokens(str(user_id)):
+        # strict=True（Issue #3732）：mgmt 域读失败显式标注原因，禁止空列表冒充"无绑定"。
+        for ident in get_user_identities_with_tokens(str(user_id), strict=True):
             provider = ident.get("provider", "")
             token = ident.get("access_token", "")
             if provider and token:
                 result.append({"provider": provider, "config": {"token": token}})
     except Exception as e:
-        log.warning(f"get_credentials: read external_identities failed: {e}")
+        log.warning(f"get_credentials: read external_identities failed "
+                    f"(credential_unavailable: mgmt_read_failed): {e}")
     return result
 
 def get_credential(user_id: "int | str", provider: str, kind: str = "",
@@ -2830,11 +2832,14 @@ def _is_github_user_token_repo(repo_key: str) -> bool:
             if owner:
                 acc = get_grape_account_by_username(owner)
                 if acc:
-                    for i in get_user_identities_with_tokens(acc["id"]):
+                    for i in get_user_identities_with_tokens(acc["id"], strict=True):
                         if i.get("provider") == "github" and i.get("access_token"):
                             return False
-        except Exception:
-            pass
+        except Exception as e:
+            # Issue #3732：读失败降级必须可见（原 except:pass 会把 mgmt 库读失败
+            # 静默当"owner 无绑定"），决策继续走下一层（fail-open 口径不变）。
+            log.warning(f"user token degrade check: read external_identities failed "
+                        f"(credential_unavailable: mgmt_read_failed, repo={repo_key}): {e}")
     # 3. 全局 GitHub bot token
     # R12.11: 路径 B 仓库（host_user_id > 0）跳过全局 bot token 层（与主函数一致）
     # R14.13: 复用上方 _hid 避免重复 DB 查询
@@ -2869,11 +2874,12 @@ def get_github_token(repo_key: str = "") -> str:
             from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username, get_user_identities_with_tokens
             acc = get_grape_account_by_username(owner)
             if acc:
-                for i in get_user_identities_with_tokens(acc["id"]):
+                for i in get_user_identities_with_tokens(acc["id"], strict=True):
                     if i.get("provider") == "github" and i.get("access_token"):
                         return i["access_token"]
     except Exception as e:
-        log.warning(f"get_github_token: D32-patch fallback failed: {e}")
+        log.warning(f"get_github_token: D32-patch fallback failed "
+                    f"(credential_unavailable: mgmt_read_failed): {e}")
     return ""
 
 def _query_path_b_repos(provider: str = "gitcode") -> list[dict]:

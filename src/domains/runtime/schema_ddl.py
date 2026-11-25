@@ -180,6 +180,13 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     model_name TEXT DEFAULT '',          -- Issue #865：配置模型（worker 注册上报的本机配置模型名）
     model_source TEXT DEFAULT '',        -- Issue #865：配置模型来源（worker_report=worker 上报 / local_config=服务端本机解析）
     model_reported_at TEXT DEFAULT '',   -- Issue #865：配置模型上报时间（UTC ISO）
+    -- Issue #3928：后端 CLI 能力 + runtime 熔断（认领前准入 / spawn 失败重派）
+    backend_status VARCHAR(32) DEFAULT '',      -- available/degraded/unavailable/unknown
+    backend_reason TEXT DEFAULT '',             -- 最近一次探测原因（缺 CLI / spawn 失败）
+    backend_checked_at VARCHAR(64) DEFAULT '',  -- 最近一次能力探测时间（UTC ISO）
+    circuit_open_until VARCHAR(64) DEFAULT '',  -- 熔断截止（空=未熔断；到期后半开试探）
+    circuit_fail_count INTEGER DEFAULT 0,       -- 连续 spawn 失败次数（冷却指数退避用）
+    circuit_half_open INTEGER DEFAULT 0,        -- 半开试探占位（0=无在飞试探）
     -- 2026-11-18：7794d05ee 的沙箱/引擎改造在 7 处代码里引用了这两列，却没加进表里，
     -- 导致 claim 查询 1054（Unknown column）→ 引擎进程从未 spawn → 任务挂到超时判 failed。
     -- 老库由迁移 202611180002 补列；这里让新库建表即带。

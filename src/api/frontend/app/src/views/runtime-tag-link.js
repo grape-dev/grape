@@ -70,11 +70,33 @@ export function toggle(tags, tag, checked, visible) {
   return ALL_ROLES.filter((r) => set.indexOf(r) >= 0)
 }
 
+/** 只保留「当前场景可见」的已勾角色（2026-11-24 裁定：切场景后保存 = 按当前场景收窄） */
+export function selectedVisible(tags, visible) {
+  const vis = visibleRoles(visible)
+  return normalizeRoles(tags).filter((r) => vis.indexOf(r) >= 0)
+}
+
 /**
- * 提交载荷：当前可见角色全勾 → 只下发 ['all']（裁定 4）；否则下发已勾角色。
- * 注意：['all'] 的语义是「不受角色限制」，因此当场景隐藏了某个角色（如无 coding）
- * 时，全勾可见角色仍会下发 ['all']，该引擎随之获得全部角色 —— 这是「全能」的既有语义。
+ * 本次保存会因场景收窄而**被移除**的角色。
+ * 用途：保存前明确告知用户「这次保存将移除 qa」，而不是让它静默消失。
+ */
+export function droppedByScene(tags, visible) {
+  // 全勾可见角色 = 全能（下发 ['all']，语义是「不受角色限制」）→ 不发生收窄
+  if (isAllChecked(tags, visible)) return []
+  const vis = visibleRoles(visible)
+  return normalizeRoles(tags).filter((r) => vis.indexOf(r) < 0)
+}
+
+/**
+ * 提交载荷：当前可见角色全勾 → 只下发 ['all']（裁定 4）；否则**只下发当前场景可见的
+ * 已勾角色**。
+ *
+ * 2026-11-24 用户裁定（一次切场景+保存就该把角色改掉）：编辑器里看不见的角色不能还带
+ * 在载荷里 —— 否则界面「5 个角色全空」却保存成功，实际库里的旧角色纹丝不动，用户以为
+ * 改了其实没改。场景收窄即数据收窄；真正会移除角色的保存由 droppedByScene() 先提示确认。
+ *
+ * 注意：['all'] 的语义仍是「不受角色限制」，全勾可见角色即代表全能，此时不视为收窄。
  */
 export function toPayload(tags, visible) {
-  return isAllChecked(tags, visible) ? ['all'] : normalizeRoles(tags)
+  return isAllChecked(tags, visible) ? ['all'] : selectedVisible(tags, visible)
 }

@@ -201,10 +201,13 @@ async def _upload_cleanup_worker(interval: float = _CLEANUP_INTERVAL):
     await asyncio.sleep(300)  # 启动后 5 分钟首次执行
     while True:
         try:
-            async with run_with_distributed_lock("upload_cleanup", ttl=600):
-                _cleanup_temp_files()
-                _cleanup_stale_attachments()
-                _sweep_leaked_tmp_dirs()
+            async with run_with_distributed_lock("upload_cleanup", ttl=600) as acquired:
+                if acquired:
+                    _cleanup_temp_files()
+                    _cleanup_stale_attachments()
+                    _sweep_leaked_tmp_dirs()
+                else:
+                    logger.debug("upload cleanup: lock held by another worker, skipping")
         except asyncio.CancelledError:
             logger.info("Upload cleanup worker cancelled")
             raise

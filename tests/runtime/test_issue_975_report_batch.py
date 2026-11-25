@@ -178,7 +178,21 @@ class TestFlushReportBatch:
             raise RuntimeError("degrade pipeline broken")
 
         mr.split_resend = _boom
-        agent_mod._report_queue = lambda: type("Q", (), {"add": staticmethod(queued.append)})()
+
+        class _FakeQ:
+            """WorkerReportQueue 的批量入队接口（Issue #4203 起用 add_many 一次 flush）。"""
+
+            @staticmethod
+            def add(entry):
+                queued.append(entry)
+                return True
+
+            @staticmethod
+            def add_many(entries):
+                queued.extend(entries)
+                return len(entries)
+
+        agent_mod._report_queue = lambda: _FakeQ()
         try:
             outcome = asyncio.run(_flush_report_batch(cli, "t1", batch))
         finally:
@@ -207,6 +221,9 @@ class TestFlushReportBatch:
 
         class _BrokenQ:
             def add(self, entry):
+                raise RuntimeError("disk full")
+
+            def add_many(self, entries):
                 raise RuntimeError("disk full")
 
         agent_mod._report_queue = lambda: _BrokenQ()

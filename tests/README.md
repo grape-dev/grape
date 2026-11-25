@@ -95,6 +95,23 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 搬移后 `ROOT` 计算比平铺时多一层，写新用例时统一用
 `ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))`（域内两层）。
 
+### 唯一模块名（pytest 收集约束）
+
+**不同目录不允许存在同名测试模块**（如 `tests/test_issue_N_x.py` 与 `tests/runtime/test_issue_N_x.py`）。
+`tests/` 未使用 `__init__.py`，pytest 按模块名导入，同名模块会相互覆盖并中断整库收集：
+
+```text
+ERROR tests/runtime/test_issue_N_x.py
+import file mismatch:
+imported module 'test_issue_N_x' has this __file__ attribute: .../tests/test_issue_N_x.py
+```
+
+搬移用例时**必须删除旧路径副本**（不要保留两份），提交前用整库收集自检：
+
+```bash
+python3 -m pytest --collect-only -q tests/ | tail -3   # 期望 0 error
+```
+
 ### 前端 / 手工套件（也归到 api，因为前端页面与静态资源由 src/api 托管）
 
 | 目录 | 内容 | 运行方式 |

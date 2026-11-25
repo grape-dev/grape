@@ -22,6 +22,10 @@ from src.domains.runtime.routes.runtime_id_validation import RuntimeIdGuardRoute
 from src.api.time_utils import normalize_event_time
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine import service
+# Issue #3396：角色标签值域唯一来源 = engine_select.KNOWN_AGENT_ROLES（Issue #955 角色全集）。
+# 本模块不再维护第二份字面量：两份不同步会让新角色被静默过滤/误折叠。
+from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES as AGENT_TAGS, _PRIO_GLOBAL
+from src.domains.runtime.engine.role_caps import _DEFAULT_MAX_CONCURRENT
 from src.domains.runtime.engine.health import apply_runtime_state, parse_dt  # Issue #1496 unified writer
 
 # Issue #1982 复审：spawn_failed 独立计数兜底阈值——连续 N 次 spawn_failed（资源类
@@ -104,7 +108,8 @@ def _register_healthy_guard(c, rid: int, reported: bool) -> int:
         return 1 if reported else 0
 
 
-_ROLE_SEED_KNOWN = frozenset({"coding", "issue", "qa", "vod", "chat", "sre"})
+# 角色值域唯一来源：文件头部的 AGENT_TAGS（= engine_select.KNOWN_AGENT_ROLES 别名）。
+# 播种在调用期取值，本模块不再维护第二份字面量——两份不同步会让新角色被静默过滤。
 
 
 def seed_role_caps_from_declared(c, rid: int, declared=None, user_set=None) -> list:
@@ -138,23 +143,42 @@ def seed_role_caps_from_declared(c, rid: int, declared=None, user_set=None) -> l
         if user_set:
             return []
         tags = [str(t).strip().lower() for t in (declared or []) if str(t).strip()]
-        tags = [t for t in dict.fromkeys(tags) if t in _ROLE_SEED_KNOWN]
+        tags = [t for t in dict.fromkeys(tags) if t in AGENT_TAGS]
         if not tags:
             return []
+        # QA 第 6 轮 Required：存在性判定不得只看 enabled=1——「只剩显式停用的角色行」
+        # 会被当成「没配过」而复活（违反 spec A8c/PR §4「停用行一律不覆盖、不重开」）。
+        # 唯一允许改写的状态 = 仅有一条 enabled=1 的自动 'all'（声明即收窄，原语义）；
+        # 其余任何角色行状态（含停用行、含非 all 行）一律返回 [] 交 ensure_role_caps 判定。
         rows = c.execute(
-            "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,)).fetchall()
-        cur = [r[0] for r in rows]
-        cur_roles = [t for t in cur if t == "all" or t in _ROLE_SEED_KNOWN]
-        if cur_roles and set(cur_roles) - {"all"}:
-            return []  # 已有非 all 角色行 → 不覆盖
-        if cur_roles:
+            "SELECT tag, enabled FROM engine_capabilities WHERE runtime_id=?", (rid,)).fetchall()
+        cur_roles = []
+        for _t, _e in rows:
+            _t = str(_t or "").strip().lower()
+            if _t == "all" or _t in AGENT_TAGS:
+                cur_roles.append((_t, int(_e or 0)))
+        if not cur_roles:
+            pass  # 零角色行 → 直接按声明播种（声明即收窄，不走 ensure 的值域回落 all）
+        elif cur_roles != [("all", 1)]:
+            return []  # 已有角色行（含 enabled=0 停用、含非 all）→ 不覆盖、不重开
+        else:
             c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag='all'", (rid,))
         _now = datetime.now(timezone.utc).isoformat()
-        for t in tags:
-            c.execute(
-                "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                "VALUES (?, ?, 1, 50, 1, ?, ?)",
-                (rid, t, _now, _now))
+        # 单条多行原子写入（QA 第 6 轮 Required）：逐条 INSERT 撞唯一键会把异常整体吞成
+        # log.warning，留下「半组启用行」却返回 []；同一语句一次落整组或整组失败。
+        _rows_sql = " UNION ALL ".join(
+            "SELECT ? AS runtime_id, ? AS tag, %d AS max_concurrent, %d AS priority,"
+            " 1 AS enabled, ? AS created_at, ? AS updated_at"
+            % (_DEFAULT_MAX_CONCURRENT, _PRIO_GLOBAL) for _t in tags)
+        c.execute(
+            "INSERT INTO engine_capabilities "
+            "(runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+            "SELECT runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at"
+            " FROM (" + _rows_sql + ") AS _seed_rows WHERE NOT EXISTS ("
+            "  SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND tag IN ("
+            + ",".join("?" * (len(AGENT_TAGS) + 1)) + "))",
+            tuple(v for _t in tags for v in (rid, _t, _now, _now))
+            + (rid, "all", *sorted(AGENT_TAGS)))
         log.info(f"role caps seeded: rid={rid} tags={tags} (declared role_tags)")
         return tags
     except Exception as _se:
@@ -280,15 +304,27 @@ class LogLineBody(BaseModel):
 
 
 class HeartbeatBody(BaseModel):
+    """心跳 body。
+
+    Issue（心跳双写覆盖指标）：worker 有两个心跳循环——完整心跳带 metrics，
+    `_presence_heartbeat_loop` 的最小在线态心跳**不带**。旧模型把缺省值定为 0.0 并
+    无条件 UPDATE，于是最小心跳每 15~20s 就把真实 cpu/mem/disk 刷成 0，看板来回跳
+    「有数据 → 全 0」。现在缺省为 None，服务端只更新**真的上报了**的列。
+    """
+
     runtime_ids: list[int] = []
-    cpu_percent: float = 0.0
-    memory_percent: float = 0.0
-    disk_percent: float = 0.0
-    tmp_percent: float = 0.0
-    bandwidth_percent: float = 0.0
-    bandwidth_mbps: float = 0.0
-    load_avg: str = ""
+    cpu_percent: float | None = None
+    memory_percent: float | None = None
+    disk_percent: float | None = None
+    tmp_percent: float | None = None
+    bandwidth_percent: float | None = None
+    bandwidth_mbps: float | None = None
+    load_avg: str | None = None
     spec: str = ""
+    acp_state_db_bytes: float = 0.0
+    acp_state_db_cleanup_counts: str = ""
+    acp_state_db_bytes_freed_total: float = 0.0
+    acp_resume_skipped_total: int = 0
     log_lines: list[LogLineBody] = []
     probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
 
@@ -488,9 +524,32 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             # 不在此列（向后兼容——旧包误报 True 需 worker 升级后才被此层拦截）。
             _inst_raw = rt.get("installed")
             if _inst_raw is not None and str(_inst_raw).strip().lower() in ("false", "0"):
-                c.execute("UPDATE agent_runtimes SET installed=0 "
-                          "WHERE credential_id=? AND lower(name)=?",
-                          (credential_id, name))
+                # Issue #3928 根因修复：旧实现只写 installed=0 就 continue，既不改
+                # healthy 也不记录后端能力，CLI 被移除后的存量行一直 healthy=1 继续认领
+                #（17641 codearts-cred0 缺 CLI 的注册侧成因）。现在同步标记不可用并熔断。
+                _cap0 = rt.get("backend_capability") if isinstance(rt.get("backend_capability"), dict) else {}
+                _cap0_status = str(_cap0.get("status") or "unavailable").strip().lower()
+                _cap0_reason = str(_cap0.get("reason") or "backend CLI not found / engine not installed")
+                _cap0_checked = str(_cap0.get("checked_at") or datetime.now(timezone.utc).isoformat())
+                _row0 = c.execute(
+                    "SELECT id FROM agent_runtimes WHERE credential_id=? AND lower(name)=? "
+                    "ORDER BY id DESC LIMIT 1", (credential_id, name)).fetchone()
+                if _row0:
+                    _rid0 = _row0[0]
+                    try:
+                        from src.domains.runtime.engine import backend_health as _bh_reg
+                        _bh_reg.observe_capability(c, _rid0, _cap0_status,
+                                                   _cap0_reason, _cap0_checked)
+                    except Exception as _bhe:
+                        log.warning(f"register: capability observe failed for runtime={_rid0}: {_bhe}")
+                    c.execute("UPDATE agent_runtimes SET installed=0, healthy=0, "
+                              "backend_status=?, backend_reason=?, backend_checked_at=? "
+                              "WHERE id=?", (_cap0_status, _cap0_reason, _cap0_checked, _rid0))
+                else:
+                    # 无存量行 = 从未成功注册过，不可能被认领；不告警避免每轮注册刷屏。
+                    log.debug(
+                        f"register: engine {name} not installed/unavailable "
+                        f"(credential={credential_id}); no runtime row to mark")
                 continue
             _ls_json = skills_by_name.get(name, "[]")
             # Issue #646：engine_uid 优先查找（UUIDv5 稳定键，表重建 uid 不漂移）；
@@ -658,6 +717,17 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                          datetime.now(timezone.utc).isoformat() if _model_name else ""))
                 rid = c.lastrowid
                 _row_desired_json = "[]"
+            # Issue #3928：注册上报的后端能力落库（available 清熔断；unavailable
+            # 立即 healthy=0 + 熔断；degraded 仅挡认领，保留 #1982 healthy 语义）。
+            try:
+                _cap = rt.get("backend_capability")
+                if isinstance(_cap, dict) and _cap.get("status"):
+                    from src.domains.runtime.engine import backend_health as _bh_reg2
+                    _bh_reg2.observe_capability(
+                        c, rid, str(_cap.get("status")), str(_cap.get("reason") or ""),
+                        str(_cap.get("checked_at") or ""))
+            except Exception as _cap_e:
+                log.warning(f"register: backend capability apply failed for {name}: {_cap_e}")
             # Issue #1011：锚快照持久化（engine_type/provider_id/template_id/
             # provider_uid/template_uid 五列，001 迁移加列）——派生源修正后
             # 存量行可离线重算（002 重派派生迁移消费）；未迁移旧库缺列时降级跳过。
@@ -685,15 +755,14 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             except Exception:
                 _declared = []
             _seeded = seed_role_caps_from_declared(c, rid, _declared, _user_set)
-            if not _seeded and not _user_set:
-                c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
-                if not c.fetchone():
-                    _now_ec = datetime.now(timezone.utc).isoformat()
-                    c.execute(
-                        "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                        "VALUES (?, 'all', 1, 50, 1, ?, ?)",
-                        (rid, _now_ec, _now_ec))
-                    log.info(f"runtime_register: default 'all' capability seeded rid={rid}")
+            # Issue #3396 后续：补齐判定只看角色行（旧口径用「任意一行」→ 派生行会
+            # 永久挡住补 all）。声明非法/为空 → 补 all；UI 手工清空（user_set）→ 不动。
+            if not _seeded:
+                try:
+                    from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc
+                    _ensure_rc(c, rid, declared=_declared, user_set=_user_set, source="register")
+                except Exception as _erc:
+                    log.warning(f"runtime_register: role caps ensure failed rid={rid}: {_erc}")
             # Issue #646：标签行同步 engine_uid（引用切换，孤儿防护）
             try:
                 c.execute(
@@ -791,13 +860,35 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
     client_ip = _client_ip(request)
     cancelled_tasks = []
     with _runtime_cursor() as c:
+        # 只更新本次真的上报了的指标列：worker 的「最小在线态心跳」只保 last_seen，
+        # 不带 metrics；旧实现无条件写 0.0，会把它之前完整心跳采到的真实值抹成 0
+        # （看板几秒内「有数据 → 全 0 → 有数据」来回跳的根因）。
+        _set = ["last_seen_at=?", "last_ip=?"]
+        _vals: list = [now, client_ip]
+        for _col, _val in (("cpu_percent", body.cpu_percent),
+                           ("memory_percent", body.memory_percent),
+                           ("disk_percent", body.disk_percent),
+                           ("tmp_percent", body.tmp_percent),
+                           ("bandwidth_percent", body.bandwidth_percent),
+                           ("bandwidth_mbps", body.bandwidth_mbps),
+                           ("load_avg", body.load_avg)):
+            if _val is not None:
+                _set.append(f"{_col}=?")
+                _vals.append(_val)
         # spec 为空时不覆盖（兼容旧版 worker 不上报 spec）
         if body.spec:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=?, spec=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, body.spec, credential_id))
-        else:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, credential_id))
+            _set.append("spec=?")
+            _vals.append(body.spec)
+        # ACP 状态库指标（本分支特性，迁移见 runtime/migrations/acp_state_db_metrics_columns.py）：
+        # 模型字段恒有默认值，随心跳一并写回；基线侧的动态 SET 构造未覆盖这四列。
+        for _acp_col, _acp_val in (("acp_state_db_bytes", body.acp_state_db_bytes),
+                                   ("acp_state_db_cleanup_counts", body.acp_state_db_cleanup_counts),
+                                   ("acp_state_db_bytes_freed_total", body.acp_state_db_bytes_freed_total),
+                                   ("acp_resume_skipped_total", body.acp_resume_skipped_total)):
+            _set.append(f"{_acp_col}=?")
+            _vals.append(_acp_val)
+        c.execute(f"UPDATE runtime_credentials SET {', '.join(_set)} WHERE id=?",
+                  _vals + [credential_id])
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
@@ -829,6 +920,22 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
                             (_pstatus, _platency, _plast, _perror, _pname, credential_id)
                         )
                         continue
+                    # Issue #3928：新观测落后端能力态（缺 CLI 立即 healthy=0 + 熔断；
+                    # ok 清熔断；degraded 只挡认领不碰 #1982 healthy 阈值）。
+                    if _prid:
+                        try:
+                            _cap_status = str(_pdata.get("backend_status") or "").strip().lower()
+                            _cap_reason = str(_pdata.get("backend_reason") or _perror or "")
+                            if not _cap_status:
+                                from src.domains.runtime.engine.backend_capability import (
+                                    status_from_probe as _status_from_probe)
+                                _cap_status = _status_from_probe(_pname, _pstatus, _perror)
+                            if _cap_status:
+                                from src.domains.runtime.engine import backend_health as _bh_hb
+                                _bh_hb.observe_capability(c, _prid, _cap_status, _cap_reason, _plast)
+                        except Exception as _cap_e:
+                            log.warning(f"runtime heartbeat capability observe failed "
+                                        f"(runtime={_prid}): {_cap_e}")
                     # 新观测（last_probe 不同 / 旧 Worker 无 last_probe 回退 now 每次不同）：
                     # probe_status 联动 healthy：ok→升级（纠正 --version 误判），fail→降级（实际不能干活）
                     # skip/pending/refused 不动 healthy，保留 --version 的结果
@@ -958,18 +1065,35 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
                             _et_hb = (json.loads(_hb_row[4] or "{}").get("engine_type") or "")
                         except Exception:
                             _et_hb = ""
+                        # Issue #3396 后续：心跳兜底改成「角色行为空就补」——
+                        # 有声明按声明（A8b 声明即收窄），无声明补 all。
+                        # 2026-11-24：不再用 tags_user_set 做闸门——清空已被前端+接口双层
+                        # 禁止（EMPTY_ROLE_TAGS），`user_set=1 且零角色行`只剩历史遗留，
+                        # 闸门会让它永久 fail-closed；是否覆盖由两步原语内部判定
+                        # （seed 见 user_set 即返回空，ensure 只在 has_role_rows 为假时补）。
+                        # 顺序：先补角色行，再刷新派生标签快照，否则快照不含新行，
+                        # `GET /runtimes/{id}/tags` 会滞后到下一跳（QA 复审 Info）。
+                        _user_set_hb = _hb_row[6] or 0
+                        try:
+                            _p_decl = json.loads(_hb_row[5] or "[]")
+                            if not isinstance(_p_decl, list):
+                                _p_decl = []
+                        except Exception:
+                            _p_decl = []
+                        try:
+                            # 两步：①声明即收窄（只有自动 all 时改写为声明集合）；
+                            # ②角色行为空才补（有声明按声明，无声明补 all）。
+                            _seeded = (seed_role_caps_from_declared(c, _rid, _p_decl, _user_set_hb)
+                                       if _p_decl else [])
+                            if not _seeded:
+                                from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc_hb
+                                _ensure_rc_hb(c, _rid, declared=_p_decl, user_set=_user_set_hb,
+                                              source="heartbeat")
+                        except Exception as _sde:
+                            log.warning(f"heartbeat role caps ensure failed (runtime={_rid}): {_sde}")
                         # [云引擎标签修复] engine: 维度按 engine_type 派生（云四段名不入标签）
                         _sdat_hb(c, _rid, _hb_row[0], _hb_row[3], _hb_row[1], engine_uid=_hb_row[2] or "",
                                  engine_type=_et_hb)
-                        # Issue #3396 A8b：心跳链兜底——存量行 role_tags 有声明但能力行仍是
-                        # 自动补的 'all' 时改写为声明集合（user_set/非 all 角色行不覆盖）
-                        if not (_hb_row[6] or 0) and (_hb_row[5] or "").strip():
-                            try:
-                                _p_decl = json.loads(_hb_row[5])
-                                if isinstance(_p_decl, list):
-                                    seed_role_caps_from_declared(c, _rid, _p_decl, 0)
-                            except Exception as _sde:
-                                log.warning(f"heartbeat role caps seed failed (runtime={_rid}): {_sde}")
             except Exception as _at_e:
                 log.warning(f"heartbeat agent_tags derive failed: {_at_e}")
         try:
@@ -1814,18 +1938,10 @@ async def runtime_heartbeat_v2(body: HeartbeatBodyV2, request: Request,
     for rid in (body.runtime_ids or []):
         if rid not in merged:
             merged.append(rid)
-    v1_body = HeartbeatBody(
-        runtime_ids=merged,
-        cpu_percent=body.cpu_percent,
-        memory_percent=body.memory_percent,
-        disk_percent=body.disk_percent,
-        tmp_percent=body.tmp_percent,
-        bandwidth_percent=body.bandwidth_percent,
-        bandwidth_mbps=body.bandwidth_mbps,
-        load_avg=body.load_avg,
-        spec=body.spec,
-        log_lines=body.log_lines,
-        probe_results=body.probe_results)
+    # 透传 v1 全部字段（含 #3773 的 acp_state_db_bytes / cleanup_counts /
+    # bytes_freed_total / resume_skipped_total）；逐字段重建会静默丢弃这些指标，
+    # 而 worker 默认 v2-first 且 200 即 return，v1 落库分支永远走不到 → /metrics 恒 0。
+    v1_body = HeartbeatBody(**{**body.model_dump(), "runtime_ids": merged})
     resp = await runtime_heartbeat(v1_body, request, credential_id)
     resp["engine_uids_resolved"] = len(resolved_ids)
     resp["engine_uids_stale"] = len(stale_uids)
@@ -2339,6 +2455,17 @@ def takeover_context(repo_key: str = Query(..., description="Repository key (e.g
     # ② 查最近 200 条消息（必须取"最新"而非"最早"，否则长任务接管时看到的
     #    是几小时前的任务开头，而不是当前进展。先按 seq DESC 取，再反转为正序阅读）
     messages = service.list_task_messages_recent(task_id, limit=200)
+    # Issue #3770（QA 审查 Optional）：env_extra 不再原样返回——信封行返回的是密文
+    # （接管重建实际已失效），明文行则把凭据直接给到 API。改走 decrypt_env_extra：
+    # 两种形态都还原为明文 JSON 串（类型不变，契约无感），顺带对存量明文行就地自愈。
+    try:
+        from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+        _env_ctx = decrypt_env_extra(env_extra, task_id=task_id)
+        env_extra = json.dumps(_env_ctx if isinstance(_env_ctx, dict) else {},
+                               ensure_ascii=False)
+    except Exception as _env_e:
+        log.warning(f"takeover_context: env_extra 解密失败，返回空对象 task={task_id}: {_env_e}")
+        env_extra = "{}"
     return {
         "task_id": task_id,
         "status": status,
@@ -3044,16 +3171,16 @@ def runtime_skills_report(runtime_id: int, body: dict, credential_id: int = Depe
 
 # ===== Engine 角色标签 =====
 
-# Issue #3396：角色标签值域单点常量（与前端 RuntimesView.vue 的 RT_TAG_OPTIONS
-# / 场景可用角色默认表对账锁定）。chat 补进值域（6 角色），'all' 为折叠态不在此列。
-AGENT_TAGS = {"vod", "issue", "coding", "qa", "sre", "chat"}
+# Issue #3396：AGENT_TAGS 在文件头部由 engine_select.KNOWN_AGENT_ROLES 别名而来
+# （值域单点常量；'all' 为折叠态不在此列，前端 RT_TAG_OPTIONS 由测试对账锁定）。
 
 
 def _apply_tag_rules(tags: list[str]) -> list[str]:
     """应用标签互斥规则。
     - 全能与其他互斥：有其他标签时去掉全能。
     - 6 个角色全选时自动替换为全能（Issue #3396：chat 进值域，5→6）。
-    - 允许空标签（不自动回全能；空标签 fail-closed，见 engine_select #3396）。
+    - 空标签集合被端点层拒绝（400 EMPTY_ROLE_TAGS：至少保留一个角色；A7 下空集
+      等同 fail-closed，因此不允许用户把自己锁死）。
     """
     tag_set = set(tags)
     has_all = "all" in tag_set
@@ -3079,19 +3206,45 @@ def get_runtime_tags(runtime_id: int, user: dict = Depends(require_no_session_to
     return {"tags": json.loads(row[0]) if row[0] else []}
 
 
-@router.put("/runtimes/{runtime_id}/tags", operation_id="runtime_tags_set", summary="Set role tags", description="Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Write is restricted to the credential owner (user/org owner+admin) or platform admin (Issue #3396).")
+@router.put("/runtimes/{runtime_id}/tags", operation_id="runtime_tags_set", summary="Set role tags", description="Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Write permission is layered (Issue #3396, 2026-11-24): locally-attached engines (credential_id=0) accept any authenticated user; credential-backed engines accept only a platform admin, the credential owner, or an owner/admin of the credential's org; session_token is always 403. Tag values are domain-validated (400 INVALID_ROLE_TAGS) and empty tag sets are rejected (400 EMPTY_ROLE_TAGS, at least one role must remain).")
 def set_runtime_tags(runtime_id: int, body: dict, request: Request,
                      user: dict = Depends(require_runtime_owner_or_admin)):
     """设置 engine 的角色标签。应用互斥规则后写入。
 
     以 engine_capabilities 为单一数据源，agent_tags 列为派生缓存。
     写入顺序：先写 engine_capabilities，再 sync_agent_tags 回写 agent_tags。
-    写权限（Issue #3396 A5）：仅引擎凭据所有者（user 本人 / org owner+admin）
-    与平台管理员可改，仓库管理员禁改；本机直连（credential_id=0）仅平台管理员。
+    写权限（Issue #3396 A5，2026-11-24 分层裁定）：
+    - 本机直连（credential_id=0，主控机资产、与个人凭据无归属关系）→ 任意登录用户可改；
+    - 凭据引擎（credential_id≠0）→ 仅平台管理员 / 凭据 owner 本人 /
+      凭据所属 org 的 owner+admin 可改，仓库管理员与其他登录用户 403；
+    - session_token（tk_）→ 403；目标 runtime 不存在 → 404。
+    值域校验：值域外标签一律 400 INVALID_ROLE_TAGS，不写行、不改 flags
+    （此前值域外标签会先删光真实角色行再插入 bogus，引擎从此不可调度）。
+    非空校验：空标签集合一律 400 EMPTY_ROLE_TAGS，至少保留一个角色（空集在 A7 下 fail-closed）。
     """
     from datetime import datetime, timezone
     from src.domains.mgmt.public import sync_agent_tags
-    tags = _apply_tag_rules(body.get("tags") or [])
+    _raw_tags = [str(t).strip().lower() for t in (body.get("tags") or []) if str(t).strip()]
+    # QA 架构守护 A1（Critical）：开放接口必须校验角色值域。此前值域外标签会通过
+    # 「非空」守卫，先删光真实角色行、再插入 bogus 并置 tags_user_set=1 —— 引擎从此
+    # 对任何任务都不可选。值域外一律 400，且不写任何行、不改 flags。
+    _allowed = {"all"} | set(AGENT_TAGS)
+    _bad = sorted({t for t in _raw_tags if t not in _allowed})
+    if _bad:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "INVALID_ROLE_TAGS",
+            "message": f"无效的角色标签：{', '.join(_bad)}；允许的值为 all 或 {', '.join(sorted(AGENT_TAGS))}",
+        })
+    tags = _apply_tag_rules(_raw_tags)
+    if not tags:
+        # 2026-11-23 用户裁定：不允许把所有角色都取消——空角色行在 A7 下是 fail-closed，
+        # 引擎会变成任何角色都不可调度。保存直接失败并给出用户可读提示。
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "EMPTY_ROLE_TAGS",
+            "message": "至少要保留一个角色（勾选「全能」或任一角色），不能全部取消——空角色会让该引擎对任何任务都不再可选",
+        })
     now = datetime.now(timezone.utc).isoformat()
     # Issue #3350：engine_capabilities / agent_runtimes 归 runtime 域，按域取连接
     with _runtime_cursor() as c:

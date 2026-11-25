@@ -611,6 +611,12 @@ def record_repo_dispatch_busy(repo_key: str) -> None:
     return _impl(repo_key)
 
 
+def record_no_progress_scan_failure() -> None:
+    """no_progress 扫描失败计数（runtime scheduler → insight Prometheus 指标）。"""
+    from src.domains.insight.observability import record_no_progress_scan_failure as _impl
+    return _impl()
+
+
 def record_llm_usage(provider: str, model: str, input_tokens: int, output_tokens: int,
                      cache_tokens: int = 0) -> None:
     """Prometheus 侧 LLM token 埋点（与用量台账同源）。"""
@@ -659,7 +665,8 @@ def new_run_id(prefix: str) -> str:
 
 __all__ += ["redact_issue_text", "normalize_tokens", "pipeline_trace_id",
             "record_task_enqueued", "record_task_dispatched", "record_task_terminal",
-            "record_task_failed", "record_llm_usage", "record_usage",
+            "record_task_failed", "record_no_progress_scan_failure",
+            "record_llm_usage", "record_usage",
             "record_repo_dispatch_lease_wait", "record_repo_dispatch_busy",
             "task_model_summary", "master_usage_for_task", "master_run", "new_run_id"]
 

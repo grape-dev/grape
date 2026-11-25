@@ -39,6 +39,9 @@ _CODEARTS_ALLOW_PERMS = [
 
 from src.kernel.config import log, CHAT_CWD_BASE, log_context
 from src.domains.runtime.engine.client import CredentialRevokedError
+from src.domains.runtime.engine.metrics_collect import (
+    _unix_metrics_psutil_fill, _windows_metrics_fallback,
+)
 # Issue #4082：runtime_id 守卫的结构化错误（id 缺失/非法时不发请求）
 from src.domains.runtime.engine.runtime_id_guard import RuntimeIdMissingError, RUNTIME_ID_MISSING
 from src.domains.runtime.engine.acp_bootstrap import _is_spawn_failure
@@ -988,6 +991,29 @@ def _opencode_model_probe_error() -> str:
         return ""
 
 
+def _attach_backend_capability(result: dict, engine_name: str) -> dict:
+    """Issue #3928：给 probe_results 附后端能力态（服务端据此摘除缺 CLI 实例）。
+
+    能力态由探针结果映射（不重复起子进程）：ok→available、缺 CLI/未安装→unavailable、
+    spawn_failed/其它 fail→degraded、未纳管引擎→unknown。
+    """
+    try:
+        from src.domains.runtime.engine.backend_capability import (
+            STATUS_AVAILABLE, status_from_probe)
+        ps = str(result.get("status") or "").lower()
+        if ps == "ok":
+            status = STATUS_AVAILABLE
+        else:
+            status = status_from_probe(engine_name, ps, result.get("error", ""))
+        result["backend_status"] = status
+        result["backend_reason"] = ("" if status == STATUS_AVAILABLE
+                                    else str(result.get("error") or "")[:240])
+    except Exception as e:
+        result.setdefault("backend_status", "unknown")
+        result.setdefault("backend_reason", f"capability mapping failed: {e}"[:240])
+    return result
+
+
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     """对本机引擎发起测试对话，返回探测结果。
 
@@ -1125,8 +1151,9 @@ def _probe_engines_first_window(engines, reason: str = "install", window: float 
             continue
         if not eng.get("installed"):
             # 未安装不是「首探失败」：置 skip，不进重试（装完会由重注册拾起）
-            results[_name] = {"status": "skip", "latency": 0, "last_probe": _iso(),
-                              "error": "not installed"}
+            _skip_res = {"status": "skip", "latency": 0, "last_probe": _iso(),
+                         "error": "not installed"}
+            results[_name] = _attach_backend_capability(_skip_res, _name)
             continue
         pending[_name] = eng
 
@@ -1147,6 +1174,7 @@ def _probe_engines_first_window(engines, reason: str = "install", window: float 
                     _res = dict(_probe(pending[_name]) or {})
                 except Exception as _pe:
                     _res = {"status": "fail", "latency": 0, "error": str(_pe)[:200]}
+                _attach_backend_capability(_res, _name)
                 _res["last_probe"] = _iso()
                 results[_name] = _res
                 if _res.get("status") == "ok":
@@ -1444,15 +1472,16 @@ def _worker_probe_once():
         engines = _discover_local_runtimes()
         for eng in engines:
             if not eng.get("installed"):
+                _skip = {"status": "skip", "latency": 0,
+                         "last_probe": _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z",
+                         "error": "not installed"}
+                _attach_backend_capability(_skip, eng["name"])
                 with _worker_probe_lock:
-                    _worker_probe_results[eng["name"]] = {
-                        "status": "skip", "latency": 0,
-                        "last_probe": _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z",
-                        "error": "not installed",
-                    }
+                    _worker_probe_results[eng["name"]] = _skip
                 continue
             log.info(f"worker engine probe: testing {eng['name']}...")
             result = _probe_engine_worker(eng["name"], eng.get("cli_path", ""))
+            _attach_backend_capability(result, eng["name"])
             result["last_probe"] = _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z"
             with _worker_probe_lock:
                 _worker_probe_results[eng["name"]] = result
@@ -1497,15 +1526,16 @@ def _worker_probe_loop():
             engines = _discover_local_runtimes()
             for eng in engines:
                 if not eng.get("installed"):
+                    _skip = {"status": "skip", "latency": 0,
+                             "last_probe": _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z",
+                             "error": "not installed"}
+                    _attach_backend_capability(_skip, eng["name"])
                     with _worker_probe_lock:
-                        _worker_probe_results[eng["name"]] = {
-                            "status": "skip", "latency": 0,
-                            "last_probe": _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z",
-                            "error": "not installed",
-                        }
+                        _worker_probe_results[eng["name"]] = _skip
                     continue
                 log.info(f"worker engine probe: testing {eng['name']}...")
                 result = _probe_engine_worker(eng["name"], eng.get("cli_path", ""))
+                _attach_backend_capability(result, eng["name"])
                 result["last_probe"] = _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z"
                 with _worker_probe_lock:
                     _worker_probe_results[eng["name"]] = result
@@ -1635,8 +1665,17 @@ def _collect_worker_metrics() -> dict:
         except Exception:
             pass
 
+        # wmic 在 Win11 24H2 起已从系统移除：上面的 wmic 采集会静默失败、整卡显示 0.0。
+        # 这里按 psutil → PowerShell CIM 兜底，只填仍然为 0 的字段。
+        _windows_metrics_fallback(metrics)
+
         # load_avg: Windows 无等价指标，保持空
         # bandwidth: Windows 无 /proc/net/dev 等价，保持 0.0
+        try:
+            from src.domains.runtime.engine.state_db_maintenance import worker_metrics_snapshot
+            metrics.update(worker_metrics_snapshot())
+        except Exception:
+            pass
         return metrics
 
     # ===== Unix: /proc 采集（保持原有行为不变）=====
@@ -1752,7 +1791,19 @@ def _collect_worker_metrics() -> dict:
     except Exception:
         pass
 
+    try:
+        from src.domains.runtime.engine.state_db_maintenance import worker_metrics_snapshot
+        metrics.update(worker_metrics_snapshot())
+    except Exception:
+        pass
+    # /proc 读取失败兜底：心跳正常但 memory/disk 恒为 0.0 的 Linux worker（内存占用不可能
+    # 真的是 0），用 psutil 补同一口径的数字；已有值的字段不动。
+    if not metrics.get("memory_percent") or not metrics.get("disk_percent"):
+        _unix_metrics_psutil_fill(metrics)
+
     return metrics
+
+
 import logging as _logging_mod
 _worker_log_buffer = _collections.deque(maxlen=50)  # 最近 50 条 ERROR/WARNING
 _last_sent_log_ts = 0.0  # 上次上报的时间戳，避免重复发送
@@ -1925,8 +1976,15 @@ def _discover_local_runtimes() -> list[dict]:
         from src.domains.runtime.engine.instances import engine_display_name, ENGINE_DISPLAY_NAMES
         _et = (r["name"] or "").strip().lower()
         _dn = ENGINE_DISPLAY_NAMES.get(_et, "")
+        try:
+            from src.domains.runtime.engine.backend_capability import probe_engine_capability
+            _cap = probe_engine_capability(r["name"], cli)
+        except Exception as _ce:
+            _cap = {"status": "unknown", "reason": f"probe failed: {_ce}",
+                    "engine": r["name"], "command": "", "executable": ""}
         out.append({"name": r["name"], "display_name": (_dn.capitalize() if _dn else r["name"]),
-                    "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False)})
+                    "version": version, "healthy": healthy, "cli_path": cli,
+                    "installed": r.get("installed", False), "backend_capability": _cap})
     return out
 
 
@@ -3287,6 +3345,51 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
     return None
 
 
+# Issue #4203：每个 tid 的网络错误连续 flush 窗口计数（达到阈值即把批次落盘，
+# 防止内存 batch 在 OOM SIGKILL 下丢失；成功送达即清零）
+_msg_flush_retry_streak: dict[str, int] = {}
+
+
+def _msg_flush_persist_after() -> int:
+    """落盘阈值（连续网络错误窗口数）；非法/空值回落到默认 3。
+
+    Issue #4203 复审：`int(os.environ.get(...))` 未捕获 ValueError，环境变量写成
+    空串/非法值会从 flush 里抛出，直接中断当次任务上报（异常落在执行主循环）。
+    """
+    try:
+        return max(1, int(os.environ.get("GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER", "3")))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _persist_failed_batch(tid: str, batch: list) -> int:
+    """把未能送达的消息批次逐条截断后落本地持久化补报队列，返回已持久化条数。
+
+    复用 Issue #975 的 kind=messages 条目格式（task_id 带 #msg- 后缀、截断防 413），
+    由 _report_replay_loop 周期重放。批量入队（WorkerReportQueue.add_many 只重写
+    一次 jsonl）；落盘失败返回 0，调用方据此 `return "retry"` 保留内存 batch——
+    docstring 与行为一致：只有全部落盘才允许丢弃内存批次。
+    """
+    import time as _time
+    entries = []
+    try:
+        from src.domains.runtime.engine.message_report import truncate_message, build_msg_entry_id
+        _ts = _time.time()
+        for i, m in enumerate(batch):
+            entries.append({"kind": "messages", "task_id": build_msg_entry_id(tid, _ts, i),
+                            "task": tid, "message": truncate_message(m)})
+        persisted = _report_queue().add_many(entries)
+    except Exception as e:
+        log.warning(f"task {tid} report batch persist failed: {e}")
+        return 0
+    if persisted >= len(batch):
+        log.info(f"task {tid} report batch persisted for replay: {persisted} message(s)")
+        return persisted
+    log.warning(f"task {tid} report batch persist incomplete: {persisted}/{len(batch)} "
+                f"message(s) durable, keeping batch in memory")
+    return persisted
+
+
 async def _flush_report_batch(client, tid: str, batch: list) -> str:
     """批量上报一批消息（Issue #975 三态处理）。
 
@@ -3294,9 +3397,16 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
     - "ok"      批次已送达（或已走降级：拆批重发/占位/补报队列），可清空 batch
     - "retry"   网络错误（可重试）——保留 batch，下个 flush 窗口重试，不清空不丢
     - "terminal" 任务已被服务端标终态（410），调用方应中断执行
+
+    Issue #4203：网络错误连续 N 个 flush 窗口（GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER，
+    默认 3）仍失败时，批次截断后批量落本地持久化补报队列并返回 "ok"——内存 batch
+    在进程被 SIGKILL（OOM kill）时必然丢失（004 事故 28 条消息回执的成因），
+    落盘后由 _report_replay_loop 退避续投。落盘未全部成功则返回 "retry" 保留 batch
+    （绝不把「只在内存」当成「已持久化」清空）。
     """
     from src.domains.runtime.engine.client import ReportBatchError
-    from src.domains.runtime.engine.message_report import degrade_failed_batch, truncate_message, build_msg_entry_id
+    from src.domains.runtime.engine.message_report import degrade_failed_batch
+    global _msg_flush_retry_streak
     try:
         _resp = await client.report_messages(tid, batch)
     except ReportBatchError as e:
@@ -3307,26 +3417,22 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
                 enqueue=_report_queue().add)
         except Exception as _de:
             # QA 复审修复（Spec #3）：降级链路自身抛错时绝不能仍返回 "ok"
-            # 静默清空 batch（原缺陷换入口复现）。兜底：逐条落本地持久化补报队列
-            # （截断防 413），由 _report_replay_loop 后续重放；队列也不可用才返回
+            # 静默清空 batch（原缺陷换入口复现）。兜底：批量落本地持久化补报队列
+            # （截断防 413），由 _report_replay_loop 后续重放；落盘不全才返回
             # "retry" 保留 batch 下个窗口重试——两条路径都不丢消息。
             log.warning(f"task {tid} report degrade failed: {_de}")
-            try:
-                import time as _time
-                _q = _report_queue()
-                _ts = _time.time()
-                for i, m in enumerate(batch):
-                    _q.add({"kind": "messages", "task_id": build_msg_entry_id(tid, _ts, i),
-                            "task": tid, "message": truncate_message(m)})
-                log.info(f"task {tid} report degrade fallback: {len(batch)} message(s) queued for replay")
+            if await asyncio.to_thread(_persist_failed_batch, tid, batch) >= len(batch):
                 return "ok"
-            except Exception as _qe:
-                log.warning(f"task {tid} report degrade fallback enqueue failed: {_qe}")
-                return "retry"
+            _msg_flush_retry_streak[tid] = _msg_flush_retry_streak.get(tid, 0) + 1
+            return "retry"
+        _msg_flush_retry_streak.pop(tid, None)
         return "ok"
     except CredentialRevokedError:
+        # 异常退出路径也清计数（否则 tid 不复用时 dict 缓慢增长）
+        _msg_flush_retry_streak.pop(tid, None)
         raise
     if _resp is None:
+        _msg_flush_retry_streak.pop(tid, None)
         return "terminal"
     if isinstance(_resp, dict) and _resp.get("status") == "ok":
         # 服务端回执带 seq 范围（seq_start/seq_end）——记录累计已确认 seq 供对账
@@ -3334,8 +3440,25 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
         if _seq_end is not None:
             log.info(f"task {tid} messages acknowledged: count={len(batch)} "
                      f"seq_range={_resp.get('seq_start')}..{_seq_end}")
+        _msg_flush_retry_streak.pop(tid, None)
         return "ok"
-    # 网络错误（{}）：保留 batch，下个窗口重试（不清空，防止静默丢失）
+    # 网络错误（{}）：连续 N 个窗口仍失败 → 落盘后清空（Issue #4203：内存 batch
+    # 在 SIGKILL 下必丢，持久化后交由补报重放循环续投）；未达阈值保留 batch 下个
+    # 窗口重试（不清空，防止静默丢失）。
+    _streak = _msg_flush_retry_streak.get(tid, 0) + 1
+    _persist_after = _msg_flush_persist_after()
+    if _streak >= _persist_after:
+        # 批量落盘放线程池：add_many 只重写一次 jsonl，但仍不能占用事件循环
+        # （心跳/摘流恰好在这个网络故障窗口里最需要响应）。
+        if await asyncio.to_thread(_persist_failed_batch, tid, batch) >= len(batch):
+            _msg_flush_retry_streak.pop(tid, None)
+            return "ok"
+        # 落盘未成功：保留 batch 下个窗口继续重试，不清空、不谎报 ok
+        _msg_flush_retry_streak[tid] = _streak
+        return "retry"
+    _msg_flush_retry_streak[tid] = _streak
+    log.warning(f"task {tid} report batch network error (streak={_streak}/"
+                f"{_persist_after}), keeping batch for retry")
     return "retry"
 
 
@@ -3409,7 +3532,8 @@ def platform_card_block_result(tid: str, repo_key: str, exc) -> dict:
     return {"_error": f"{code}: {exc}", "_started": False}
 
 
-def credential_block_result(tid: str, repo_key: str) -> "dict | None":
+def credential_block_result(tid: str, repo_key: str, token_result=None,
+                            failure_scene=None) -> "dict | None":
     """Issue #3713：建树取不到 token 时的任务阻断结果（纯构造，便于单测）。
 
     为什么单独成函数：原行为是「ensure_issue_worktree 返回空 → 只 WARNING 一条 →
@@ -3421,13 +3545,56 @@ def credential_block_result(tid: str, repo_key: str) -> "dict | None":
         归因成立 → `{"_error": "credential_<stage>: ...", "_started": False}`
         （由 `_wrap` 上报 failed，任务不进入 Agent 执行）；
         凭据可用或无法归因 → None（保持既有告警路径，语义不变）。
+
+    `token_result`：调用方已解析过凭据链时传入，避免同一阻断重复解析。
+    `failure_scene`：已记录的建树失败现场——有 repo_base 阶段现场时空仓断言不成立
+    （fetch 失败的后果），必须优先透传 git 原文（Issue #3923 复审 Required）。
     """
     from src.domains.runtime.engine import repogit
 
-    reason = repogit.worktree_credential_error(repo_key)
+    reason = repogit.worktree_credential_error(repo_key, token_result=token_result,
+                                               failure_scene=failure_scene)
     if not reason:
         return None
     log.error(f"task {tid} blocked by credential: {reason} repo_key={repo_key or ''}")
+    return {"_error": reason, "_started": False}
+
+
+def worktree_block_result(tid: str, repo_key: str, issue_num=None,
+                          agent_type: str = "") -> "dict | None":
+    """Issue #3923：建树失败的阻断结果 —— 凭据归因成立则报凭据，否则透传 git 原文。
+
+    为什么需要：worker 进程没有装配层（`vcs_provider`/`vcs_cards` 端口未绑），
+    凭据归因在 worker 上永远不成立；此前归因为空即落默认 `not_configured`，
+    把任何 git 失败（HEAD 断裂、ref 冲突）都写成「仓库没配凭据」。
+
+    Returns:
+        有失败现场 → `{"_error": ..., "_started": False}`；
+        无失败现场（建树失败另有原因/未记录）→ None（保持既有告警路径）。
+    """
+    from src.domains.runtime.engine import repogit
+    from src.kernel.token_resolver import resolve_exec_token
+
+    # Issue #3923 审查 Optional：一次阻断只解析一次凭据链，结果下传给
+    # 凭据归因与错误面（原实现会重复解析 3 次，失败路径成本被放大）。
+    token_result = resolve_exec_token(repo_key)
+    # Issue #3923 复审 Required：**先读现场、再问凭据**。空仓断言只在没有
+    # repo_base 阶段现场时成立（fetch/init 失败会让本地 0 refs，此时空仓是
+    # 失败的后果，不是原因）；否则 401/网络原文会被 empty_repo 抹掉。
+    scene = repogit.worktree_last_failure(repo_key, issue_num=issue_num,
+                                          agent_type=agent_type)
+    # 凭据归因成立（确实无凭据/空仓）→ 沿用既有阻断语义与文案
+    cred = credential_block_result(tid, repo_key, token_result=token_result,
+                                   failure_scene=scene)
+    if cred:
+        return cred
+    reason = repogit.worktree_failure_error(repo_key, issue_num=issue_num,
+                                            agent_type=agent_type,
+                                            token_result=token_result,
+                                            failure_scene=scene)
+    if not reason:
+        return None
+    log.error(f"task {tid} blocked by worktree failure: {reason} repo_key={repo_key or ''}")
     return {"_error": reason, "_started": False}
 
 
@@ -3594,10 +3761,16 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     # 返回 _error 由 _wrap 上报 failed，任务**不进入** Agent 执行。
     from src.domains.runtime.engine.repogit import WorkspaceBaselineError as _WsBaselineError
     from src.domains.runtime.vcs.platform_card import PlatformCardMissingError as _PlatformCardMissing
+    from src.domains.runtime.engine import repogit
+    _wt_repo_key = task.get("repo_key") or ""
+    _wt_agent = task.get("agent_type") or ""
+    _wt_wanted = False
+    _num = 0
     try:
-        from src.domains.runtime.engine import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
-        if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
+        _wt_wanted = bool(repogit.is_git_agent(task.get("agent_type") or "") and _num
+                          and task.get("issue_session_id"))
+        if _wt_wanted:
             _wb = env.get("GRAPE_WORK_BRANCH", "")
             _wt = repogit.ensure_issue_worktree(
                 task.get("repo_key") or "", task.get("agent_type") or "",
@@ -3607,10 +3780,23 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
             # Issue #3713：建树没成且凭据侧不可用 → 把 stage 带进 task errors 并阻断，
             # 不再放任 agent 以「git 元数据只读」自述降级、零交付仍 completed。
             if not _wt:
-                _cred_blocked = credential_block_result(tid, task.get("repo_key") or "")
-                if _cred_blocked:
+                # Issue #3923：凭据归因**成立**才报凭据；worker 上归因不可用（端口未绑）
+                # 时透传 git 原文与失败阶段，不再默认落 credential_not_configured。
+                _blocked = worktree_block_result(
+                    tid, task.get("repo_key") or "", issue_num=_num,
+                    agent_type=task.get("agent_type") or "")
+                if _blocked:
                     _res.dispose()
-                    return _cred_blocked
+                    return _blocked
+                # Issue #3482（C）：关闭 fail-open——需要工作区却没建起来 = 错误，
+                # 不得让任务以「只读会话」跑完再 completed（缺交付物却无报错）。
+                # （合并注：#3713 凭据侧不可用已在上面临断，此处为非凭据失败的兜底阻断。）
+                _wt_msg = (f"[workspace_unavailable] Issue #{_num} "
+                           f"{task.get('agent_type') or ''} 工作区不可用：git worktree 创建失败；"
+                           f"任务置 failed，不以只读 completed 收尾")
+                log.error(f"task {tid} {_wt_msg}")
+                _res.dispose()
+                return {"_error": _wt_msg, "_started": False}
     except _WsBaselineError as _wb_err:
         log.error(f"task {tid} blocked by workspace baseline guard: {_wb_err} "
                   f"fields={_wb_err.to_dict()}")
@@ -3624,6 +3810,25 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         _res.dispose()
         return platform_card_block_result(tid, task.get("repo_key") or "", _pc_err)
     except Exception as e:
+        # Issue #3923 复审 Required：建树异常不得只 WARNING 一条就放行——旧行为让
+        # agent 在无工作区状态下继续执行、自述降级交付，正是本 Issue 要消灭的形态。
+        log.error(f"git worktree ensure failed: {e}")
+        if repogit.is_git_agent(_wt_agent) and task.get("issue_session_id"):
+            _blocked = worktree_block_result(tid, _wt_repo_key, issue_num=_num,
+                                             agent_type=_wt_agent)
+            if not _blocked:
+                # 异常发生在失败现场落盘之前（如 repo_base_dir 自身抛错）：
+                # 仍按不可建树阻断，错误面如实带异常原文。
+                _blocked = {"_error": f"worktree_failed: {e}", "_started": False}
+            _res.dispose()
+            return _blocked
+        if _wt_wanted:
+            _wt_msg = (f"[workspace_unavailable] Issue #{_num} "
+                       f"{task.get('agent_type') or ''} 工作区不可用：{str(e)[:300]}；"
+                       f"任务置 failed，不以只读 completed 收尾")
+            log.error(f"task {tid} {_wt_msg}")
+            _res.dispose()
+            return {"_error": _wt_msg, "_started": False}
         log.warning(f"git worktree ensure failed: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）
     # Issue #466: 传 env（含 GRAPE_LINKED_REPO_TOKENS，服务端派发时随 env_extra 下发），
@@ -3857,9 +4062,10 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
                 return _abort_task_terminal(task, engine_name, env, _res, started,
                                             "at final flush")
         # Issue #242: coding agent 成功完成后，向关联仓库提交 PR（在 cleanup 删 worktree 之前执行）
+        # Issue #3349：同步建 PR（同步 urllib）不能在事件循环线程内执行，卸载到工作线程
         if done is not None and not (isinstance(done, dict) and done.get("_error")):
             try:
-                _submit_linked_repo_prs(task, env)
+                await asyncio.to_thread(_submit_linked_repo_prs, task, env)
             except Exception as _e:
                 log.warning(f"linked PR submission failed for task {tid}: {_e}")
         # 可观测性：采集并上报 LLM 用量（引擎已退出，账本已落盘）
@@ -3990,10 +4196,13 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
         # ② 本机引擎被误注到沙箱凭据下（cred15 污染行 20/21/29，与 cred14 正身行并存）；
         # ③ 模板 hash 未变 → _refresh_templates 不再重注册 → 非重启 worker 不可恢复。
         # 云条目按 name 锚定注册（UPDATE 分支）拿回原 rid，心跳即刻恢复。
+        _discovered = None
         _cloud_prev = [r for r in (prev_installed or [])
                        if (r.get("runtime_type") or "") == "cloud"]
+        _register_payload = None
         if _cloud_prev:
             installed = list(prev_installed)
+            _register_payload = installed
         elif (os.environ.get("CLOUD_WORKER_PROVIDER", "") or "").strip():
             # [云模式锚定 2026-11-16] cloud_worker 的 runtime.env 恒有 CLOUD_WORKER_PROVIDER——
             # 模板列表是云 worker 的唯一引擎源，不做本地重发现。fresh 实例实锤（aw11 E-02）：
@@ -4001,16 +4210,44 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
             # _cloud_prev 为空 → 走 C1 本地发现 → 本机引擎误注到沙箱凭据下 + 顶掉
             # runtime_ids，且模板落地后不可自愈（云条目永远进不了 prev_installed）。
             installed = list(prev_installed or [])
+            _register_payload = installed
         else:
-            # C1：重新发现本机引擎（启动后新安装的引擎在此被拾起）
-            installed = [r for r in _discover_local_runtimes() if r.get("installed")]
-        # S3：重扫瞬时为空（快照曾有引擎）→ 沿用快照不注册（异常扫描自愈交给下轮）
-        if not installed and prev_installed:
-            log.warning("re-scan found no engines while snapshot had "
-                        f"{len(prev_installed)}; keeping snapshot (transient scan?)")
+            # C1：重新发现本机引擎（启动后新安装的引擎在此被拾起）。
+            # Issue #3928：注册载荷带上 discovered 全量（含 installed=false）——
+            # 服务端只更新已存在的 runtime 行（不建幽灵行），用于把「曾经安装、
+            # 后来 CLI 被移除/不在 PATH」的存量实例标记为 unavailable 并熔断；
+            # 旧实现把 installed=false 过滤掉 → 存量行永远 healthy=1 继续认领
+            #（17641 codearts-cred0 根因）。
+            _discovered = _discover_local_runtimes()
+            installed = [r for r in _discovered if r.get("installed")]
+            _register_payload = _discovered
+        # S3：重扫「已安装」为空（快照曾有已安装引擎）→ 沿用快照不注册（异常扫描自愈交给下轮）。
+        # QA 复审 Optional：判空必须按「已安装数」而不是 payload 非空——C1 载荷按设计带
+        # installed=false 条目（供服务端标记 CLI 已被移除的存量实例），若按 payload 判空，
+        # 一次扫描抖动导致「全 installed=false」时会把该 worker 的整机 runtime 置
+        # installed=0/healthy=0 并熔断，只能等下一轮扫描自愈。
+        # 边界：仅当快照里曾有多台已安装引擎（≥2）才按瞬时抖动处理；单引擎主机
+        # 「唯一 CLI 被移除」与扫描抖动无法区分，仍按 17641 根因链路如实上报（否则
+        # 存量行永远 healthy=1 继续认领）。
+        _installed_now = [r for r in (installed or []) if r.get("installed")]
+        _prev_installed_count = sum(1 for r in (prev_installed or []) if r.get("installed"))
+        # S3（Issue #471）：重扫整体为空 = 扫描本身失败/瞬时异常，与「扫描到了、但
+        # installed=false」是两回事——后者才是 17641 的「CLI 已被移除」形态（条目齐全
+        # 只差 installed 位）。因此「发现列表为空且快照曾有已安装引擎」一律沿用快照，
+        # 不再受快照台数限制：单引擎主机一次扫描异常不得被注册成空列表清空在线态
+        # （test_issue_471_reregister_robustness::test_rescan_transient_empty_skips_register_call）。
+        if _discovered is not None and not _discovered and _prev_installed_count >= 1:
+            log.warning("re-scan returned nothing while snapshot had "
+                        f"{_prev_installed_count} installed engine(s); keeping snapshot "
+                        "(transient scan?)")
+            return None
+        if not _installed_now and _prev_installed_count >= 2:
+            log.warning("re-scan found no installed engines while snapshot had "
+                        f"{_prev_installed_count}; keeping snapshot (transient scan?)")
             return None
         _ls = _scan_local_skills()
-        ids, _probe = await client.register(installed, device_name=device_name, cli_version=cli_version, local_skills=_ls)
+        _payload = installed if _register_payload is None else _register_payload
+        ids, _probe = await client.register(_payload, device_name=device_name, cli_version=cli_version, local_skills=_ls)
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
@@ -4020,9 +4257,11 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
             log.info(f"re-registered successfully, new runtime ids: {ids}")
             return ids, engine_by_rid, installed
         if not installed:
-            # C1：无引擎为正常状态——注册成功，ids 为空
-            log.info("re-registered with no engines installed (normal state); "
-                     "engines will auto-register once installed")
+            # C1：无引擎为正常状态——注册成功，ids 为空。
+            # Issue #3928：payload 可能含 installed=false 的存量引擎（本轮已由服务端
+            # 标记 unavailable），这里仍按「无可用引擎」返回，不把它们放进心跳列表。
+            log.info("re-registered with no installed engines (normal state); "
+                     "stale/unavailable runtime rows were marked offline-capable")
             return [], {}, []
         log.warning("re-register returned empty ids despite installed engines")
     except CredentialRevokedError:

@@ -102,6 +102,9 @@ from src.kernel.startup_metrics import install as _install_startup_metrics
 # 此前 autopilot 结果回帖失败只有一条 WARNING，值守无从感知；收集器定义在 kernel
 # （kernel 不依赖 domains），在这里注册进本模块 registry，/metrics 才能带出来。
 from src.kernel.comment_metrics import install as _install_comment_metrics
+# Issue #4183：任务会话 get-or-create 失败指标（grape_task_conversation_ensure_failed_total{reason}）。
+# 旧 Issue 重派撞唯一索引后的「1062 兜底仍查不到」由 WARNING 升级为可巡检指标。
+from src.kernel.task_conversation_metrics import install as _install_task_conversation_metrics
 # db_lock 的等待/持锁直方图与持有者 gauge（owner = 归一化请求路径）。
 # 与 lock_instrument 的慢锁计数器互补：这里看「等了多久、谁在持」，那里看「临界区在哪」。
 from src.kernel.db_lock_metrics import install as _install_db_lock_metrics
@@ -113,11 +116,23 @@ _install_db_lock_metrics(registry)
 # 启动降级变成可巡检指标；未安装前 record 是 no-op。
 _install_startup_metrics(registry)
 _install_comment_metrics(registry)
+_install_task_conversation_metrics(registry)
 # Issue #3740：RepoBotToken 历史列回落 counter。降噪后日志不再承担全量计数，
 # 回落规模与仓库分布由 grape_repo_bot_legacy_fallback_total{provider,repo} 兜底。
 from src.kernel.repo_bot_observability import install as _install_repo_bot_observability
 
 _install_repo_bot_observability(registry)
+
+# Issue #4203：进程级内存指标（worker 主进程 + 引擎子进程 RSS + cgroup 限额）。
+# gauge 定义在 process_memory（install 模式，与 kernel metrics 一致），这里注册进
+# 本模块 registry；采样在 on_metrics_scrape 拉取时执行。
+from src.domains.insight.observability.process_memory import (
+    install as _install_process_memory,
+    collect_process_memory,
+    log_effective_memory_limit,
+)
+
+_install_process_memory(registry)
 
 HTTP_IN_FLIGHT = Gauge(
     "grape_http_in_flight_requests",
@@ -387,6 +402,85 @@ TASK_IN_PROGRESS = Gauge(
 )
 
 
+# ===== ACP state.db 体积治理指标（Issue #3773）=====
+# worker 心跳把本机 state.db 体积与清理计数写入 runtime_credentials，这里在
+# /metrics scrape 时按 host 采样。名字与 Spec 一致（_total 系列用 Gauge 承载
+# worker 进程内的单调累计值）。语义约定：同一 host 相邻两次 scrape 的值单调不减，
+# worker 重启时归零 —— Prometheus 的 increase() 把这种下降当作 counter reset 处理，
+# 因此 Gauge 承载累计量仍可用于 increase()/rate() 告警（deploy/alerts.yml）。
+ACP_STATE_DB_BYTES = Gauge(
+    "grape_acp_state_db_bytes",
+    "Largest hermes ACP state.db observed on a worker host.",
+    ["host"],
+    registry=registry,
+)
+
+ACP_STATE_DB_CLEANUP_TOTAL = Gauge(
+    "grape_acp_state_db_cleanup_total",
+    "Cumulative ACP state.db cleanup attempts by result.",
+    ["host", "result"],
+    registry=registry,
+)
+
+ACP_STATE_DB_BYTES_FREED_TOTAL = Gauge(
+    "grape_acp_state_db_bytes_freed_total",
+    "Cumulative bytes freed by ACP state.db cleanup.",
+    ["host"],
+    registry=registry,
+)
+
+ACP_RESUME_SKIPPED_TOTAL = Gauge(
+    "grape_acp_resume_skipped_total",
+    "Cumulative ACP resume attempts skipped because state.db stayed too large.",
+    ["host"],
+    registry=registry,
+)
+
+_acp_cleanup_results: dict[str, set] = {}
+
+
+def collect_acp_state_db_metrics():
+    """scrape 时把 worker 上报的 state.db 指标刷到 Prometheus。"""
+    try:
+        import json as _json
+
+        from src.domains.runtime import public as _rt_public
+        rows = _rt_public.read_all_any("runtime_credentials_acp_state_rows")
+    except Exception:
+        return
+    # 同一 host 可能存在多行凭据（worker 上报真实值 + insight/API 进程的 0 值行）。
+    # 无 ORDER BY 的逐个 set 会被后一行覆盖，故先按 host 取 db_bytes 最大的一行；
+    # 避免 0 值行把 worker 真实指标刷掉。
+    best: dict[str, tuple] = {}
+    for row in rows or []:
+        values = list(row) + [None] * 6
+        device_name, name, db_bytes, cleanup_counts, freed, skipped = values[:6]
+        host = str(device_name or name or "unknown")
+        try:
+            rank = float(db_bytes or 0)
+        except (TypeError, ValueError):
+            rank = 0.0
+        current = best.get(host)
+        if current is None or rank > current[0]:
+            best[host] = (rank, cleanup_counts, freed, skipped)
+    for host, (_db_bytes, cleanup_counts, freed, skipped) in best.items():
+        ACP_STATE_DB_BYTES.labels(host=host).set(float(_db_bytes or 0))
+        ACP_STATE_DB_BYTES_FREED_TOTAL.labels(host=host).set(float(freed or 0))
+        ACP_RESUME_SKIPPED_TOTAL.labels(host=host).set(float(skipped or 0))
+        counts = {}
+        try:
+            parsed = _json.loads(cleanup_counts or "{}")
+            if isinstance(parsed, dict):
+                counts = {str(k): int(v or 0) for k, v in parsed.items()}
+        except (TypeError, ValueError):
+            counts = {}
+        known = _acp_cleanup_results.setdefault(host, set())
+        known.update(counts)
+        for result in known:
+            ACP_STATE_DB_CLEANUP_TOTAL.labels(host=host, result=result).set(
+                float(counts.get(result, 0)))
+
+
 # ===== 标签规范化（参考 multica metrics/labels.go）=====
 
 _VALID_SOURCES = frozenset({"chat", "issue", "webhook", "manual", "api", "vod", "autopilot", "other"})
@@ -581,6 +675,41 @@ RUNTIME_TAGS_PROBE_FAILURES = Counter(
     registry=registry,
 )
 
+# Issue #3772：no_progress 无进展检测扫描失败计数。
+# 扫描入口异常此前仅一条 WARNING 后 return 0（本轮不检测），生产上看不出检测停摆。
+# 由 runtime scheduler 记录，deploy/alerts.yml GrapeNoProgressScanFailing 规则消费。
+# 指标名单一来源（QA R1）：告警表达式漂移由 test_issue_3772_no_progress_scan 断言看护。
+NO_PROGRESS_SCAN_FAILURES_METRIC = "grape_no_progress_scan_failures_total"
+
+NO_PROGRESS_SCAN_FAILURES = Counter(
+    NO_PROGRESS_SCAN_FAILURES_METRIC,
+    "No-progress detection scan failures reported by the runtime scheduler.",
+    registry=registry,
+)
+
+
+# ===== env_extra 存量明文行（Issue #3770）=====
+# 读侧/迁移命中的存量明文凭据行按 outcome 计数：healed（就地自愈成功，UPDATE 真改行）、
+# heal_skipped（rowcount=0：行已被并发加密/删除/覆盖，按收敛处理）、report_only（report
+# 策略或读点无行 id——按设计不自愈）、heal_failed（自愈真失败）、unparseable（坏值）、
+# write_refused（写入侧加密失败、拒绝明文回落）。
+# 与告警节流（env_extra_security：(host, 行类型) 每小时 ≤1 条）配对——告警被节流时计数仍增长，
+# 因此「清零后不再增长」可以直接当收敛判据。
+
+ENV_EXTRA_PLAINTEXT_ROWS_METRIC = "grape_env_extra_plaintext_rows_total"
+
+ENV_EXTRA_PLAINTEXT_OUTCOMES = (
+    "healed", "heal_skipped", "report_only", "heal_failed", "unparseable", "write_refused")
+
+ENV_EXTRA_PLAINTEXT_ROWS = Counter(
+    ENV_EXTRA_PLAINTEXT_ROWS_METRIC,
+    "agent_tasks.env_extra 存量明文行事件：healed（就地自愈成功）/ heal_skipped"
+    "（行已被并发处理，按收敛计）/ report_only（report 策略或无行 id，按设计不自愈）/"
+    " heal_failed（自愈失败）/ unparseable（坏值）/ write_refused（写侧拒绝明文回落）。",
+    ["outcome"],
+    registry=registry,
+)
+
 
 def record_runtime_tags_probe_failure(host: str, reason: str, detail: str = ""):
     """标签探活失败计数（`/api/runtime/runtime-tags-probe/signal` 的承接落点）。
@@ -593,6 +722,17 @@ def record_runtime_tags_probe_failure(host: str, reason: str, detail: str = ""):
     if r not in RUNTIME_TAGS_PROBE_REASONS:
         r = "unknown"
     RUNTIME_TAGS_PROBE_FAILURES.labels(host=h, reason=r).inc()
+
+
+def record_no_progress_scan_failure():
+    """记录一次 no_progress 扫描失败（异常类型进日志，不进指标标签防高基数）。"""
+    NO_PROGRESS_SCAN_FAILURES.inc()
+def record_env_extra_plaintext_row(outcome: str = "heal_failed"):
+    """env_extra 明文行计数（未知 outcome 归 unknown：不丢数、不加高基数标签）。"""
+    o = (outcome or "").strip().lower()
+    if o not in ENV_EXTRA_PLAINTEXT_OUTCOMES:
+        o = "unknown"
+    ENV_EXTRA_PLAINTEXT_ROWS.labels(outcome=o).inc()
 
 
 # ===== MySQL 连接池指标（参考 multica metrics/db.go，适配 grape MySQL）=====
@@ -850,3 +990,6 @@ def on_metrics_scrape():
     """
     collect_mysql_metrics()
     collect_business_sampler()
+    collect_acp_state_db_metrics()
+    # Issue #4203：进程/引擎子进程 RSS 与 cgroup 限额（拉取时采样，无新链路）
+    collect_process_memory()

@@ -35,3 +35,25 @@ jobs:
                             tests/runtime/im/test_im_notify_fanout.py \
                             tests/runtime/test_issue_3510_im_uuid_notify.py \
                             tests/api/test_runtime_public_lib.py
+      - name: Worker OOM / outbox / launcher regression (issue #4203)
+        # PR #2092 复审 Required：34 例新增测试此前只在本地跑过，未接入任何 CI 白名单，
+        # 合入后指标/告警/outbox/预 bind 回归无门禁（改动静默破坏不可见）。
+        # 进程内存指标（v2/v1/混合层级回退）、部署配置（两条 worker 启动路径）、
+        # launcher 预 bind、消息 outbox 落盘失败语义四族。
+        run: |
+          python -m pytest -q tests/insight/test_process_memory_metrics.py \
+                            tests/deploy/test_issue_4203_deploy_config.py \
+                            tests/scripts/test_issue_4203_start_worker.py \
+                            tests/runtime/test_issue_4203_msg_outbox.py
+      - name: Faro disconnect + global handler regression (issue #4248)
+        # Issue #4248：客户端中断 → 499、全局兜底日志带异常类名、handler 单一来源。
+        # 纳入 CI 才能让 PR 描述的用例计数可复算（新用例不能只跑在本地）。
+        run: |
+          python -m pytest -q tests/insight/test_issue_4248_faro_client_disconnect.py \
+                            tests/api/test_issue_4248_api_error_classname.py
+      - name: Worktree build failure regression (issue #3923)
+        # Issue #3923 复审：建树失败必须阻断（凭据归因不可用时透传 git 原文），
+        # 这条不变量此前只在本机跑，CI 里无覆盖。纳入本 job 后 PR 上可直接复算。
+        run: |
+          python -m pytest -q tests/runtime/test_issue_3923_worktree_head_and_attribution.py \
+                            tests/runtime/test_repogit.py

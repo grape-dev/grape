@@ -1,0 +1,56 @@
+# Plan — Issue #3846 技术方案
+
+## 修法选择（对齐 Issue Agent Spec）
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 修法 | renumber 为主、post_check 兜底 | 注册表内该号仅本迁移一家，改号即命中 pending；post_check 防后续跨分支再撞（撞号守卫只有带 post_check 才进 reconcile） |
+| 新号 | `202611240004` | 必须大于已发布基线 `max_version=202611230012`（`202611230010` 会落在历史区间触发 R3）；`202611240001` 已被 autopilot-custom-fields-cleanup、`202611240002` 已被 scene-nodes-skill-id-repo-scope（#3789）占用，`202611240004` 全仓 grep 未占用 |
+
+## 改动清单
+
+1. `src/domains/runtime/migrations/ensure_cloud_sandboxes_table.py`
+   - `MIGRATION["version"]`: `202611180001` → `202611240004`；文件头 docstring、
+     索引跳过日志、就位日志中的旧号同步替换（沿革注释写明 #3846 改号原因）。
+   - 新增 `_postcheck_cloud_sandboxes(conn=None)`：PRAGMA table_info 探测表、
+     PRAGMA index_list 探测三索引，缺失 raise RuntimeError（不盖章、下次启动重试；
+     撞号时进 reconcile）。模式对齐 `autopilot_execution_error_code.py::verify_error_code_column`
+     与 `skill_detail_tables.py::verify_skill_classification_columns`（conn 可注入供测试）。
+   - `MIGRATION` 增加 `"post_check": _postcheck_cloud_sandboxes`。
+2. `src/api/db_setup.py`：仅更新三处描述「当前由 runtime 域 202611180001 建表」的
+   注释为 202611240004（#3527 沙箱控制面注释两处 + sandbox_control_plane docstring 一处）。
+   历史叙事注释（8698/10275 撞号沿革）保持原号不动。守卫逻辑零改动。
+3. `tests/api/test_issue_3846_cloud_sandboxes_migration.py`（新增，TDD 红→绿）：
+   - 注册表契约：旧号不再注册、新号 name/domains/post_check 齐；
+   - post_check 三态：缺表红 / 缺索引红 / 齐备通过（sqlite conn 注入）；
+   - reconcile：台账同号不同名 + 目标缺失 → 带 post_check 重跑 fn 并改盖新名；
+     无 post_check → fn 不执行、仅 ERROR、台账不变；
+   - CI 门禁探针：注册表 version 唯一 + 人为重复登记被守卫报 ERROR 且可检出（探针还原）。
+4. `.github/workflows/windows-smoke.yml`：linux-backend job 新增一步运行上述测试文件
+   （惯例同 #3771/#3758/#3699）。
+
+## 测试 seam
+
+公开 seam = `MIGRATION` 注册契约 + `_postcheck_cloud_sandboxes(conn=)` +
+`D._run_migrations_with_conn(conn, registry=)`（既有 seam，#3648 已在用）。
+不测内部日志格式细节，只断言守卫行为（重跑/不重跑、盖章名、ERROR 落档）。
+
+## 风险与缓解
+
+- 新号再撞未合并分支：全仓 grep + 注册表唯一性门禁 + post_check 兜底。
+- MySQL/SQLite 索引探测差异：沿用 PRAGMA（kernel mysql_compat 翻译），同
+  `PRAGMA index_list` 既有用例（db_setup 7314/7625）。
+- 基线快照测试 `test_released_migration_versions_are_stable` 在最新基线（819f68e）
+  本身即红（`202611230005 <= max_version=202611230012`，属发布评审未刷新基线）。
+  renumber 必须同时处置被移除旧号：从 `migration_versions_baseline.json` 删除
+  `202611180001=ensure-cloud-sandboxes-in-runtime` 条目，避免本 PR 新引入 vanished 红；
+  新号 `202611240004 > 202611230012` 不触发 R3。全量刷新（含 202611230005）仍留发布评审。
+
+## 提交拆分（TDD）
+
+1. `test(#3846)`：先写失败测试（注册表契约 + post_check 三态 + reconcile 对照 + 门禁探针）。
+2. `feat(#3846)`：renumber + post_check 最小实现使其通过。
+3. `ci(#3846)`：linux-backend 门禁接入。
+4. `docs(#3846)`：spec/plan/task 文档。
+
+> R4（2026-11-24 线性重放轮）：基线推进后 91101662a（#3763 create-autopilot-executions-table）占用 202611240003，撞号复发；已把 #3846 迁移顺延到 202611240004（注册表唯一，已过 test_registry_versions_unique）。

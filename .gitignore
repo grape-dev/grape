@@ -126,6 +126,8 @@ scripts/check-*-*.py
 !scripts/check_lib_query_names.py
 # Issue #2227：grape CLI 能力漂移守卫（进入 check-all.sh，须入库）
 !scripts/check_grape_cli_drift.py
+# Issue #3796：场景分类 slug 门禁（linux-backend CI 引用，须入库）
+!scripts/check_category_slugs.py
 scripts/verify-*-*.py
 scripts/install-worker.sh.bak.*
 start-cluster.sh

@@ -420,7 +420,8 @@ class TestTableMaintenanceSplit:
         from src.api import grape_server
         src = Path(grape_server.__file__).read_text(encoding="utf-8")
         m = re.search(
-            r'async with run_with_distributed_lock\("table_maintenance_messages"[^)]*\):\s*'
+            r'async with run_with_distributed_lock\("table_maintenance_messages"[^)]*\)'
+            r'\s*(?:as \w+)?\s*:\s*'
             r'[^}]*?cleanup_old_task_messages\(\)', src, re.S)
         assert m, "A entry: cleanup_old_task_messages must run under messages lock"
         assert "cleanup_old_agent_tasks_fields" not in src

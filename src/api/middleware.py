@@ -220,6 +220,8 @@ def install_request_middleware(app: FastAPI) -> None:
                         _log.debug(msg, extra=extra)
                     else:
                         _log.error(msg, extra=extra)
+                # 499（客户端中止）无需单列：它已由下方 `status >= 400` 记 warning，
+                # 本就不进 5xx ERROR / 错误率（Issue #4248）。
                 elif status == 401:
                     if path.startswith("/api/runtime/"):
                         _log.warning(msg, extra=extra)

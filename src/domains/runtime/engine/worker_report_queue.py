@@ -61,7 +61,13 @@ class WorkerReportQueue:
         except Exception as e:
             log.warning(f"worker_report_queue: load failed: {e}")
 
-    def _flush(self):
+    def _flush(self) -> bool:
+        """把内存队列整体重写到 jsonl（tmp + os.replace 原子替换）。
+
+        返回 True 表示已落盘；False 表示落盘失败（条目仍在内存，但进程被
+        SIGKILL 时必丢）。Issue #4203 复审：调用方必须能看见这个失败，
+        否则「已落盘」与「只在内存」在上层无法区分。
+        """
         try:
             tmp = self.path + ".tmp"
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -69,25 +75,52 @@ class WorkerReportQueue:
                 for e in self._pending.values():
                     f.write(json.dumps(e, ensure_ascii=False) + "\n")
             os.replace(tmp, self.path)
+            return True
         except Exception as e:
             log.warning(f"worker_report_queue: flush failed: {e}")
+            return False
 
-    def add(self, entry: dict):
+    def _add_locked(self, entry: dict):
         entry = dict(entry)
         entry.setdefault("created_at", time.time())
+        self._pending[entry.get("task_id") or entry["task_id"]] = entry
+        # 容量上限：超限删除最旧（优先 TTL 之外的，其次最早入队）
+        if len(self._pending) > self.cap:
+            _now = time.time()
+            keys = list(self._pending.keys())
+            keys.sort(key=lambda k: self._pending[k].get("created_at", 0))
+            for k in keys:
+                if len(self._pending) <= self.cap:
+                    break
+                if (_now - (self._pending[k].get("created_at") or 0)) > self.ttl or len(self._pending) > self.cap:
+                    self._pending.pop(k, None)
+
+    def add(self, entry: dict) -> bool:
+        """入队单条并落盘，返回是否已持久化（True = 磁盘可恢复）。"""
         with self._lock:
-            self._pending[entry.get("task_id") or entry["task_id"]] = entry
-            # 容量上限：超限删除最旧（优先 TTL 之外的，其次最早入队）
-            if len(self._pending) > self.cap:
-                _now = time.time()
-                keys = list(self._pending.keys())
-                keys.sort(key=lambda k: self._pending[k].get("created_at", 0))
-                for k in keys:
-                    if len(self._pending) <= self.cap:
-                        break
-                    if (_now - (self._pending[k].get("created_at") or 0)) > self.ttl or len(self._pending) > self.cap:
-                        self._pending.pop(k, None)
-            self._flush()
+            self._add_locked(entry)
+            return self._flush()
+
+    def add_many(self, entries: list) -> int:
+        """批量入队（一次 flush，不在逐条重写整份 jsonl），返回已持久化条数。
+
+        Issue #4203 复审：messages 批次最多 50 条，逐条 add 等于 50 次全量写，
+        网络故障时每个窗口都在事件循环里做同步 IO。批量入队后 1 次写即可；
+        写失败则回滚本批新增条目并返回 0——调用方据此保留内存 batch
+        （返回条数 < len(entries) 视为未完全落盘）。
+        """
+        entries = [dict(e) for e in entries]
+        if not entries:
+            return 0
+        with self._lock:
+            before = dict(self._pending)
+            for e in entries:
+                self._add_locked(e)
+            if self._flush():
+                return len(entries)
+            # 落盘失败：回滚到写入前的状态，避免内存里出现「未持久化」的幽灵条目
+            self._pending = before
+            return 0
 
     def remove(self, task_id: str):
         with self._lock:

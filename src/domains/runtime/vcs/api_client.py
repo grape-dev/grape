@@ -100,6 +100,10 @@ _USER_ATTACHMENT_URL_RE = re.compile(r"https://gitcode\.com/user-attachments/[^\
 _USER_ATTACHMENT_URL_PREFIX = "https://gitcode.com/user-attachments/"
 USER_ATTACHMENT_MAX_SIZE = 50 * 1024 * 1024    # 与视频理解 50MB 阈值一致，避免整段下载后才判超限
 USER_ATTACHMENT_TIMEOUT = 60                   # 下载 60s 超时（视频较大）
+# Issue #3349（架构守护条件 3 整改）：建单 POST 默认 socket 超时。issues_center
+# 建单链经 `_create_issue_unified` 显式传入 `CREATE_HTTP_TIMEOUT`（15s）；
+# 此默认值 30s 仅为其它直接调用方保持既有行为（继承自统一请求入口的既有默认）。
+CREATE_ISSUE_HTTP_TIMEOUT = 30
 # 单次评论最多采集的媒体附件数。取值依据（Issue #1748 复审，MR !1145 Critical-3）：
 # 与同族 USER_IMAGE_MAX_COUNT（编辑器上传图片）对齐为 8，避免「同一评论里图片比编辑器
 # 图片少采 2 个」的口径分裂；8 也是单条评论里人工可一次性上传/贴链的实际上限，
@@ -463,8 +467,15 @@ class VcsApiClient:
     # === Issue 查询 ===
 
 
-    def create_issue(self, title: str, body: str = "", assignee: str = "") -> dict:
-        """创建 Issue（D20/S31，命令面补齐：卡驱动路径+鉴权，方言 assignee 语义）。"""
+    def create_issue(self, title: str, body: str = "", assignee: str = "",
+                     timeout: int = CREATE_ISSUE_HTTP_TIMEOUT) -> dict:
+        """创建 Issue（D20/S31，命令面补齐：卡驱动路径+鉴权，方言 assignee 语义）。
+
+        ``timeout``：建单 POST 的 socket 超时。Issue #3349 接线：issues_center
+        的 ``CREATE_HTTP_TIMEOUT``（15s）经 ``_create_issue_unified`` 透传至此
+        （架构守护条件 3：常量定义后必须被生产路径消费）；默认 30s 仅供其它
+        直接调用方保持既有行为。
+        """
         # D22：全平台统一走卡路径（gitcode/gitee form 语义、github JSON+token 头，
         # gitlab 走 projects/issues——后者为此前 unsupported 的新增能力）
         card = self._platform_card()
@@ -487,9 +498,11 @@ class VcsApiClient:
         if card.issue_write_form == "owner_param":
             data = dict(data)
             data["repo"] = self.repo
-            return self._request("POST", f"/repos/{self.owner}/issues", data, form=_form)
+            return self._request("POST", f"/repos/{self.owner}/issues", data,
+                                 form=_form, timeout=timeout)
         return self._request("POST", self._generic_path(
-            f"/repos/{self.owner}/{self.repo}/issues", "/issues"), data, form=_form)
+            f"/repos/{self.owner}/{self.repo}/issues", "/issues"), data,
+            form=_form, timeout=timeout)
 
     def get_issue(self, issue_number: int, timeout: float = 30.0) -> dict:
         """获取 Issue 详情。"""
@@ -545,7 +558,8 @@ class VcsApiClient:
 
     # === Issue 查重（D36/S56 端口方法）===
 
-    def find_open_issue_by_title(self, title: str, max_pages: int = 1000) -> "int | None":
+    def find_open_issue_by_title(self, title: str, max_pages: int = 1000,
+                                timeout: int = 30) -> "int | None":
         """按标题查找同名 open Issue，返回其 number（无则 None）。
 
         D36/S56：策略归适配器内部——github 走 Search API 精确匹配
@@ -555,13 +569,13 @@ class VcsApiClient:
         重复建单（#343 契约）。调用方零平台分支（端口-适配器形态）。
         """
         try:
-            return self._find_open_issue_impl(title, max_pages)
+            return self._find_open_issue_impl(title, max_pages, timeout)
         except RuntimeError:
             raise
         except Exception as e:
             raise RuntimeError(f"幂等查重失败（token 可能失效）: {e}")
 
-    def _find_open_issue_impl(self, title: str, max_pages: int) -> "int | None":
+    def _find_open_issue_impl(self, title: str, max_pages: int, timeout: int = 30) -> "int | None":
         import urllib.parse as _up
         # D36/S56：策略按卡能力位分派（issue_search），不比平台名——
         # 有搜索端点的平台走精确匹配，无则分页遍历（第 5 平台配卡即得）
@@ -569,7 +583,7 @@ class VcsApiClient:
         if _card is not None and _card.issue_search:
             # 搜索端点策略：Search API 精确匹配（in:title + repo scope，#344 语义）
             _q = _up.quote(f'{title} in:title repo:{self.owner}/{self.repo} is:issue is:open')
-            data = self._request("GET", f"/search/issues?q={_q}&per_page=5")
+            data = self._request("GET", f"/search/issues?q={_q}&per_page=5", timeout=timeout)
             if isinstance(data, dict) and "error" in data:
                 raise RuntimeError(_dedup_error_text(data))
             if not isinstance(data, dict) or "items" not in data:
@@ -605,7 +619,7 @@ class VcsApiClient:
                 self._generic_path(
                     f"/repos/{self.owner}/{self.repo}/issues?state=open&per_page=50&page={page}",
                     f"/issues?state=opened&per_page=50&page={page}",
-                ))
+                ), timeout=timeout)
             if isinstance(data, dict):
                 if "error" in data:
                     raise RuntimeError(_dedup_error_text(data))

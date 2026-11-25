@@ -119,6 +119,15 @@ def test_execute_flow_wires_the_credential_block():
     """流程接线守卫：建树返回空且凭据不可用时必须阻断（源码级锁，防被删）。"""
     src = inspect.getsource(agent_mod._execute_task_impl)
     assert "ensure_issue_worktree(" in src
-    assert "credential_block_result(" in src, (
+    # Issue #3923：建树失败的阻断入口统一为 worktree_block_result（内部先问凭据归因，
+    # 归因不成立时透传 git 原文）。这里锁住「建树失败必须阻断」这条不变量。
+    assert "worktree_block_result(" in src, (
         "建树失败后必须按凭据归因阻断，否则又回到「只读降级交付」")
     assert "_started" in src
+
+
+def test_worktree_block_result_delegates_to_credential_attribution():
+    """worktree_block_result 必须先走凭据归因，归因成立才报 credential_<stage>。"""
+    src = inspect.getsource(agent_mod.worktree_block_result)
+    assert "credential_block_result(" in src
+    assert "worktree_failure_error(" in src

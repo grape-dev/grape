@@ -1,0 +1,35 @@
+name: worktree-archive-regression
+
+# Issue #4204 门禁：worktree 重置归档（保留上限/幂等短路/先判后写/拒删退避）。
+# 背景：本 PR 改动的是「删除现场前的归档保全」——降级误放行会让未推送内容不可
+# 恢复；此前只有人工执行 pytest，后续改动可绕过门禁直接回归线上（PR #2094 QA
+# 审查：变更验证 Optional）。本 job 把归档/守卫回归拉进 CI，与 #3927 的
+# lock-regression 同一模式。
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  worktree-archive-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GITCODE_API_TOKEN: test_token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all,dev]"
+      - name: Worktree reset archive + guard regression (issue #2041, #4204)
+        run: |
+          python -m pytest \
+            tests/test_worktree_reset_archive.py \
+            tests/runtime/test_issue_752_worktree_guard.py \
+            tests/runtime/test_repogit.py \
+            tests/runtime/test_issue_2514_workspace_binding.py \
+            -v

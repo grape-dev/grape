@@ -42,16 +42,17 @@ def test_s57_user_token_for_repo_empty_key():
 
 def test_s57_redact_and_chat_sites_use_helper():
     """结构守卫：脱敏块与 chat 直连块不再含 provider 二分字面量。"""
-    from src.api import event_pipeline as ep
+    from src.domains.runtime.engine import direct_executor as de
     from src.domains.runtime.im import handler_async as ha
 
     def _stripped(fn):
         src = inspect.getsource(fn)
         return "\n".join(ln.split("#")[0] for ln in src.splitlines())
 
-    # event_pipeline 脱敏块在 _execute_agent_inner 内：源级检查整个函数
-    ep_src = inspect.getsource(ep)
-    assert "get_user_token_for_repo" in ep_src, "脱敏块未接 helper"
+    # 脱敏块随 #3482 direct 入口唯一实现迁移落在 direct_executor._execute_agent_inner
+    # （旧 event_pipeline 副本已删除，守卫随迁指向唯一实现；源级检查整个函数）
+    de_src = _stripped(de._execute_agent_inner)
+    assert "get_user_token_for_repo" in de_src, "脱敏块未接 helper"
     # chat 直连
     ha_src = _stripped(ha._process_chat_inner_async)
     assert "get_user_token_for_repo" in ha_src, "chat 直连块未接 helper"

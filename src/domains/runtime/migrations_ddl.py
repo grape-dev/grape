@@ -212,6 +212,12 @@ ALTERS_ENGINE_CREDENTIAL_COLUMNS = (
     # ===== Issue #180: 带宽占用率指标 =====
     "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_percent DOUBLE DEFAULT 0",
     "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_mbps DOUBLE DEFAULT 0",
+    # ⚠️ Issue #3773 的 4 个 `acp_state_db_*` / `acp_resume_skipped_total` 列**不在这里**：
+    # 本常量只被**冻结老轨** `db_setup._migrate_tables()` 消费，存量库（已盖
+    # legacy-stamp 202610300001）整段不执行 → 新增列写在这里线上表现为心跳 UPDATE
+    # 「Unknown column 1054」，心跳与 ACP 指标全断（部署验证实测）。这 4 列改走注册式
+    # 迁移 202611240006（src/domains/runtime/migrations/acp_state_db_metrics_columns.py）。
+    # 新增列一律用 register_migration()，不要续写本常量。
     "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
 )
 ALTERS_SKILL_ENGINE_COLUMNS = (

@@ -114,7 +114,7 @@ class TestCreateStandardTask:
         """桩掉 _find_open_issue_by_title / _post_gitcode_issue，模拟 GitCode API。"""
         created = {"issues": [], "calls": 0}
 
-        def fake_find(token, owner, repo, title, provider="gitcode"):
+        def fake_find(token, owner, repo, title, provider="gitcode", **kwargs):  # #3349: accept timeout kwarg
             for it in created["issues"]:
                 if it["title"] == title:
                     return it["number"]

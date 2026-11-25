@@ -20,8 +20,9 @@
    - 新增/改造测试：SRE global 池广播（A1）、未勾 sre/all 引擎两侧不可调度（A2，`role_no_candidates` 留痕）。
 5. **改动④ 写权限收紧** `src/api/deps.py` + `src/domains/runtime/routes/runtime.py` + 测试
    - 新增 `require_runtime_owner_or_admin(runtime_id)`：平台管理员（admin JWT + admin_accounts token_version 校验）全放行；普通用户路径先过 session_token 禁用（沿用 require_no_session_token 语义），再校验引擎归属——credential_id=0（本机直连）仅平台管理员可改；user 本人（owner_name 匹配）或 org owner/admin（get_member_role ∈ owner/admin）可改；其余 403。
+     > 2026-11-24 修正（分层裁定，实现以 `src/api/deps.py`.`_check_runtime_owner_or_admin` 为准）：本机直连（credential_id=0）放开为**任意登录用户**可改；凭据引擎（credential_id≠0）仍仅**平台管理员 / 凭据 owner 本人 / 凭据所属 org 的 owner+admin** 可改，其他登录用户与仓库管理员 403；session_token 始终 403。上句「本机直连仅平台管理员」为 11-22 初版口径，已被本条取代。
    - `PUT /runtimes/{id}/tags` 换用该依赖；`GET role-tags` 保持全员可读。
-   - A5 权限矩阵测试（所有者 200 / 平台管理员 200 / 非所有者 403 / 本机直连非管理员 403）。
+   - A5 权限矩阵测试（所有者 200 / 平台管理员 200 / 非所有者 403 / 本机直连任意登录用户 200；11-24 分层口径）。
 
 回归验证：全量相关套件（test_issue_658_engine_role_filter、test_engine_select*、test_chat_*、新测试）+ A1-A8 复验 + 无 weekly-11 专属假设残留检查。
 

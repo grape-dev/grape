@@ -231,6 +231,85 @@ def warn_if_cross_domain_fallback(domain: str) -> None:
     )
 
 
+#: 域表归属抽样自检的关键表（Issue #3732）：每个有 DSN 的域必查的本域代表表，
+#: 优先级高于 owner_map 顺序取样——external_identities 是 1146 事故的实锤表。
+_CRITICAL_SAMPLE_TABLES = ("external_identities",)
+_SAMPLE_TABLES_PER_DOMAIN = 3
+
+
+def warn_domain_table_residency(role: str = "") -> list[str]:
+    """启动自检（Issue #3732）：域表 ↔ DSN 归属抽样校验，错配只告警不阻断。
+
+    两类错配（单库部署无任何 DSN 时整体 no-op，零噪音零回归）：
+    1. 有 DSN 的域：抽样其 table_ownership.json 归属关键表（mgmt 必抽
+       external_identities），经 information_schema 确认表在 DSN 指向的库里——
+       不在即 DSN 配错库（域 engine 建上去必然 1146）；
+    2. 多库拓扑下，非 mgmt 角色（worker/event）缺 GRAPE_DSN_MGMT——
+       mgmt 域表的跨域读会静默回落本进程库（runtime），正是本 Issue 的事故形态。
+
+    与 assert_role_database 的分工：后者 fail-fast 校验「本进程主库」；
+    本函数只 WARNING 校验「跨域 DSN 的表归属」，不阻断启动（应急可先跑）。
+    """
+    problems: list[str] = []
+    if not lib_enabled():
+        return problems
+    try:
+        from src.kernel import table_ownership
+        owners = table_ownership.owner_map()
+    except Exception as e:  # noqa: BLE001 - 自检失败不阻断启动
+        msg = f"[db-guard] 域表归属自检失败：无法加载 table_ownership 清单：{e}"
+        log.warning(msg)
+        problems.append(msg)
+        return problems
+    for dom in _VALID:
+        dsn = dsn_of(dom)
+        if not dsn:
+            continue
+        try:
+            db_name = str(parse_dsn(dsn).get("database") or "")
+        except Exception as e:  # noqa: BLE001
+            msg = f"[db-guard] {dom} 域 DSN 解析失败（GRAPE_DSN_{dom.upper()} 配置错误？）：{e}"
+            log.warning(msg)
+            problems.append(msg)
+            continue
+        tables = sorted(t for t, o in owners.items() if o == dom)
+        sample = [t for t in _CRITICAL_SAMPLE_TABLES if t in tables]
+        sample += [t for t in tables if t not in sample][:_SAMPLE_TABLES_PER_DOMAIN]
+        if not sample:
+            continue
+        try:
+            conn = new_connection(dom)
+            try:
+                cur = conn.cursor()
+                for t in sample:
+                    cur.execute(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema=%s AND table_name=%s", (db_name, t))
+                    if not cur.fetchone():
+                        msg = (f"[db-guard] 域表归属错配：{dom} 域关键表 {t} 不在 "
+                               f"DSN 库 {db_name}（GRAPE_DSN_{dom.upper()} 指向的库缺表，"
+                               f"按域路由的读写必然 1146）")
+                        log.warning(msg)
+                        problems.append(msg)
+            finally:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as e:  # noqa: BLE001 - 自检失败不阻断启动
+            msg = f"[db-guard] {dom} 域表归属自检连接失败（domain={dom}）：{e}"
+            log.warning(msg)
+            problems.append(msg)
+    role_dom = ROLE_DOMAIN.get((role or "").strip().lower())
+    if role_dom and role_dom != "mgmt" and not dsn_of("mgmt"):
+        msg = (f"[db-guard] role={role} 检测到域 DSN（三库拓扑）但缺少 GRAPE_DSN_MGMT："
+               f"mgmt 域表（external_identities 等）跨域读将回落本进程库并触发 1146"
+               f"——请补 GRAPE_DSN_MGMT（参考 grape-systemd-run.sh 的 GRAPE_3DB_ENV）")
+        log.warning(msg)
+        problems.append(msg)
+    return problems
+
+
 def dsn_of(domain: str) -> str:
     return os.environ.get(f"GRAPE_DSN_{domain.upper()}", "").strip()
 

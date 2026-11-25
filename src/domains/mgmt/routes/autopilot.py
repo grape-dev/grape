@@ -29,6 +29,12 @@ from src.kernel.config import log
 from src.kernel.session_manager import db, db_lock
 # 运行域表（autopilot_executions）走 owner 域原语；autopilot_tasks 归本域
 from src.domains.runtime import public as _rt_ap
+# Issue #3733：不可派发状态口径（状态值 + 原因文案单一事实源，与调度器共用同一份）
+from src.domains.mgmt.autopilot_state import (
+    AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+    AUTOPILOT_STATE_OK,
+    dispatch_reason,
+)
 
 # 执行记录→任务行解析走 owner 域 public（原 import runtime.engine.scheduler 内部函数，
 # 且 public 版本不再要求调用方传游标）
@@ -268,6 +274,23 @@ def _row_to_task(row) -> dict:
             engine_uids = _json.loads(row[17])
         except Exception:
             engine_uids = []
+    # Issue #3733：不可派发状态三列追加在列尾（第 19–21 列，0-based 下标 row[18..20]，
+    # 紧接 engine_runtime_uids）
+    dispatch_state = (row[18] if len(row) > 18 else "") or ""
+    dispatch_state_reason = (row[19] if len(row) > 19 else "") or ""
+    dispatch_state_at = (row[20] if len(row) > 20 else "") or ""
+    _instr = row[4] or ""
+    _dispatchable = bool(_instr.strip())
+    # 派发能力以**当前指令**为准，不依赖调度器是否已经跑过一次扫描：用户刚清空指令、
+    # 或迁移尚未执行时，库内 dispatch_state 可能还是空串，接口不能因此说谎。
+    # 读侧归一化（复审 Optional）：指令经非 PUT 路径补齐（直接改库、旧版本回滚后写入、
+    # 其它写入方）时不经过路由的状态联动，库内会残留 blocked_empty_instruction；原样
+    # 出参就会出现「dispatchable=true 但 dispatch_state_reason=指令为空」的自相矛盾。
+    # 故指令非空时三列同源归零（dispatch_state_at 只描述当前状态的进入时刻）。
+    # 库内残留值仍由调度器/迁移当作判重依据，读侧只负责出参不说谎。
+    if _dispatchable:
+        dispatch_state = dispatch_state_reason = dispatch_state_at = ""
+    _dispatch_reason = dispatch_reason(_instr, dispatch_state) or dispatch_state_reason
     return {
         "id": row[0],
         "name": row[1],
@@ -287,6 +310,11 @@ def _row_to_task(row) -> dict:
         "engine_runtime_uids": engine_uids,   # Issue #1011：读侧 uids 非空优先，空回落 ids（legacy 只读）
         "custom_fields": custom_fields,
         "work_branch": work_branch or "",
+        # Issue #3733：不可派发状态（界面据此展示原因与补齐入口）
+        "dispatchable": _dispatchable,
+        "dispatch_state": dispatch_state,
+        "dispatch_state_reason": _dispatch_reason,
+        "dispatch_state_at": dispatch_state_at,
     }
 
 class CreateTaskBody(BaseModel):
@@ -368,7 +396,7 @@ def list_tasks(
     if repo_key:
         check_repo_access(user, repo_key)
     sql = ("SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-           "cron, max_retry, enabled, last_run_at, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids "
+           "cron, max_retry, enabled, last_run_at, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids, dispatch_state, dispatch_state_reason, dispatch_state_at "   # Issue #3733：状态三列追加在列尾
            "FROM autopilot_tasks")
     conditions = []
     params = []
@@ -447,7 +475,7 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
         c = db.cursor()
         row = c.execute(
             "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-            "cron, max_retry, enabled, last_run_at, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids "
+            "cron, max_retry, enabled, last_run_at, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids, dispatch_state, dispatch_state_reason, dispatch_state_at "   # Issue #3733：状态三列追加在列尾
             "FROM autopilot_tasks WHERE id=?", (task_id,)
         ).fetchone()
     if not row:
@@ -581,6 +609,22 @@ def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_cur
         else:
             fields.append(f"{key}=?")
             params.append(val)
+    # Issue #3733：保存指令时同步维护「不可派发」状态——
+    # 补齐非空指令 → 清空状态，cron 派发立即恢复（不必等下一轮扫描）；
+    # 提交空指令 → 立刻标记为不可派发，界面不等扫描就能看到原因。
+    if "instruction" in updates:
+        _instr = updates.get("instruction") or ""
+        if _instr.strip():
+            _dstate, _dreason, _dat = AUTOPILOT_STATE_OK, "", ""
+            log.info(f"Autopilot: task {task_id} instruction filled, dispatch state cleared")
+        else:
+            _dstate = AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION
+            _dreason = dispatch_reason(_instr, _dstate)
+            _dat = datetime.now(timezone.utc).isoformat()
+            log.warning(f"Autopilot: task {task_id} saved with empty instruction, "
+                        f"marked as not dispatchable")
+        fields.extend(["dispatch_state=?", "dispatch_state_reason=?", "dispatch_state_at=?"])
+        params.extend([_dstate, _dreason, _dat])
     if not fields:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "no fields to update"})
     fields.append("updated_at=?")

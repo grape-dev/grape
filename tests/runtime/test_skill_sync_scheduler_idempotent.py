@@ -90,7 +90,26 @@ def test_outer_lock_reacquired_when_row_was_dropped(monkeypatch, caplog):
 
 def test_outer_lock_lost_when_taken_over(monkeypatch, caplog):
     calls = _install_lock_stub(monkeypatch, renew_ok=False, acquire_ok=False)
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         assert asyncio.run(ss._ensure_outer_lock()) is False
     assert calls == {"renew": 1, "acquire": 1}
-    assert any("outer lock lost" in r.message for r in caplog.records)
+    lost = [r for r in caplog.records if "outer lock lost" in r.message]
+    assert lost, [r.message for r in caplog.records]
+    assert lost[0].levelno == logging.INFO, lost[0].levelname
+
+
+def test_outer_lock_error_is_logged_as_error(monkeypatch, caplog):
+    """锁服务异常（renew/acquire 抛异常）→ ERROR 并跳过本轮。"""
+    stub = types.ModuleType("src.kernel.lock")
+
+    def _raise(key, ttl):
+        raise RuntimeError("db down")
+
+    stub.renew_lock = _raise
+    stub.acquire_lock = _raise
+    stub.release_lock = lambda *a, **k: True
+    monkeypatch.setitem(sys.modules, "src.kernel.lock", stub)
+    with caplog.at_level(logging.ERROR):
+        assert asyncio.run(ss._ensure_outer_lock()) is False
+    errs = [r for r in caplog.records if "outer lock renew/re-acquire failed" in r.message]
+    assert errs and errs[0].levelno == logging.ERROR

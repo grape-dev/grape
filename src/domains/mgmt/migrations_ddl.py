@@ -265,6 +265,12 @@ ALTERS_USER_FEEDBACK_COLUMNS = (
     "ALTER TABLE user_feedback ADD COLUMN issue_number VARCHAR(32) DEFAULT ''",
     "ALTER TABLE user_feedback ADD COLUMN converted_at VARCHAR(64) DEFAULT NULL",
     "ALTER TABLE user_feedback ADD COLUMN feedback_kind VARCHAR(32) DEFAULT ''",
+    # ⚠️ Issue #3731 的 `convert_fail_count` **不在这里**：本常量只被**冻结老轨**
+    # `db_setup._migrate_tables()` 消费，存量库（已盖 legacy-stamp 202610300001）整段
+    # 不执行 → 新增列写在这里线上表现为「读侧 Unknown column 1054」（部署验证实测：
+    # 转换读侧首轮即崩）。该列改走注册式迁移 202611240005
+    # （src/domains/mgmt/migrations/feedback_convert_fail_count.py）。
+    # 新增列一律用 register_migration()，不要续写本常量。
 )
 UPDATE_MANAGED_REPOS = (
     "UPDATE managed_repos SET bot_username=? "

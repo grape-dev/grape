@@ -2209,6 +2209,18 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
     dir_name = str(issue_number) if issue_number else "pending"
     url = _attach_save(owner, rname, dir_name, safe_name, content)
     log.info(f"Issue attachment uploaded: issue={issue_id} file={original_name} -> {safe_name} ({len(content)} bytes)")
+    # Issue #648：已建单附件（issue_number 目录）同步「## 附件」链接清单评论到 VCS issue（best-effort 过渡方案）
+    if issue_number:
+        try:
+            from src.api.issues_center import (_ATTACH_IMAGE_EXTS,
+                                               sync_issue_attachment_comment)
+            # Issue #3349：同步 VCS 评论不能在事件循环线程内执行，卸载到工作线程。
+            await asyncio.to_thread(
+                sync_issue_attachment_comment,
+                repo_key, issue_number,
+                {"filename": original_name, "url": url, "is_image": ext in _ATTACH_IMAGE_EXTS})
+        except Exception as e:
+            log.warning(f"Issue attachment sync comment failed: issue={issue_id} file={original_name}: {e}")
     return {"url": url, "filename": original_name, "size": len(content)}
 
 @router.get("/{issue_id}/attachments", operation_id="issues_list_attachments", summary="List issue attachments", description="Lists attachments of an issue.")

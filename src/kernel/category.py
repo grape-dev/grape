@@ -7,8 +7,10 @@
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any
+import os
+from typing import Any, Callable
 
 #: 分类收敛契约（Issue #3202 / #3648）单一真源：收敛后仅保留的一级分类显式 id
 #: （it-rd=1001 / operations=1002 / other=1010）。mgmt 域 grape_t_category_dict
@@ -73,6 +75,63 @@ CATEGORY_DICT_SEED = [
 ]
 
 
+#: Issue #3796 legacy slug 过渡别名：分类收敛（#3202/#3648）后历史 scenes/*/scene.json
+#: （grape-skills 仓库下发）仍携带旧 slug，直查恒未命中 → 同步每轮刷 696 条/小时
+#: WARNING 且这批场景分类永久停更。别名让解析链过渡命中收敛后 slug；数据侧迁移
+#: 完成后可整表删除。skill-dev 落 it-rd-grape-platform 为 Spec 初值，产品口径
+#: 确认后改这一行即生效（纯数据，独立可调）。
+LEGACY_CATEGORY_ALIASES = {
+    "skill-dev": "it-rd-grape-platform",
+    "iac": "it-rd-infra",
+    "general": "other-misc",
+    "content": "ops-content-goods",
+    "ai": "it-rd-ai-app",
+    "swarm-dev": "it-rd-engineering",
+}
+
+#: 别名生效去重集合：每进程每 slug 仅记 1 条 INFO（防同步每轮刷屏）。
+_alias_warned: set[str] = set()
+
+
+def alias_target(slug: str, max_hops: int = 4) -> str:
+    """旧 slug → 收敛后 slug（纯函数、无日志副作用；Issue #3796）。
+
+    跟随别名链（最多 max_hops 跳，防环），供 `lookup_slug` 与 `validate_category_slugs`
+    共用同一解析口径：后续引入多级别名时不必两处同步改（PR #1982 审查 Nit）。
+    无别名/空 slug 原样返回。
+    """
+    key = (slug or "").strip()
+    seen: set[str] = set()
+    for _ in range(max(1, int(max_hops))):
+        nxt = LEGACY_CATEGORY_ALIASES.get(key)
+        if not nxt or nxt == key or nxt in seen:
+            break
+        seen.add(key)
+        key = nxt
+    return key
+
+
+def canonical_category_slug(slug: str,
+                            logger: logging.Logger | None = None) -> str:
+    """旧 slug → 收敛后 slug；无别名原样返回（Issue #3796）。
+
+    别名生效每进程每 slug 记 1 条 deprecation INFO（非 WARNING，避免污染
+    告警计数），提示数据侧迁移 scenes/*/scene.json 后可移除过渡。
+    """
+    key = (slug or "").strip()
+    if not key:
+        return slug or ""
+    target = alias_target(key)
+    if target == key:
+        return key
+    log = logger or logging.getLogger(__name__)
+    if key not in _alias_warned:
+        _alias_warned.add(key)
+        log.info(f"category: legacy slug '{key}' aliased to '{target}' "
+                 f"(Issue #3796 transition; migrate scenes/*/scene.json to retire)")
+    return target
+
+
 def category_dict_seed_id(level_tuples: list, index: int) -> int:
     """种子行的显式 id（Issue #2761/A12）：一级 = 1000+order，二级 = 一级 id*100+order。
 
@@ -107,8 +166,16 @@ def sync_category_target(new_l1: int, new_l2: int,
 
 
 def lookup_slug(dict_map: dict[str, dict[str, Any]], slug: str) -> tuple[int, int]:
-    """把 slug 解析成 (l1_id, l2_id)；未命中返回 (0, 0)。"""
+    """把 slug 解析成 (l1_id, l2_id)；未命中返回 (0, 0)。
+
+    Issue #3796：先直查，未命中再过 legacy 别名查目标 slug（直查命中优先，
+    管理台自定义同名 slug 不被别名抢占）。
+    """
     item = (dict_map or {}).get((slug or "").strip())
+    if not item:
+        aliased = canonical_category_slug(slug)
+        if aliased and aliased != (slug or "").strip():
+            item = (dict_map or {}).get(aliased)
     if not item:
         return 0, 0
     if int(item.get("level") or 1) == 1:
@@ -116,10 +183,29 @@ def lookup_slug(dict_map: dict[str, dict[str, Any]], slug: str) -> tuple[int, in
     return int(item.get("parent_id") or 0), int(item["id"])
 
 
+def _slug_miss(log: logging.Logger, on_miss: Callable[[str], None] | None,
+               slug: str, prefix: str, tail: str) -> None:
+    """未命中上报：有聚合回调走 debug（调用方轮末聚合，Issue #3796），否则保持原 WARNING。
+
+    debug/聚合文案不使用「not found in category_dict」字面量，防 LogQL 告警
+    计数把 debug 行也算进去。
+    """
+    if on_miss is not None:
+        log.debug(f"{prefix} slug '{slug}' unresolved in category_dict, {tail} (aggregated per round)")
+        on_miss(slug)
+    else:
+        log.warning(f"{prefix} slug '{slug}' not found in category_dict, {tail}")
+
+
 def resolve_category_slugs(info: dict, dict_map: dict[str, dict[str, Any]],
                            logger: logging.Logger | None = None,
-                           label: str = "category") -> tuple[int, int]:
-    """按 info 中的分类 slug 解析 (cat_l1_id, cat_l2_id)。"""
+                           label: str = "category",
+                           on_miss: Callable[[str], None] | None = None) -> tuple[int, int]:
+    """按 info 中的分类 slug 解析 (cat_l1_id, cat_l2_id)。
+
+    Issue #3796：lookup_slug 内置 legacy 别名过渡；on_miss 提供时未命中降为
+    debug + 回调（调用方按同步轮聚合告警），缺省保持每处 1 条 WARNING。
+    """
     log = logger or logging.getLogger(__name__)
     if not dict_map:
         return 0, 0
@@ -132,13 +218,13 @@ def resolve_category_slugs(info: dict, dict_map: dict[str, dict[str, Any]],
         if a:
             l1_id, l2_id = a, b
         else:
-            log.warning(f"{label}: category_l1 slug '{l1}' not found in category_dict, keep existing")
+            _slug_miss(log, on_miss, l1, f"{label}: category_l1", "keep existing")
     if l2:
         a, b = lookup_slug(dict_map, l2)
         if a:
             l1_id, l2_id = a, b
         else:
-            log.warning(f"{label}: category_l2 slug '{l2}' not found in category_dict, keep existing")
+            _slug_miss(log, on_miss, l2, f"{label}: category_l2", "keep existing")
     if l1_id or l2_id:
         return l1_id, l2_id
 
@@ -158,5 +244,99 @@ def resolve_category_slugs(info: dict, dict_map: dict[str, dict[str, Any]],
             l1_id = a
     if l1_id or l2_id:
         return l1_id, l2_id
-    log.warning(f"{label}: category slug '{raw}' not found in category_dict, keep existing category")
+    _slug_miss(log, on_miss, raw, f"{label}: category", "keep existing category")
     return 0, 0
+
+
+def validate_category_slugs(slugs, dict_map: dict[str, dict[str, Any]]) -> list[str]:
+    """返回「直查与别名均未命中」的 slug 列表（去重保序；Issue #3796 启动/CI 校验用）。
+
+    纯函数、无日志副作用：校验高频调用不应每轮刷 deprecation INFO。
+    """
+    unknown: list[str] = []
+    for raw in slugs or []:
+        slug = (str(raw or "")).strip()
+        if not slug or slug in unknown:
+            continue
+        if (dict_map or {}).get(slug):
+            continue
+        # 与 lookup_slug 同一解析链（alias_target），别名链变化时两处不会漂移
+        target = alias_target(slug)
+        if target and target != slug and (dict_map or {}).get(target):
+            continue
+        unknown.append(slug)
+    return unknown
+
+
+def scene_category_slug_values(info: dict) -> list[str]:
+    """从场景/技能 JSON 提取全部分类 slug（category_l1/l2/category，path 按 `/` 拆段）。"""
+    values: list[str] = []
+    for key in ("category_l1", "category_l2"):
+        v = str((info or {}).get(key) or "").strip()
+        if v:
+            values.append(v)
+    raw = str((info or {}).get("category") or "").strip()
+    if raw:
+        values.extend(p.strip() for p in raw.replace("\\", "/").split("/") if p.strip())
+    return values
+
+
+def category_seed_dict_map() -> dict[str, dict[str, Any]]:
+    """种子级 slug → {id, level, parent_id} 映射（CI/启动校验无 DB 时的纯数据口径）。"""
+    ids = {row[3]: category_dict_seed_id(CATEGORY_DICT_SEED, i)
+           for i, row in enumerate(CATEGORY_DICT_SEED)}
+    m: dict[str, dict[str, Any]] = {}
+    for row in CATEGORY_DICT_SEED:
+        parent_slug, level, _name, slug, _icon, _order = row
+        m[slug] = {"id": ids[slug], "level": int(level),
+                   "parent_id": int(ids.get(parent_slug, 0)) if parent_slug else 0}
+    return m
+
+
+def iter_scenes_category_slugs(scenes_dir: str) -> dict[str, list[str]]:
+    """扫描 scenes/*/scene.json，返回 {scene_name: [分类 slug]}（Issue #3796）。
+
+    scenes_dir 不存在返回空 dict（部署根 scenes/ 由 grape-skills 随 ZIP 下发，
+    缺目录属正常，由调用方决定是否提示跳过）。
+    """
+    result: dict[str, list[str]] = {}
+    if not scenes_dir or not os.path.isdir(scenes_dir):
+        return result
+    for entry in sorted(os.listdir(scenes_dir)):
+        if entry in ("_template", "third-party", "__MACOSX", ".DS_Store", ".git"):
+            continue
+        json_path = os.path.join(scenes_dir, entry, "scene.json")
+        if not os.path.isfile(json_path):
+            continue
+        try:
+            with open(json_path, encoding="utf-8") as f:
+                info = json.load(f)
+        except Exception:
+            continue
+        slugs = scene_category_slug_values(info if isinstance(info, dict) else {})
+        if slugs:
+            result[entry] = slugs
+    return result
+
+
+def validate_local_scenes_categories(scenes_dir: str,
+                                    dict_map: dict[str, dict[str, Any]] | None = None
+                                    ) -> dict[str, list[str]]:
+    """校验 scenes/*/scene.json 的分类 slug，返回 {scene: [未知 slug]}（Issue #3796）。
+
+    供启动期（默认聚合 WARNING / CATEGORY_SLUG_STRICT=1 fail-fast）与 CI 门禁共用。
+    `dict_map` 缺省用**种子口径**（`category_seed_dict_map()`，无 DB 纯数据）；
+    调用方（启动期/CI）可传入导出的运行时字典快照（DB `category_dict_active_map`），
+    与同步解析的实际口径对齐——两侧口径不同时，种子校验可能放行运行时未命中的 slug
+    （PR #1982 审查 Optional）。scenes_dir 缺失返回空 dict。
+    """
+    if not scenes_dir or not os.path.isdir(scenes_dir):
+        return {}
+    if not dict_map:
+        dict_map = category_seed_dict_map()
+    unknown: dict[str, list[str]] = {}
+    for scene_name, slugs in iter_scenes_category_slugs(scenes_dir).items():
+        bad = validate_category_slugs(slugs, dict_map)
+        if bad:
+            unknown[scene_name] = bad
+    return unknown

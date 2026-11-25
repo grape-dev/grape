@@ -343,6 +343,11 @@ CREATE TABLE IF NOT EXISTS autopilot_tasks (
     enabled         INTEGER NOT NULL DEFAULT 1,          -- 1=启用 0=禁用
     last_run_at     TEXT DEFAULT '',                     -- 最近触发时间
     next_run_at     TEXT DEFAULT '',                     -- 下次预计触发时间
+    -- Issue #3733：不可派发状态（''=正常；blocked_empty_instruction=已启用但指令为空）。
+    -- 状态/原因/时间三列以库内为准（跨进程、跨重启权威）；原因直接进任务页展示。
+    dispatch_state        TEXT NOT NULL DEFAULT '',
+    dispatch_state_reason TEXT NOT NULL DEFAULT '',
+    dispatch_state_at     TEXT NOT NULL DEFAULT '',
     created_at      TEXT DEFAULT (datetime('now')),
     updated_at      TEXT DEFAULT (datetime('now')),
     created_by      INTEGER DEFAULT 0,                   -- 创建者 user_id

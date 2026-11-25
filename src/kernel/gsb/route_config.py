@@ -143,7 +143,7 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "ensure_baseline_knowledge_ref_any", "ensure_gsb_registry_schema",
         "ensure_outbound_ledger_table", "ensure_repo_row_any",
         "ensure_user_mapping_schema", "exec_any", "external_user_id",
-        "external_user_id_by_login", "feedback_apply_statuses", "feedback_claim_row",
+        "external_user_id_by_login", "feedback_apply_statuses", "feedback_bump_convert_fail", "feedback_claim_row",
         "feedback_external_sync_page", "feedback_internal_sync_page",
         "feedback_list_claims", "feedback_mark_converted",
         "feedback_mark_converted_from_claim", "feedback_mark_status_if_live",
