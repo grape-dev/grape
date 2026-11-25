@@ -219,20 +219,44 @@ def set_platform_bot(provider: str, body: BotBody, admin: dict = Depends(require
     token_enc = encrypt(body.token) if body.token else None
     username = body.username if body.username != "" else None
     verified_login = ""
+    scope_warnings: list[str] = []
     if token_enc is not None:
         # 令牌即事实：存令牌时用平台 /user 回答「我是谁」，自动回填账号名。
         # basic_password 平台（gitee）的 clone 用户名必须是**令牌所属账号 login**，
         # 靠人手填必然出错（实测填组织名/grape 账号名 → git clone 恒 403）。
         # 这里把约束变成派生：坏令牌当场 400（不静默入库），好令牌自动带回 login。
         try:
-            from src.domains.mgmt.admin.config_store import verify_token as _verify_token
+            from src.domains.mgmt.admin.config_store import verify_token_with_scopes as _verify_scopes
 
-            verified_login = str((_verify_token(provider, body.token) or {}).get("login") or "").strip()
+            _verified, _bot_scopes = _verify_scopes(provider, body.token)
+            verified_login = str((_verified or {}).get("login") or "").strip()
         except Exception as e:  # noqa: BLE001 - 上游拒绝/网络失败都算令牌不可用
             raise HTTPException(status_code=400, detail={
                 "code": 400, "error_code": "TOKEN_INVALID",
                 "message": f"{provider} 令牌校验失败（无法确认所属账号）: {e}",
             }) from e
+        # Issue #4301, second batch (owner decision 2026-11-25): the platform bot is also in the push chain
+        # (used when the repo has none), so binding prechecks its capability and persists it
+        # in meta for the level-aware spec-stage diagnosis.
+        from src.domains.mgmt.user.repo_manager import workflows_probe_supported as _wf_probe_ok
+        if _wf_probe_ok(provider):
+            _wf_cap = None if _bot_scopes is None else ("workflow" in _bot_scopes)
+            if _wf_cap is False:
+                scope_warnings.append(
+                    f"{provider} Bot 令牌缺少 workflow 权限：涉及 .github/workflows 的推送会被"
+                    "拒绝。请换成含 workflow 权限的令牌（经典 PAT 勾 workflow；细粒度 PAT 把 "
+                    "Workflows 设为 Read and write）。")
+            elif _wf_cap is None:
+                scope_warnings.append(
+                    f"{provider} Bot 令牌未能确认 workflow 权限（通常为细粒度 PAT）：请确认 "
+                    "Workflows 为 Read and write，否则涉及 .github/workflows 的推送会被拒绝。")
+            if _wf_cap is not None:
+                try:
+                    from src.domains.mgmt.user.db import set_meta_value as _set_meta
+                    _set_meta(f"global_bot_{provider}_workflows_write",
+                              "true" if _wf_cap else "false")
+                except Exception as _mfe:  # noqa: BLE001
+                    log.warning(f"set_platform_bot: persist workflows_write failed: {_mfe}")
         if not username and verified_login:
             username = verified_login
         elif username and verified_login and username != verified_login:
@@ -241,7 +265,8 @@ def set_platform_bot(provider: str, body: BotBody, admin: dict = Depends(require
             log.warning(f"repo_platform_routes: {provider} bot_username={username!r} "
                         f"与令牌所属账号 {verified_login!r} 不一致（basic_password 平台会 403）")
     if token_enc is None and username is None:
-        return {"ok": True, "provider": provider, "changed": False}
+        return {"ok": True, "provider": provider, "changed": False,
+                "scope_warnings": scope_warnings}
     hit = {}
 
     def _do(s):
@@ -279,9 +304,24 @@ def set_platform_bot(provider: str, body: BotBody, admin: dict = Depends(require
             log.debug(f"repo_platform_routes: invalidate bot cache failed: {e}")
         # D110 R1：轮换传播到 path A 仓库的 webhook 验签 token
         trigger_platform_bot_swap(provider, old_plain, body.token)
+    # Review I-4 (PR #2249): the repo-level bind already writes an audit row; the platform
+    # level did not, so a token rotation at this scope left no trace. Token itself never logged.
+    try:
+        from src.domains.mgmt.auth.audit import log_audit
+
+        log_audit("admin_repo_platform_bot_bind",
+                  user_id=str((admin or {}).get("id") or ""),
+                  operator_id=str((admin or {}).get("id") or ""),
+                  detail={"provider": provider, "token_rotated": token_enc is not None,
+                          "username_set": bool(username),
+                          "scope_warnings": len(scope_warnings)})
+    except Exception as e:  # noqa: BLE001 - audit failure must not roll back the token write
+        log.warning(f"repo_platform_routes: audit platform bot bind failed: {e}")
+
     from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo as _R
 
-    return {"ok": True, "provider": provider, "changed": True, "bot": _R.get_bot(provider)}
+    return {"ok": True, "provider": provider, "changed": True,
+            "bot": _R.get_bot(provider), "scope_warnings": scope_warnings}
 
 
 @router.delete("/{provider}/bot", summary="清除平台 bot token（账号名保留）")
@@ -297,4 +337,10 @@ def clear_platform_bot(provider: str, admin: dict = Depends(require_admin)):
     uow_write(_do)
     if not hit.get("ok"):
         raise not_found("repo-platforms", provider)
+    # Issue #4301: the bot is cleared, so its capability flag is cleared too.
+    try:
+        from src.domains.mgmt.user.db import set_meta_value as _set_meta
+        _set_meta(f"global_bot_{provider}_workflows_write", "")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"clear_platform_bot: clear workflows_write failed: {e}")
     return {"ok": True, "provider": provider, "token_present": False}

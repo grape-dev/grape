@@ -57,8 +57,8 @@ AG_AGGREGATE = "ag-ui.css"
 # 冻结：chunk -> (页面 ?v=, 注入 CSS 的 ?v=（未注入为 None）, 源内容指纹前 16 位, 源清单)
 # 页面版本 / 注入版本 / 源指纹 / 源清单任一变，都必须同步改本表与对应页面的 ?v=。
 FROZEN = {
-    "account-view.js": ("70", None, "8e033bdef1ad5509", ["components/BindDialog.vue", "components/CredRepoRow.vue", "components/PatDialog.vue", "views/AccountView.vue", "views/LlmCredManager.vue", "views/entries/account-view.js"]),
-    "admin-view.js": ("54", None, "06ac4feb7a759b69", ["components/ui/AGHelp.vue", "components/ui/AGPill.vue", "lib/bot-summary.js", "views/AdminChannels.vue", "views/AdminPlatforms.vue", "views/AdminView.vue", "views/entries/admin-view.js"]),
+    "account-view.js": ("71", None, "0a7a66651776b725", ["components/BindDialog.vue", "components/CredRepoRow.vue", "components/PatDialog.vue", "views/AccountView.vue", "views/LlmCredManager.vue", "views/entries/account-view.js"]),
+    "admin-view.js": ("58", None, "88e600afc1ca5a62", ["components/ui/AGHelp.vue", "components/ui/AGPill.vue", "lib/bot-summary.js", "views/AdminChannels.vue", "views/AdminPlatforms.vue", "views/AdminView.vue", "views/entries/admin-view.js"]),
     "agent-view.js": ("53", None, "76441a9f9a240ea1", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "views/AgentView.vue", "views/entries/agent-view.js"]),
     "autopilot-view.js": ("76", '72', "11e973dc45479ca3", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGDrawer.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "lib/pollGuard.js", "lib/repo-key.js", "lib/repo-provider.js", "styles/bridge.css", "views/AutopilotView.vue", "views/entries/autopilot-view.js"]),
     "chat-view.js": ("63", None, "4fdaaae25a10f706", ["lib/features.js", "lib/onboard.js", "views/ChatView.vue", "views/entries/chat-view.js"]),
@@ -73,8 +73,8 @@ FROZEN = {
     "my-feedback-detail.js": ("50", None, "f5b774c8263b4573", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "views/MyFeedbackDetail.vue", "views/entries/my-feedback-detail.js"]),
     "my-feedback.js": ("50", None, "4c5998a63a7c9b27", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "views/MyFeedback.vue", "views/entries/my-feedback.js"]),
     "observability-view.js": ("61", None, "57dd1d900a464485", ["views/ObservabilityView.vue", "views/entries/observability-view.js"]),
-    "onboarding-view.js": ("12", '9', "a5791aa0c2ea00f1", ["components/BindDialog.vue", "styles/bridge.css", "views/OnboardingView.vue", "views/entries/onboarding-view.js"]),
-    "organizations.js": ("87", None, "079e4a39191c0fd1", ["components/BindDialog.vue", "components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "views/Organizations.vue", "views/entries/organizations.js"]),
+    "onboarding-view.js": ("14", '11', "ac5ad5227f503c78", ["components/BindDialog.vue", "styles/bridge.css", "views/OnboardingView.vue", "views/entries/onboarding-view.js"]),
+    "organizations.js": ("88", None, "a269ca2334b19bc3", ["components/BindDialog.vue", "components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "views/Organizations.vue", "views/entries/organizations.js"]),
     "pipeline.js": ("58", None, "3f216196190540d6", ["lib/repo-key.js", "views/Pipeline.vue", "views/entries/pipeline.js"]),
     "plugins.js": ("57", None, "b0ebe6575b712147", ["components/ui/AGButton.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "lib/features.js", "views/PluginMarketView.vue", "views/entries/plugins.js"]),
     "register-view.js": ("1", None, "3358ffefb36ef8d4", ["views/RegisterView.vue", "views/entries/register-view.js"]),
@@ -89,8 +89,8 @@ FROZEN = {
 # 已发布（浏览器可能已缓存）的那一版：chunk -> (页面 ?v=, 注入 CSS 的 ?v=, 源指纹, CSS 指纹)
 # 与 FROZEN 在健康树上逐字段相同；留在这里是为了让「只重冻 FROZEN」这条路径变红。
 SHIPPED = {
-    "account-view.js": ("70", None, "8e033bdef1ad5509", None),
-    "admin-view.js": ("54", None, "06ac4feb7a759b69", None),
+    "account-view.js": ("71", None, "0a7a66651776b725", None),
+    "admin-view.js": ("58", None, "88e600afc1ca5a62", None),
     "agent-view.js": ("53", None, "76441a9f9a240ea1", None),
     "autopilot-view.js": ("76", '72', "11e973dc45479ca3", '90e5efeb89bfeac7'),
     "chat-view.js": ("63", None, "4fdaaae25a10f706", None),
@@ -105,8 +105,8 @@ SHIPPED = {
     "my-feedback-detail.js": ("50", None, "f5b774c8263b4573", None),
     "my-feedback.js": ("50", None, "4c5998a63a7c9b27", None),
     "observability-view.js": ("61", None, "57dd1d900a464485", None),
-    "onboarding-view.js": ("12", '9', "a5791aa0c2ea00f1", '67e3e61b72747ab1'),
-    "organizations.js": ("87", None, "079e4a39191c0fd1", None),
+    "onboarding-view.js": ("14", '11', "ac5ad5227f503c78", '568d202a3a0130b0'),
+    "organizations.js": ("88", None, "a269ca2334b19bc3", None),
     "pipeline.js": ("58", None, "3f216196190540d6", None),
     "plugins.js": ("57", None, "b0ebe6575b712147", None),
     "register-view.js": ("1", None, "3358ffefb36ef8d4", None),

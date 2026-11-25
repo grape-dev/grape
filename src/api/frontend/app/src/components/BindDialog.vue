@@ -368,7 +368,9 @@ function savePat() {
   patError.value = ''
   const body = { platform_tokens: {} }
   body.platform_tokens[props.provider] = val
-  G.API.put('/settings/credentials', body, 15000)
+  // Issue #4301: backend verify budget is 30s; a 15s client timeout reports
+  // failure while the server has already stored the credential.
+  G.API.put('/settings/credentials', body, 35000)
     .then(function (resp) {
       busy.value = false
       const warnings = (resp && resp.scope_warnings) || []

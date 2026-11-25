@@ -1331,10 +1331,14 @@ def _post_comment_via_provider(provider: VCSProviderPort, repo_key: str,
 def credential_workflows_write(user_id: str, provider: str) -> "bool | None":
     """D105-18：凭据级 workflows 写能力（三态，gh-aw ADR-0002 显式声明制）。
 
-    返回：True=显式声明有写权限（push 不删 workflows）；False=显式声明受限
-    （删）；None=未声明（调用方回退平台名旧逻辑，保证存量零回归）。
-    高权限是凭据配置时显式声明、可审计的事实——不做运行时内省（平台不
-    暴露 token scope）。声明位置：凭据域 <p>_pat 配置的 workflows_write 键。
+    返回：True=声明有写权限（push 不删 workflows）；False=声明受限（删）；
+    None=未声明（调用方按未知态处理：不阻断、不删目录、不落键，见 #4301 决策 A）。
+    声明位置：凭据域 <p>_pat 配置的 workflows_write 键。写入源（Issue #4301，
+    PR#2135 复审 O-3 契约对齐）：① 用户显式声明（platform_tokens 对象形态）；
+    ② 绑定期预检——经典 PAT 解析 X-OAuth-Scopes 后自动落键，细粒度 PAT 无
+    该响应头不落键（未知）。本函数（push 消费方）运行时仍不做逐次内省、
+    只读落库值；经典 PAT 的 scope 头在绑定期已可探测（token_resolver 侧
+    不发网络请求）。
     """
     try:
         cfg = _tokens.get_credential(user_id, provider, kind="pat") or {}
