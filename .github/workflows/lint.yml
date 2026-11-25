@@ -89,3 +89,10 @@ jobs:
         run: |
           python -m pytest -q tests/kernel/test_issue_4295_*.py \
                             tests/api/test_issue_4295_*.py
+      - name: Runtime auth failure budget regression (issue #4347)
+        # PR #2233 第三轮复审 Required：本单 19 例新增回归此前只在本地跑过，8 个 pytest
+        # step 均未登记——「IP 失败预算 → 429 / 小时封禁 / Retry-After 对齐滑动窗口 /
+        # XFF 伪造不可改键 / 空 IP 留痕」五条不变量被改坏都不会变红（与 #3741/#4203 同一复审判据）。
+        # 同目录 conftest.py 的 autouse reset 随本 step 生效；与 PR 描述「测试」段同一命令。
+        run: |
+          python -m pytest -q tests/runtime/test_4347_auth_failure_budget.py
