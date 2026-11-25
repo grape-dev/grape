@@ -60,8 +60,12 @@ if [ -z "${GRAPE_HOSTNAME:-}" ]; then
     GRAPE_HOSTNAME="$(cat "$_idf")"
     export GRAPE_HOSTNAME
     echo "[entrypoint] engine identity -> GRAPE_HOSTNAME=$GRAPE_HOSTNAME (persisted in $_idf)"
+  elif [ -n "${RAILWAY_SERVICE_NAME:-}" ]; then
+    GRAPE_HOSTNAME="${RAILWAY_SERVICE_NAME}"
+    export GRAPE_HOSTNAME
+    echo "[entrypoint] engine identity -> GRAPE_HOSTNAME=$GRAPE_HOSTNAME (RAILWAY_SERVICE_NAME; volume identity unavailable)"
   else
-    echo "[entrypoint] WARN: cannot persist instance id under $DATA; engine identity will follow the container hostname and redeploys will add offline rows" >&2
+    echo "[entrypoint] WARN: cannot persist instance id under $DATA and no platform service name; engine identity will follow the container hostname and redeploys will add offline rows" >&2
   fi
 else
   echo "[entrypoint] engine identity -> GRAPE_HOSTNAME=$GRAPE_HOSTNAME (from env)"
