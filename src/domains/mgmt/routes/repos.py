@@ -2405,14 +2405,32 @@ def reset_repo_vcs_health(owner: str, repo: str,
     上游已恢复则自动回到 `ok`，确实不存在则重新熔断。
     """
     from src.api.deps import check_repo_access
+    from src.domains.mgmt.public import get_repo_vcs_health, set_repo_vcs_health
     from src.domains.mgmt.user.db import resolve_managed_repo_key
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.vcs import issue_poll_breaker as _breaker
 
     repo_key = resolve_managed_repo_key(owner, repo) or to_repo_key(f"{owner}/{repo}")
     check_repo_access(user, repo_key)
-    before = _breaker.state(repo_key, fresh=True)
-    after = _breaker.reset(repo_key, reason="ops_reset")
+    # QA 复审 Nit：写台账由**归属域**（mgmt）自己完成，不再让 mgmt 路由调 runtime 熔断
+    # 模块回写 mgmt 表（跨域成环）；runtime 侧只需清进程缓存，写语义单向。
+    before = get_repo_vcs_health(repo_key) or {}
+    cleared = {
+        "vcs_status": "ok",
+        "vcs_missing_since": "",
+        "vcs_last_error_code": "",
+        "vcs_last_error_at": "",
+        "vcs_probe_result": "",
+        "vcs_probe_at": "",
+        "vcs_next_probe_at": "",
+        "vcs_fail_count": 0,
+    }
+    set_repo_vcs_health(repo_key, cleared)
+    try:
+        from src.domains.runtime.vcs.issue_poll_breaker import drop_cache
+        drop_cache(repo_key)
+    except Exception as exc:  # noqa: BLE001 - 缓存清理失败只是延迟 30s 生效，不影响写结果
+        log.debug(f"vcs-health reset: runtime cache not dropped ({repo_key}): {exc}")
+    after = {**cleared, **dict(get_repo_vcs_health(repo_key) or {})}
     return {
         "repo_key": repo_key,
         "before": {"vcs_status": before.get("vcs_status") or "",

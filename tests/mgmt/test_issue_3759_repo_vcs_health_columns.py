@@ -117,3 +117,32 @@ def test_managed_repo_list_exposes_vcs_missing():
     assert row["vcs_missing"] is True
     assert row["vcs_last_error_code"] == "404"
     assert row["vcs_missing_since"].startswith("2026-11-25")
+
+
+def test_ops_reset_clears_ledger_through_mgmt(monkeypatch):
+    """运维 reset：台账由 mgmt 侧直接清除（不跨域回写），before/after 可读。"""
+    from src.domains.mgmt.migrations.repo_vcs_health_columns import (
+        add_repo_vcs_health_columns)
+    from src.domains.mgmt.public import get_repo_vcs_health, set_repo_vcs_health
+    from src.domains.mgmt.routes import repos as repos_route
+
+    add_repo_vcs_health_columns()
+    _seed_repo()
+    set_repo_vcs_health(RK, {"vcs_status": "vcs_missing", "vcs_last_error_code": "404",
+                             "vcs_missing_since": "2026-11-25T01:00:00+00:00",
+                             "vcs_next_probe_at": "2026-11-25T02:00:00+00:00",
+                             "vcs_fail_count": 3})
+    monkeypatch.setattr(
+        "src.domains.mgmt.user.db.resolve_managed_repo_key", lambda o, r: RK)
+    monkeypatch.setattr("src.api.deps.check_repo_access", lambda user, rk: True)
+
+    resp = repos_route.reset_repo_vcs_health("issue3759", "repo-vcs-health",
+                                             user={"id": 3759})
+    assert resp["repo_key"] == RK
+    assert resp["before"]["vcs_status"] == "vcs_missing"
+    assert resp["after"]["vcs_status"] == "ok"
+    assert resp["after"]["vcs_fail_count"] == 0
+    row = get_repo_vcs_health(RK)
+    assert row["vcs_status"] == "ok"
+    assert row["vcs_next_probe_at"] == ""
+    assert int(row["vcs_fail_count"]) == 0
