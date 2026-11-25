@@ -2270,8 +2270,12 @@ def _copy_skill_object_for_move(skill_id: int, skill_name: str, target: str,
 
 def _drop_source_and_warm_cache(storage, src_key: str, dst_key: str, skill_id: int) -> None:
     """删除源对象并回填目标缓存（缓存失败不影响主流程）。"""
+    from src.kernel.config import log as _log
     from src.domains.runtime.public import zip_cache_put, mem_cache_invalidate
-    storage.delete_object(src_key)
+    try:
+        storage.delete_object(src_key)
+    except Exception as e:  # QA #2234 I1：删除失败不阻断主流程，仅告警（源对象残留可接受）
+        _log.warning(f"drop source object failed (orphan acceptable): {src_key}: {e}")
     mem_cache_invalidate(src_key)
     mem_cache_invalidate(dst_key)
     try:
@@ -2396,7 +2400,9 @@ async def ai_fill_skill_meta(skill_id: int, user: dict = Depends(require_no_sess
     row = await asyncio.to_thread(_rt_skills.read_one_any, "skill_meta_row", (int(skill_id),))
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
-    skill_name, _scope, _owner_id, _user_id = _require_skill_write_access(row, user)
+    # QA #2234 round-4 Critical-1：权限校验内部有同步 SQL（db_lock），同样卸载到线程
+    skill_name, _scope, _owner_id, _user_id = await asyncio.to_thread(
+        _require_skill_write_access, row, user)
     _object_key, content, _storage = await asyncio.to_thread(
         _load_skill_md_for_action, int(skill_id), skill_name)
     if not content.strip():
