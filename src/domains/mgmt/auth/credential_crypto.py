@@ -36,7 +36,7 @@ def _load_keys():
         if _loaded:
             return
 
-        from src.kernel.security_config import get_credential_keys, is_production
+        from src.kernel.security_config import forbid_dev_envelope_reason, get_credential_keys
         raw = get_credential_keys()
 
         parsed: dict[str, bytes] = {}
@@ -62,10 +62,15 @@ def _load_keys():
                       "will retry on next call. 检查 configs/security.json 的 credential_keys。")
             return
 
-        if is_production() and set(parsed) == {"dev"}:
+        # Issue #4367 B：生产拒 dev 条件从 is_production() 扩展为禁令（判据叠加：
+        # 目标库 DSN/env 命中 prod、进程在 prod 主机同样算）——即使 security.json
+        # 缺失/误配让 is_production() 恒 False，连着生产库的进程也不得签发 dev 信封。
+        _forbidden = forbid_dev_envelope_reason()
+        if _forbidden and set(parsed) == {"dev"}:
             raise RuntimeError(
                 "refusing built-in 'dev' credential key in production（公开常量，等价明文存凭据）"
-                "：请在 configs/security.json 配置真实 credential_keys"
+                f"：生产判据命中：{_forbidden}。请在 configs/security.json 配置真实 "
+                "credential_keys；应急放行需显式设置 GRAPE_ALLOW_DEV_ENVELOPE=1（Issue #4367 B）"
             )
 
         _keys.update(parsed)
@@ -95,14 +100,30 @@ def encrypt(plaintext: str) -> str:
 
     OMIT-2 修复：生产环境（GRAPE_CREDENTIAL_KEYS 已设置）要求 cryptography 库必须安装，
     未安装时抛 RuntimeError 拒绝启动，而非降级为明文存储。
+
+    Issue #4367 B：生产判据命中（禁令，判据叠加不单看 is_production）时，
+    拒绝明文降级与 kid=dev 信封签发——公开常量信封在生产库里是注定解不开的
+    静默数据损坏（3,430 行存量的事故形态），必须让写入方立即可见地失败。
     """
     if not plaintext:
         return ""
+
+    from src.kernel.security_config import forbid_dev_envelope_reason
+    _forbidden = forbid_dev_envelope_reason()
 
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     except ImportError:
         # 生产环境（密钥非默认值）拒绝降级为明文
+        if _forbidden:
+            # Issue #4367 B：今日 9 行明文新数据的成因路径——security.json 缺失/误配
+            # （is_production 恒 False）+ 无 cryptography → 凭据明文落库。
+            raise RuntimeError(
+                "cryptography library not installed and dev-envelope issuance is forbidden "
+                f"(production signals: {_forbidden}): refusing plaintext fallback. "
+                "Install cryptography and configure configs/security.json credential_keys; "
+                "emergency override requires explicit GRAPE_ALLOW_DEV_ENVELOPE=1 (Issue #4367 B)."
+            )
         from src.kernel.security_config import get_credential_keys
         _keys_raw = get_credential_keys()
         if _keys_raw and not _keys_raw.startswith("dev:"):
@@ -115,6 +136,16 @@ def encrypt(plaintext: str) -> str:
         return plaintext
 
     kid, key = _get_current_key()
+    if _forbidden and kid == "dev":
+        # 密钥环显式配置了 dev kid（或混配环 dev 排首）时同样拒发——
+        # 「当前签发密钥」就是信封 kid，此处是 dev 信封落库前的最后闸口。
+        raise RuntimeError(
+            "refusing to seal credentials with the built-in 'dev' key while dev-envelope "
+            f"issuance is forbidden (production signals: {_forbidden}): the sealed rows "
+            "would be undecryptable on credential-key-configured workers. Configure real "
+            "credential_keys in configs/security.json; emergency override requires explicit "
+            "GRAPE_ALLOW_DEV_ENVELOPE=1 (Issue #4367 B)."
+        )
     nonce = secrets.token_bytes(12)
     aesgcm = AESGCM(key)
     ciphertext = aesgcm.encrypt(nonce, plaintext.encode(), None)

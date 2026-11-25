@@ -22,6 +22,7 @@ import json
 import hashlib
 import base64
 import logging
+import re
 import threading
 
 # 不从 src.kernel.config 导入（避免循环导入——config.py 导入本模块的 is_production）
@@ -87,6 +88,90 @@ def is_production() -> bool:
     return get_env() == "production"
 
 
+# ===== dev 信封签发禁令（Issue #4367 B：写入侧 fail-closed）=====
+# 事故：security.json 缺失/env 误配让 is_production() 恒 False，两道「生产拒 dev」
+# 守卫全部旁路 → 生产进程持续签发 kid=dev 信封（内置公开常量，等价弱密钥加密），
+# 执行侧解不开 → 空 env 静默降级（每小时 52 个任务拿不到下发凭据）。
+# 因此「是否允许签发 dev 信封」收敛为显式开关（默认关）+ 判据叠加：
+# 不再单看 is_production()，目标库 DSN/env 命中 prod、进程在 prod 主机同样禁止。
+
+#: 显式放行开关（应急用）：默认关。仅在生产判据命中时起作用——判据未命中（开发/
+#: 测试）dev 信封照常可用，判据命中时必须显式置 1 才放行，不再有静默签发。
+ALLOW_DEV_ENVELOPE_ENV = "GRAPE_ALLOW_DEV_ENVELOPE"
+
+#: 显式 prod 主机标记（A 项运维口径）：部署单元在 prod 主机上启动时设置。
+PROD_HOST_ENV = "GRAPE_HOST_ENV"
+
+# prod 标记匹配：词边界内含 prod/production（大小写不敏感）。
+# `grape_prod_runtime`、`prod-db-01`、`production` 命中；`productbox`/`reproduction`
+# /`grape_dev_runtime` 不误伤（"prod" 后紧跟字母即不算）。
+_PROD_MARKER_RE = re.compile(r"(?<![a-z0-9])prod(?:uction)?(?![a-z0-9])")
+
+
+def _has_prod_marker(value: str) -> bool:
+    return bool((value or "").strip()) and bool(_PROD_MARKER_RE.search(value.lower()))
+
+
+def allow_dev_envelope() -> bool:
+    """显式开关：是否允许签发 dev 信封（默认关，仅生产判据命中时生效）。"""
+    return os.environ.get(ALLOW_DEV_ENVELOPE_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _target_db_prod_hits() -> list[str]:
+    """目标库判据：能写 agent_tasks.env_extra 的进程所连库的 DSN/env 命中 prod。
+
+    覆盖单库（DEVOPS_DB_*）与三库拓扑（GRAPE_DSN_* / GRAPE_<域>_DB_NAME）两种部署；
+    引擎侧无 security.json 的单元只要连着生产库（`grape_prod_runtime` 等）即可被识别，
+    不依赖那份可能缺失/误配的 security.json——这正是 #4367 的实际事故形态。
+    """
+    hits = []
+    for name in ("GRAPE_DSN_RUNTIME", "GRAPE_DSN_MGMT", "GRAPE_DSN_INSIGHT",
+                 "DEVOPS_DB_NAME", "GRAPE_RUNTIME_DB_NAME", "DEVOPS_DB_HOST", "DEVOPS_DB_PATH"):
+        val = (os.environ.get(name, "") or "").strip()
+        if val and _has_prod_marker(val):
+            hits.append(f"{name} 命中 prod")
+    return hits
+
+
+def _prod_host_hits() -> list[str]:
+    """prod 主机判据：显式 GRAPE_HOST_ENV 标记，或引擎主机标识带 prod 段。"""
+    hits = []
+    marker = (os.environ.get(PROD_HOST_ENV, "") or "").strip().lower()
+    if marker in ("prod", "production"):
+        hits.append(f"{PROD_HOST_ENV}={marker}")
+    host = ""
+    try:
+        from src.kernel.host_identity import engine_host
+        host = (engine_host() or "").strip()
+    except Exception:
+        host = ""
+    if host and _has_prod_marker(host):
+        hits.append(f"host={host} 命中 prod")
+    return hits
+
+
+def dev_envelope_forbidden_reasons() -> list[str]:
+    """生产判据收集（B：判据叠加，不单看 is_production()）。返回证据清单。"""
+    reasons = []
+    if is_production():
+        reasons.append("security.json env=production")
+    reasons += _target_db_prod_hits()
+    reasons += _prod_host_hits()
+    return reasons
+
+
+def forbid_dev_envelope_reason() -> str:
+    """dev 信封签发禁令（单一事实源）：命中任一生产判据且未显式放行 → 返回原因串；允许则返回空串。
+
+    消费方：get_credential_keys 的 dev 常量回落、credential_crypto 的密钥环/明文降级/
+    签发路径。语义见 ALLOW_DEV_ENVELOPE_ENV：判据命中时默认拒绝（fail-closed），
+    显式置 GRAPE_ALLOW_DEV_ENVELOPE=1 才放行；开发/测试（判据未命中）行为不变。
+    """
+    if allow_dev_envelope():
+        return ""
+    return "; ".join(dev_envelope_forbidden_reasons())
+
+
 def get_jwt_secret_keys() -> str:
     """JWT 密钥池。security.json jwt.secret_keys > 空（jwt_utils 内部 fallback 到 JWT_SECRET）。"""
     cfg = _load()
@@ -127,11 +212,17 @@ def get_credential_keys() -> str:
     # 兜底到内置 dev 常量：该密钥是公开常量，等于明文存凭据，且 worker 侧
     # （配有 credential_keys 的进程）根本解不开 → 任务信封全废。
     # 生产环境直接拒绝，让故障在入队时可见，而不是写下一条注定跑不起来的任务。
-    if is_production():
+    # Issue #4367 B：拒绝条件从 is_production() 扩展为禁令（判据叠加：目标库
+    # DSN/env 命中 prod、进程在 prod 主机同样算）——security.json 缺失/误配
+    # 导致 is_production() 恒 False 时，连着生产库的进程不再静默回落 dev 常量。
+    _forbidden = forbid_dev_envelope_reason()
+    if _forbidden:
         raise RuntimeError(
             "credential_keys 未配置且 JWT_SECRET 不足 32 字节：拒绝回落到内置 dev 密钥"
-            "（公开常量，等价于明文存凭据）。请在 configs/security.json 配置 "
-            "credential_keys=\"<kid>:<base64-32B>\"。"
+            "（公开常量，等价于明文存凭据）。生产判据命中："
+            f"{_forbidden}。请在 configs/security.json 配置 "
+            "credential_keys=\"<kid>:<base64-32B>\"；应急放行需显式设置 "
+            f"{ALLOW_DEV_ENVELOPE_ENV}=1（Issue #4367 B）。"
         )
     _warn_dev_keys_once()
     return "dev:MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
