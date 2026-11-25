@@ -3602,14 +3602,26 @@ def update_task_status(task_id, status, **kw):
     `lock_owner("update_task_status:<id>")` 提供灰度归因（指标 owner 粗化，日志全量）。
     """
     _cascade_trigger = kw.get("cascade_trigger") or _cascade.TRIGGER_UPDATE_TASK_STATUS
+    # Issue #3741（PR #2160 审查 ⑤）：可选乐观条件——仅当 agent_tasks.started_at 仍等于
+    # 调用方观察到的值才落终态。重派路径（_requeue_no_progress/_do_requeue）会复位
+    # started_at，条件不满足即说明「本次观察到的旧执行已被新一轮取代」→ rowcount=0 放弃，
+    # 不覆盖新执行。不传该关键字 = 原行为（无乐观条件）。
+    _expect_started_at = kw.get("expect_started_at")
     from src.kernel.lock_instrument import lock_owner
     _big_cols = {col: kw[col] for col in _TASK_STATUS_BIG_COLS if col in kw}
     # ① 终态判定（短临界区）：已终态 → 仅在 pending 且本次带 payload 时补写大字段。
     with lock_owner(f"update_task_status:{task_id}"), db_lock:
         c = _rt_db.cursor()
-        c.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
+        c.execute("SELECT status, runtime_id, started_at FROM agent_tasks WHERE id=?",
+                  (task_id,))
         row = c.fetchone()
         if not row:
+            return
+        # Issue #3741：乐观条件前置——执行已被重派取代（started_at 变了）时**不得**
+        # 进入大字段写入（errors 在 ② 段先写），否则会把旧执行的诊断串到新执行上。
+        if _expect_started_at is not None and str(row[2] or "") != str(_expect_started_at):
+            log.info(f"update_task_status: optimistic started_at guard missed for task "
+                     f"{task_id} (execution superseded), skip")
             return
         if row[0] in TASK_TERMINAL_STATUSES:
             if _big_cols and _task_big_is_pending(task_id):
@@ -3647,7 +3659,17 @@ def update_task_status(task_id, status, **kw):
             if col in kw:
                 sets.append(f"{col}=?")
                 params.append(kw[col])
-        c.execute(f"UPDATE agent_tasks SET {', '.join(sets)} WHERE id=?", params + [task_id])
+        _where = "id=?"
+        _where_params = [task_id]
+        if _expect_started_at is not None:
+            _where += " AND started_at=?"
+            _where_params.append(_expect_started_at)
+        c.execute(f"UPDATE agent_tasks SET {', '.join(sets)} WHERE {_where}",
+                  params + _where_params)
+        if _expect_started_at is not None and (getattr(c, "rowcount", -1) or 0) == 0:
+            log.info(f"update_task_status: optimistic started_at guard missed for task "
+                     f"{task_id} (execution superseded), skip terminal write")
+            return
         # 方案 E：任务真正开始执行（running）→ 事件 pending→running（与 claim 认领语义一致）
         if status == "running":
             try:

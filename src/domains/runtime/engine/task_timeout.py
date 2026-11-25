@@ -53,6 +53,8 @@ DEFAULT_RETRY_BACKOFF_SEC = 30.0
 DEFAULT_NO_PROGRESS_TIMEOUT_SEC = 600.0
 
 #: Issue #2793：单任务无进展自动重派次数上限（与 timeout_retries 对齐，防雪崩）。
+#: Issue #3741 起 0 的语义是「不重派、命中即收口 failed(reason=no_progress)」——
+#: 上限耗尽不再「留给原失败路径」（原路径要等 3600s 超时，期间空转任务继续占用引擎）。
 DEFAULT_NO_PROGRESS_RETRIES = 1
 
 #: Issue #2793：无进展自愈总开关（false = 整体回滚，仅留诊断不重派）。
@@ -63,11 +65,23 @@ DEFAULT_NO_PROGRESS_ENABLED = True
 #: 8 步（约 15 分钟内）足以识别空转，又不至于把「正常重试同一命令两三次」误判。
 DEFAULT_NO_PROGRESS_REPEAT_STEPS = 8
 
+#: Issue #3741：指纹判据的「每步耗时预算」（秒），用于从步数阈值推导参与窗口。
+#: 实测空转节奏是同一条 `sleep 115; tail ...; pgrep ...` 每 ~115s 一步（43 次），
+#: 120s 留 5s 余量；窗口必须覆盖 repeat_steps × 该预算，否则高阈值永远无法命中。
+REPEAT_STEP_BUDGET_SECONDS = 120.0
+
+#: Issue #3741：指纹判据的参与窗口（秒；0 = 自动推导
+#: max(no_progress_timeout_sec, repeat_steps × REPEAT_STEP_BUDGET_SECONDS)）。
+#: 为什么不能直接复用 no_progress_timeout_sec：600s 阈值 ÷ 115s/步只有约 5 步落在窗口内，
+#: 8 步阈值在窗口内永远不可能连续命中 → 主场景（死循环空转）不被识别。
+DEFAULT_NO_PROGRESS_REPEAT_WINDOW_SEC = 0
+
 #: Issue #2793：无进展阈值/重派次数的任务级显式 env（手动调参，最高优先）。
 _NO_PROGRESS_TIMEOUT_ENV = "RUNTIME_NO_PROGRESS_TIMEOUT"
 _NO_PROGRESS_RETRIES_ENV = "RUNTIME_NO_PROGRESS_RETRIES"
 _NO_PROGRESS_ENABLED_ENV = "RUNTIME_NO_PROGRESS_ENABLED"
 _NO_PROGRESS_REPEAT_STEPS_ENV = "RUNTIME_NO_PROGRESS_REPEAT_STEPS"
+_NO_PROGRESS_REPEAT_WINDOW_ENV = "RUNTIME_NO_PROGRESS_REPEAT_WINDOW"
 
 #: 超时 fail 消息签名（PR #722 审查建议集中定义）：worker 侧超时 kill 上报
 #: `task timed out after {N}s`，alerts.py / metric_rollup.py 的 M3 观测按此
@@ -263,10 +277,12 @@ def retry_backoff_sec(cfg: Optional[Dict[str, Any]] = None) -> float:
 # ── Issue #2793：无进展（假死）自愈配置链 ────────────────────────────────
 #
 # 优先级（高 → 低）：
-#   1. 任务级 env_extra（RUNTIME_NO_PROGRESS_TIMEOUT / _RETRIES / _ENABLED / _REPEAT_STEPS）
+#   1. 任务级 env_extra（RUNTIME_NO_PROGRESS_TIMEOUT / _RETRIES / _ENABLED /
+#      _REPEAT_STEPS / _REPEAT_WINDOW）
 #   2. per_skill[skill] 的 dict 条目字段（no_progress_timeout_sec 等）
 #   3. per_repo[repo_key] 的 dict 条目字段
-#   4. 配置文件顶层 no_progress_timeout_sec / no_progress_retries / no_progress_enabled
+#   4. 配置文件顶层 no_progress_timeout_sec / no_progress_retries / no_progress_enabled /
+#      no_progress_repeat_steps / no_progress_repeat_window_sec
 #   5. 进程 env 同名变量
 #   6. 默认值（600s / 1 次 / 开启）
 # 非法值（0/负/NaN/非数字/坏 JSON）一律静默回退下一层，坏配置不得拖垮主链路。
@@ -331,7 +347,12 @@ def no_progress_timeout_sec(task: Dict[str, Any], cfg: Optional[Dict[str, Any]] 
 
 
 def no_progress_retries(task: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> int:
-    """解析单任务无进展自动重派次数上限（0 = 只诊断不重派）。"""
+    """解析单任务无进展自动重派次数上限（0 = 不重派、命中即收口 failed）。
+
+    Issue #3741 起 0 不再等于「只诊断」：上限耗尽时由 `_finalize_no_progress` 立即
+    收口 failed(reason=no_progress)，避免空转任务等到 3600s 超时才释放引擎槽位；
+    「只诊断、不动任务」的回滚开关是 `no_progress_enabled=false`。
+    """
     if cfg is None:
         cfg = load_timeout_config()
     tenv = _task_env(task)
@@ -384,6 +405,40 @@ def no_progress_repeat_steps(task: Dict[str, Any], cfg: Optional[Dict[str, Any]]
     if v is not None:
         return v
     return DEFAULT_NO_PROGRESS_REPEAT_STEPS
+
+
+def no_progress_repeat_window_sec(task: Dict[str, Any],
+                                  cfg: Optional[Dict[str, Any]] = None) -> int:
+    """Issue #3741：解析「连续相同指纹」判据的参与窗口（秒；0 = 自动推导）。
+
+    窗口与阈值解耦（PR #2160 审查 ①）：`no_progress_timeout_sec` 只决定「何时开始判」，
+    本窗口决定「往回看多远」。默认 0 = 自动取
+    `max(no_progress_timeout_sec, repeat_steps × REPEAT_STEP_BUDGET_SECONDS)`，
+    保证 115s/步的真实节奏下 8 步能全部落在窗口内。显式配正整数则直接采用。
+    配置链与 no_progress_repeat_steps 一致；负数/非法值视为未配置，回退下一层。
+    """
+    if cfg is None:
+        cfg = load_timeout_config()
+    tenv = _task_env(task)
+    v = _non_negative_int(tenv.get(_NO_PROGRESS_REPEAT_WINDOW_ENV))
+    if v is not None:
+        return v
+
+    skill = str(task.get("skill") or "").strip()
+    repo = str(task.get("repo_key") or "").strip()
+    for section, key in (("per_skill", skill), ("per_repo", repo)):
+        entry = _section_entry(cfg, section, key)
+        v = _non_negative_int(_no_progress_field_from_entry(entry, "no_progress_repeat_window_sec"))
+        if v is not None:
+            return v
+
+    v = _non_negative_int(cfg.get("no_progress_repeat_window_sec"))
+    if v is not None:
+        return v
+    v = _non_negative_int(os.environ.get(_NO_PROGRESS_REPEAT_WINDOW_ENV))
+    if v is not None:
+        return v
+    return DEFAULT_NO_PROGRESS_REPEAT_WINDOW_SEC
 
 
 def no_progress_enabled(task: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> bool:

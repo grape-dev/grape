@@ -31,6 +31,9 @@
    取最近 50 条 `type='tool_use'` 消息，按 `sha1(tool + normalized input_json)` 指纹从新到旧
    统计连续相同条数；最新一条必须在窗口内，窗口外的行不参与。命中返回
    `{tool, fingerprint, repeats, first_seq, last_seq}`。
+   **参与窗口与阈值解耦**：窗口 = `max(no_progress_timeout_sec, repeat_steps × 120s)`
+   （可用 `no_progress_repeat_window_sec` 显式覆盖）。理由：实测空转节奏 ~115s/步，
+   600s 阈值窗口内只装得下约 5 条连续命中，8 步阈值永远不可能达成 → 主场景不被识别。
 2. **巡检落点**：`_sweep_no_progress_tasks` 原判据为「窗口内无 task_messages」（活跃度）。
    扩展为「无活跃 或 连续重复指纹」，二者共用 #2793 的重派计数（`NO_PROGRESS_REQUEUE`）。
    重派上限耗尽时不再只留诊断，而由 `_finalize_no_progress` 收口：
@@ -40,9 +43,14 @@
 3. **超时收口**：`_poll_dispatched_completion` 超时前解析对应 agent_task，若状态仍为
    `queued/dispatched/running/pending_self_report`，调 `_terminate_stuck_agent_task`
    置 failed（`WORKER_TIMEOUT_TERMINATED` 诊断）+ 释放槽位 + 事件 failed，然后写 exec failed。
-4. **反向残留**：`_reap_terminal_exec_running_tasks` 扫描最近 100 条 `failed/cancelled` exec
+4. **反向残留**：`_reap_terminal_exec_running_tasks` 扫描最近 50 条 `failed/cancelled` exec
    且 `agent_task_id` 非空的行，若任务仍活跃（且 exec 终态时间已过 60s 宽限），按 exec 终态
-   的语义把任务置 failed/cancelled、释放槽位，并以 `record_task_failed` 计数。
+   的语义把任务置 failed/cancelled、释放槽位，并以 `record_task_failed`（带 JOIN 出的
+   `runtime_id`，不写 0）计数。
+5. **可回滚**：本单新增的两条终止活跃任务路径（poll 超时收口、反向残留 sweep）与重派耗尽
+   收口都受 `no_progress_enabled` 门禁控制，`false` 时只留诊断、不动任务。
+6. **收口竞争**：所有终止写入都带 `started_at=?` 乐观条件（`update_task_status`
+   的 `expect_started_at` 关键字），执行已被重派取代时放弃写入、不覆盖新执行。
 
 ## Key Decisions
 
@@ -58,5 +66,7 @@
 - [ ] 连续 K 步同命令的 running 任务在下一轮巡检以 `failed(reason=no_progress)` 收口，`errors` 含步号与指纹；
 - [ ] exec 超时后 agent_task 立即变 `failed`，`busy_slots` 回落；
 - [ ] 反向 sweep 能发现并收口「exec 已终态 ∧ agent_tasks running」残留；
-- [ ] `no_progress_enabled=false` 仍只留诊断不重派；#2793 既有用例全绿；
+- [ ] `no_progress_retries=0` 语义 = 不重派、命中即收口 `failed(reason=no_progress)`（配置示例与实现一致）；
+- [ ] `no_progress_enabled=false` 只留诊断不动任务（含新增的 poll 超时终止与反向残留 sweep）；#2793 既有用例全绿；
+- [ ] 115s/步节奏下连续 8 步同指纹在默认阈值下即可命中（窗口与阈值解耦的回归用例）；
 - [ ] 长静默但无重复指纹的任务不被判死。

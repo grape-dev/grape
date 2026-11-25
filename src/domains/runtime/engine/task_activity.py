@@ -143,7 +143,9 @@ def repeated_tool_steps(cursor, task_id, window_seconds: int, min_repeats: int,
     Args:
         cursor: 调用方在 db_lock 内持有的 DB 游标（不另开连接、不提交）。
         task_id: 任务 id。
-        window_seconds: 参与统计的活跃窗口（调用方取 no_progress 阈值）。
+        window_seconds: 参与统计的窗口（秒）。调用方取 `_no_progress_repeat_window` 推导值：
+            与 `no_progress_timeout_sec` **解耦**——115s/步的节奏下 600s 阈值窗口只装得下
+            约 5 步，8 步阈值会永远 miss（PR #2160 审查 ①）。
         min_repeats: 连续相同指纹的最小步数；< 2 视为关闭（返回 None）。
         now_epoch: 可注入当前 epoch（测试确定性用）。
 

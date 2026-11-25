@@ -8,3 +8,11 @@
 - [x] T6 `_reap_terminal_exec_running_tasks` 反向残留 sweep + 指标
 - [x] T7 新增回归用例 `tests/runtime/test_issue_3741_no_progress_stall.py`
 - [x] T8 自审查 / lint / arch check
+
+## PR #2160 复审修复
+
+- [x] R1 指纹判据窗口与 `no_progress_timeout_sec` 解耦（`no_progress_repeat_window_sec`，默认 `max(threshold, steps×120)`）+ 115s/步节奏用例
+- [x] R2 `no_progress_retries=0` 文档/实现同口径（不重派→命中即收口），EXHAUSTED 诊断 note 自洽
+- [x] R3 新增两条终止路径接入 `no_progress_enabled` 门禁（poll 超时 / 反向 sweep），plan 回滚口径对齐
+- [x] R4 新增用例接入 CI（`.github/workflows/lint.yml`）
+- [x] R5 spec 100→50、反向 sweep 指标带 `runtime_id`、终止路径补 `started_at=?` 乐观条件
