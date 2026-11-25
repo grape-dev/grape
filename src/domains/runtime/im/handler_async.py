@@ -1818,14 +1818,16 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
             chat_runtime_id = 0
 
         # 引擎类型感知的 has_valid_session：提前解析引擎类型，
-        # codearts 忽略 session_id；opencode/hermes/aishell-dsh 真正使用 session 续接
-        # （aishell-dsh 二期起支持 session/resume——uuid 形态 sessionId 跨进程续接）。
+        # codearts 忽略 session_id；只有支持会话续接的引擎（descriptor
+        # capabilities.im_session_valid——opencode/hermes，及二期起支持
+        # session/resume 的 aishell-dsh）才真正用 session 续接。
         from src.domains.runtime.engine.engine_select import resolve_local_engine, engine_name
+        from src.domains.runtime.engine.descriptor import get_registry
         # Issue #3396：chat 兜底候选必须过 chat 角色过滤（engine_capabilities 勾了 chat/all）
         _rid = chat_runtime_id or (resolve_local_engine(_uid or 0, agent_type="chat") or 0)
         _engine_name = engine_name(_rid) if _rid else ""
         _conv_sid = (conv or {}).get("runtime_session_id", "").strip()
-        has_valid_session = bool(_conv_sid) and _engine_name in ("opencode", "hermes", "aishell-dsh")
+        has_valid_session = bool(_conv_sid) and _engine_name in get_registry().im_session_valid_names()
 
         prompt = _build_feishu_chat_prompt(text, repo_key, history, skills, exec_account,
                                            chat_runtime_id, conv_id, user_info=user_info,

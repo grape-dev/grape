@@ -79,6 +79,7 @@ lint: ## Basic import/syntax check + undefined-name ratchet (F821) + duplicate-d
 	$(PYTHON) scripts/check_f811.py
 	$(PYTHON) scripts/check_async_blocking.py
 	$(PYTHON) scripts/check_db_lock_external_io.py
+	$(PYTHON) scripts/engine_descriptor_drift.py
 
 clean: ## Remove build artifacts and caches
 	rm -rf build/ dist/ *.egg-info src/*.egg-info

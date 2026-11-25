@@ -304,6 +304,7 @@
               </div>
             </div>
             <div v-html="reviewBannerHtml"></div>
+            <div @click="onPipelineClick($event)" v-html="agentStatusCardHtml"></div>
             <!-- 附件区 -->
             <div class="isk-attach-card">
               <div class="isk-card-tt">{{ td('attachments') }}</div>
@@ -435,7 +436,11 @@
           <div class="isk-board-head">
             <span
               class="isk-board-dot"
-              :style="{ background: col.color, boxShadow: '0 0 6px ' + col.color + '40' }"
+              :style="{
+                background: col.color,
+                // R-Δ1：光晕同走 color-mix（token 拼不上 alpha 后缀）
+                boxShadow: '0 0 6px ' + 'color-mix(in srgb, ' + col.color + ' 25%, transparent)',
+              }"
             ></span>
             <span class="isk-board-name">{{ col.lbl }}</span>
             <span class="isk-board-cnt">{{ boardColCount(col.k) }}</span>
@@ -684,6 +689,7 @@
           </div>
         </div>
         <div v-html="reviewBannerHtml"></div>
+        <div @click="onPipelineClick($event)" v-html="agentStatusCardHtml"></div>
         <div class="isk-attach-card">
           <div class="isk-card-tt">{{ td('attachments') }}</div>
           <div class="isk-attach-list">
@@ -1198,11 +1204,13 @@ const STATUS_LABELS = computed(() => {
   })
   return out
 })
+// #4234 状态色走主题语义 token（QA Medium：原硬编码 hex 不随暗色主题适配）：
+// 进行中=accent、待输入=橙、待审核/完成=绿、未开始/已取消=次级文本色。
 const STATUS_COLORS = {
   pending: 'var(--t3)',
-  in_progress: '#3b82f6',
-  awaiting_input: '#f59e0b',
-  pending_review: '#10b981',
+  in_progress: 'var(--a)',
+  awaiting_input: 'var(--or)',
+  pending_review: 'var(--g)',
   done: 'var(--g)',
   cancelled: 'var(--t3)',
 }
@@ -1216,13 +1224,15 @@ const STAGE_LABELS = computed(() => ({
   done: t('status.tag_completed') || '已完成',
   '': '—',
 }))
+// 阶段标签色同走语义 token：vod=粉、issue=红、coding=accent、qa=紫、sre=橙、
+// 待审核/完成=绿。
 const STAGE_COLORS = {
-  vod: '#ec4899',
-  issue: '#ef4444',
-  coding: '#3b82f6',
-  qa: '#a855f7',
-  sre: '#f59e0b',
-  pending_review: '#10b981',
+  vod: 'var(--pk)',
+  issue: 'var(--r)',
+  coding: 'var(--a)',
+  qa: 'var(--pu)',
+  sre: 'var(--or)',
+  pending_review: 'var(--g)',
   done: 'var(--g)',
   '': 'var(--t3)',
 }
@@ -1775,9 +1785,13 @@ function stageStyle(tk) {
   return { color: c, background: 'color-mix(in srgb, ' + c + ' 9%, transparent)' }
 }
 function radarBg(tk) {
+  // R-Δ1：token 迁移后不得按位拼 alpha（var(--xx) 拼不上）；改 color-mix 生成半透明档，
+  // 明暗主题与 token 同源，雷达扫描在两主题下均可见（同 stageStyle 的既有先例）。
   const c = stageColor(tk)
   return {
-    background: 'conic-gradient(from 0deg, transparent 0deg, ' + c + '14 40deg, transparent 90deg)',
+    background:
+      'conic-gradient(from 0deg, transparent 0deg, ' +
+      'color-mix(in srgb, ' + c + ' 10%, transparent) 40deg, transparent 90deg)',
   }
 }
 
@@ -1849,6 +1863,53 @@ const detailCardHtml = computed(() => {
       ${tk.completed_at ? `<div class="isk-row"><span>${esc(td('detail.completed_at'))}</span><b>${esc(fmtLocal(tk.completed_at).substring(0, 16))}</b></div>` : ''}
       ${tk.task_description ? `<div class="isk-row isk-row-col isk-row-last"><span style="margin-bottom:4px">${esc(td('detail.no_description') || '任务描述')}</span><div class="isk-desc">${esc(tk.task_description)}</div></div>` : ''}
     </div>`
+})
+
+// ═══════════ Agent 节点状态卡（Issue #126 等价） ═══════════
+const agentStatusCardHtml = computed(() => {
+  const tk = detailTarget.value
+  if (!tk || !(tk.agent_statuses || []).length) return ''
+  const sm = {
+    pending: {
+      color: 'var(--t3)',
+      bg: 'var(--chip-bg)',
+      icon: '○',
+      label: t('agent_status.pending'),
+    },
+    running: { color: '#3b82f6', bg: '#3b82f6', icon: '●', label: t('agent_status.running') },
+    completed: { color: 'var(--g)', bg: 'var(--g)', icon: '✓', label: t('agent_status.completed') },
+    failed: { color: '#ef4444', bg: '#ef4444', icon: '✕', label: t('agent_status.failed') },
+    cancelled: {
+      color: 'var(--t3)',
+      bg: 'var(--chip-bg)',
+      icon: '⊘',
+      label: t('agent_status.cancelled'),
+    },
+  }
+  const statuses = tk.agent_statuses
+  let html =
+    '<div class="isk-card"><div class="isk-card-tt">' + esc(t('agent_status.title')) + '</div>'
+  html += '<div class="isk-nodebar">'
+  statuses.forEach(function (s, i) {
+    const si = sm[s.status] || sm.pending
+    const isRunningS = s.status === 'running'
+    const isCompletedS = s.status === 'completed'
+    const isFailedS = s.status === 'failed'
+    const pulseStyle = isRunningS ? ';animation:iskPulse 1.2s ease-in-out infinite' : ''
+    const seq = s.latest_seq
+    const clickable = (isRunningS || isCompletedS || isFailedS) && seq
+    const clickAttr = clickable ? ` data-isk-jump="${seq}" style="cursor:pointer"` : ''
+    html += `<div class="isk-node"${clickAttr}>`
+    html += `<div class="isk-node-dot" style="background:${si.bg}${pulseStyle}">${si.icon}</div>`
+    html += `<span class="isk-node-lbl" style="color:${si.color}">${esc(s.label || s.agent || '')}</span>`
+    html += '</div>'
+    if (i < statuses.length - 1) {
+      const lineCol = isCompletedS ? 'var(--g)' : isFailedS ? '#ef4444' : 'rgba(0,0,0,.1)'
+      html += `<div class="isk-node-line" style="background:${lineCol}"></div>`
+    }
+  })
+  html += '</div></div>'
+  return html
 })
 
 // ═══════════ Issue #539：需求级业务状态 + SRE 验收结论 ═══════════

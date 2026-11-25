@@ -74,6 +74,7 @@ ENV GRAPE_AUTO_DETECT_URL=false
 # 默认惰性——只有检测到平台环境变量（RAILWAY_* / PUBLIC_DOMAIN / SERVER_BASE_URL / LLM_API_KEY）
 # 或显式 GRAPE_HOSTED_BOOTSTRAP=1 才接管；否则原样 exec 下面的 CMD，自建行为不变。
 COPY deploy/hosted/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY deploy/hosted/engine-identity.sh /usr/local/bin/engine-identity.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 

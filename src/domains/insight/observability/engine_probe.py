@@ -1,32 +1,30 @@
-"""引擎健康探测：每 10 分钟对各 runtime 引擎发起 CLI 测试对话。
+"""引擎健康探测：每 10 分钟对各 runtime 引擎发起 CLI/ACP 测试对话。
 
-探测方式：
-- opencode: opencode run "hello"（超时 30s）
-- hermes: hermes chat -q "hello" --yolo（超时 30s）
-- codearts: codearts run "hello"（超时 30s）
-- codex: codex exec --json --sandbox danger-full-access "hello"（超时 30s）
+[P0b B5 探活合一] 探活分派单点化：本模块只保留循环策略（10 分钟防抖、
+结果内存表、ops/overview 读取），探活知识全部在 descriptor
+（probe.mode/impl/command）+ probe_dispatch 单点——worker 侧 10 分钟循环
+走同一分派器，双表/双名字分支漂移（worker 缺 atomcode、insight 缺
+dsh/cursor/hwcloud，互补缺口实证）自此不可能发生。
 
-结果存内存 _probe_results，ops/overview 读取展示。
+ACP 探活实现单源 = worker 侧 src.domains.runtime.engine.agent（同
+aishell-dsh 单源先例）；insight 原自带 hermes 2 步浅版副本已删——统一
+3 步全真（initialize + session/new + prompt，Issue #441 口径），insight
+侧 hwcloud 探活缺口（原落命令表报 skip）随派发自然修复。
 """
 import logging
-import subprocess
 import threading
 import time
 from datetime import datetime, timezone
 
 log = logging.getLogger("devops-bot")
 
-# 引擎探测命令模板
-_PROBE_COMMANDS = {
-    "opencode": ["opencode", "run", "hello"],
-    "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
-    "codearts": ["codearts", "run", "hello"],
-    "codex": ["codex", "exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "hello"],
-    # AtomCode：ephemeral 不落会话，--no-tools 不执行工具；只验证 CLI 与模型认证可用
-    "atomcode": ["atomcode", "-p", "Reply OK", "--ephemeral", "--no-tools"],
-}
+# [B5] 探活命令表已消：分派器运行时按 descriptor 派生，本模块无表。
 
-_PROBE_TIMEOUT = 30  # 秒
+# [B5] 探活超时常量已随命令表移入 probe_dispatch（cli_run 值）；循环周期
+# 属循环策略，留本模块。
+
+from src.domains.runtime.engine import probe_dispatch as _probe_dispatch
+
 _PROBE_INTERVAL = 600  # 10 分钟
 
 # 探测结果：{engine_name: {"status": "ok"/"fail"/"pending", "latency": 秒, "last_probe": ISO, "error": str}}
@@ -39,158 +37,13 @@ _probing: bool = False  # 是否正在探测中（防止并发探测）
 
 
 def _probe_engine(engine_name: str, cli_path: str) -> dict:
-    """对单个引擎发起测试对话，返回探测结果。"""
-    # hermes 走 runtime 的单源实现（initialize + session/new + prompt 三段）。
-    # 本地曾有只发 initialize 的浅探活：ACP 通了就报 ok，provider 侧错误
-    # （模型不存在 → admitted_turn_failed）永远看不到，导致控制台 ok 而 worker
-    # fail 的口径分裂（2026-11-20 实测 112 次 fail）。
-    if engine_name == "hermes":
-        from src.domains.runtime.public import probe_hermes_acp
-        return probe_hermes_acp(cli_path)
+    """对单个引擎发起测试对话，返回探测结果（单点分派，无名字分支）。
 
-    # aishell-dsh 同走 ACP 探活。实现单源自 src.domains.runtime.engine.agent._probe_aishell_dsh_acp
-    # （worker 侧同函数，已实测）——engine_probe 曾因缺此分支每 10 分钟对本机行写出
-    # skip "unknown engine: aishell-dsh"，可观测页恒显「跳过」（2026-11-06 实测）。
-    if engine_name == "aishell-dsh":
-        from src.domains.runtime.public import _probe_aishell_dsh_acp
-        return _probe_aishell_dsh_acp(cli_path)
-
-    cmd = _PROBE_COMMANDS.get(engine_name)
-    if not cmd:
-        return {"status": "skip", "latency": 0, "error": f"unknown engine: {engine_name}"}
-
-    # 用完整 CLI 路径替换命令中的引擎名
-    if cli_path:
-        cmd = [cli_path] + cmd[1:]
-
-    start = time.time()
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_PROBE_TIMEOUT,
-            stdin=subprocess.DEVNULL,
-        )
-        latency = round(time.time() - start, 1)
-        if result.returncode == 0:
-            output = (result.stdout or "").strip()[:200]
-            return {"status": "ok", "latency": latency, "error": "", "output": output}
-        else:
-            err = (result.stderr or result.stdout or "").strip()[:200]
-            return {"status": "fail", "latency": latency, "error": f"exit={result.returncode}: {err}"}
-    except subprocess.TimeoutExpired:
-        latency = round(time.time() - start, 1)
-        return {"status": "fail", "latency": latency, "error": f"timeout ({_PROBE_TIMEOUT}s)"}
-    except FileNotFoundError:
-        return {"status": "fail", "latency": 0, "error": "CLI not found"}
-    except Exception as e:
-        latency = round(time.time() - start, 1)
-        return {"status": "fail", "latency": latency, "error": str(e)[:200]}
-
-
-def _probe_hermes_acp(cli_path: str) -> dict:
-    """hermes ACP 模式探活：启动 hermes acp 子进程，发 initialize + ping，验证 ACP 通信。
-
-    和实际任务执行路径一致——CLI 模式（hermes chat）走的是不同的代码路径，
-    无法发现 ACP 初始化失败的问题。
+    acp_handshake 引擎（hermes/hwcloud/aishell-dsh）按 probe.impl 派发到
+    worker 侧 agent 实现；cli_run 引擎按 probe.command 跑测试对话——
+    原双表/双名字分支已消，insight 侧 hwcloud 缺口随合一修复。
     """
-    import json as _json
-    import shutil as _shutil
-
-    agent_cmd = cli_path or _shutil.which("hermes") or _shutil.which("hermes.cmd")
-    if not agent_cmd:
-        return {"status": "fail", "latency": 0, "error": "hermes CLI not found"}
-
-    _ACP_TIMEOUT = 15  # ACP 探活超时比 CLI 短
-
-    start = time.time()
-    proc = None
-    try:
-        proc = subprocess.Popen(
-            [agent_cmd, "acp"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=0,
-            start_new_session=True,
-        )
-
-        # 1. 发 initialize 请求
-        _init_req = _json.dumps({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": 1,
-                "clientInfo": {"name": "grape-probe", "version": "1.0"},
-                "capabilities": {},
-            }
-        }) + "\n"
-
-        proc.stdin.write(_init_req)
-        proc.stdin.flush()
-
-        # 2. 读 initialize 响应（行级 JSON-RPC）
-        _init_resp = None
-        for _ in range(3):  # 最多读 3 行找 JSON-RPC 响应
-            import select as _sel
-            _ready, _, _ = _sel.select([proc.stdout], [], [], _ACP_TIMEOUT)
-            if not _ready:
-                break
-            _line = proc.stdout.readline()
-            if not _line:
-                break
-            _line = _line.strip()
-            if _line.startswith("{"):
-                try:
-                    _msg = _json.loads(_line)
-                    if _msg.get("id") == 1 and "result" in _msg:
-                        _init_resp = _msg
-                        break
-                except _json.JSONDecodeError:
-                    continue
-
-        if not _init_resp:
-            latency = round(time.time() - start, 1)
-            _stderr = ""
-            try:
-                proc.terminate()
-                _stderr = (proc.stderr.read() or "")[:200]
-            except Exception:
-                pass
-            return {"status": "fail", "latency": latency,
-                    "error": f"ACP initialize no response: {_stderr}"}
-
-        # initialize 成功即表示 ACP 通信正常（子进程启动 + JSON-RPC 响应正常）
-        latency = round(time.time() - start, 1)
-        _agent_info = ""
-        try:
-            _agent_info = _init_resp.get("result", {}).get("agentInfo", {}).get("name", "")
-        except Exception:
-            pass
-        return {"status": "ok", "latency": latency, "error": "",
-                "output": f"ACP initialize ok ({_agent_info})"}
-
-    except subprocess.TimeoutExpired:
-        latency = round(time.time() - start, 1)
-        return {"status": "fail", "latency": latency, "error": f"timeout ({_ACP_TIMEOUT}s)"}
-    except FileNotFoundError:
-        return {"status": "fail", "latency": 0, "error": "hermes CLI not found"}
-    except Exception as e:
-        latency = round(time.time() - start, 1)
-        return {"status": "fail", "latency": latency, "error": str(e)[:200]}
-    finally:
-        if proc:
-            try:
-                proc.terminate()
-                proc.wait(timeout=5)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+    return _probe_dispatch.probe_deep(engine_name, cli_path)
 
 
 def _probe_loop():
@@ -292,24 +145,3 @@ def probe_all_now():
     finally:
         with _probe_lock:
             _probing = False
-
-
-def _cleanup_hermes_probe_session(stdout: str = "", stderr: str = ""):
-    """从 hermes chat -q -Q 的输出中提取 session_id 并删除，避免 hello 对话污染历史会话。
-    -Q 模式下 session_id 输出到 stderr，格式为行首 'session_id: <timestamp_hex>'。"""
-    import re as _re
-    combined = (stdout or "") + "\n" + (stderr or "")
-    # 只匹配行首的 session_id: + hermes session ID 格式（YYYYMMDD_HHMMSS_xxxxxx）
-    m = _re.search(r'^session_id:\s*(\d{8}_\d{6}_[a-f0-9]{6})', combined, _re.MULTILINE)
-    if not m:
-        return
-    sid = m.group(1).strip()
-    if not sid:
-        return
-    try:
-        subprocess.run(
-            ["hermes", "sessions", "delete", sid, "--yes"],
-            capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass

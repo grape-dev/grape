@@ -3328,22 +3328,14 @@ function openEngineModal(agentType) {
 }
 const engModalAll = computed(() => (agentEngines.value[engineModal.agentType] || []).slice())
 const engModalAvailTypes = computed(() => {
+  // [B6 尾/C08-A2] 类型归并读后端 annotate 的 page_type（insight agent_engines 单源派生），前端零引擎名判定
   const types = []
   engModalAll.value.forEach(function (e) {
-    const tn = engFilterTypeOf(e)
+    const tn = e.page_type || ''
     if (tn && !types.includes(tn)) types.push(tn)
   })
   return types
 })
-// 实例面板引擎类型归一：先按冒号首段（防 opencode:hermes-… 被误判 hermes），
-// 再按关键字收敛成短名，其余引擎保留自身首段成组（保证「没有其他引擎」的筛选项齐全）
-function engFilterTypeOf(e) {
-  const ty = String(engEngineTypeOf(e) || '').toLowerCase()
-  if (['hermes', 'opencode', 'codearts', 'codex'].includes(ty)) return ty
-  if (ty.includes('aishell') || ty.includes('hwcloud')) return 'aishell'
-  if (ty.includes('atomcode')) return 'atomcode'
-  return ty
-}
 const engModalAvailScenes = computed(() => [
   ...new Set(engModalAll.value.flatMap((e) => e.scene_tags || [])),
 ].filter(Boolean))
@@ -3373,9 +3365,7 @@ const engModalFiltered = computed(() => {
         .toLowerCase()
       if (!hay.includes(q)) return false
     }
-    if (engineModal.filterType) {
-      if (engFilterTypeOf(e) !== engineModal.filterType) return false
-    }
+    if (engineModal.filterType && (e.page_type || '') !== engineModal.filterType) return false
     if (engineModal.filterScope && (e.scope || 'global') !== engineModal.filterScope) return false
     if (engineModal.filterScene.length) {
       const stags = e.scene_tags || []

@@ -73,12 +73,21 @@ class TestOpenEncodingFix:
         assert 'encoding="utf-8"' in source, "run.py 的 open() 应包含 encoding=utf-8"
 
     def test_executor_py_source_has_encoding(self):
-        """验证 src/domains/runtime/agents/executor.py 源码中 open() 包含 encoding 参数"""
+        """验证 executor.py 的 open() 不变式：非二进制 open 必须显式 encoding。
+
+        [P0b 调整] 原断言 grep 'encoding="utf-8"' 字符串——其守卫对象（iso-home
+        config open，commit 376cefd1d 删的死代码）已随 P0a A3 hermes 恒 ACP 化
+        移除。改为守卫真正的不变量（issue #452 Windows GBK 默认编码坑）。
+        """
         executor_path = os.path.join(_PROJECT_ROOT, "src", "domains", "runtime", "agents", "executor.py")
         with open(executor_path, "r", encoding="utf-8") as f:
             source = f.read()
-        # 至少在 _cfg_path 的 open 调用中应有 encoding
-        assert 'encoding="utf-8"' in source, "executor.py 的 open() 应包含 encoding=utf-8"
+        import re
+        bad = [ln.strip() for ln in source.splitlines()
+               if re.search(r'(?<![A-Za-z_])open\(', ln) and 'encoding' not in ln
+               and '"rb"' not in ln and "'rb'" not in ln
+               and '"wb"' not in ln and "'wb'" not in ln]
+        assert not bad, f"executor.py 存在未声明 encoding 的文本模式 open(): {bad}"
 
     def test_image_understanding_source_has_encoding(self):
         """验证 src/domains/runtime/agents/image_understanding.py 源码中 open() 包含 encoding 参数"""

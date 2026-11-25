@@ -54,16 +54,23 @@ def test_atomcode_args_unchanged_when_probe_unavailable(monkeypatch):
 
 # ── 2. worker 侧探针覆盖 atomcode ─────────────────────────────────────
 def test_worker_probe_table_has_atomcode():
+    """[P0b B5 复审] 命令表已从 agent 模块级表消进 descriptor——atomcode 探活
+    配置单源在 descriptor（probe.command），不再有第二份手抄表。"""
     from src.domains.runtime.engine import agent as mod
+    from src.domains.runtime.engine.descriptor import get_registry
 
-    assert "atomcode" in mod._PROBE_COMMANDS
-    cmd = mod._PROBE_COMMANDS["atomcode"]
-    assert cmd[0] == "atomcode" and "-p" in cmd
+    # agent 模块级缓存表已删（死代码收尾，import 期不再触发 registry 加载）
+    assert not hasattr(mod, "_PROBE_COMMANDS"), \
+        "agent._PROBE_COMMANDS 已删——命令表单源在 descriptor，勿再回迁"
+    probe = get_registry().get("atomcode")["probe"]
+    assert probe["command"] == ["atomcode", "-p", "Reply OK"]
+    # 可选参数走 help 能力探测钩子（同文件 probe 分发细节见 test_probe_dispatch）
+    assert probe.get("args_hook") == "atomcode_help_flags"
 
 
 def test_worker_probe_atomcode_adds_optional_flags_only_when_supported(monkeypatch):
-    from src.domains.runtime.engine import agent as mod
-    from src.domains.runtime.engine import atomcode as amod
+    """worker 探活链路端到端：可选开关仅当 CLI help 支持时追加（经 probe_deep）。"""
+    from src.domains.runtime.engine import probe_dispatch as pmod
 
     seen: dict = {}
 
@@ -72,19 +79,28 @@ def test_worker_probe_atomcode_adds_optional_flags_only_when_supported(monkeypat
         stdout = "OK"
         stderr = ""
 
-    def _fake_run(cmd, **kwargs):
-        seen["cmd"] = list(cmd)
-        return _Res()
+    class _HelpRes:
+        returncode = 0
+        stdout = ""
+        stderr = ""
 
-    monkeypatch.setattr(amod, "cli_help_text", lambda binary="atomcode": "--prompt-file <PATH>")
-    monkeypatch.setattr(mod._subprocess, "run", _fake_run)
-    out = mod._probe_engine_worker("atomcode", "atomcode")
+    def _mk(help_text):
+        def _fake_run(cmd, **kwargs):
+            if "--help" in cmd:
+                h = _HelpRes()
+                h.stdout = help_text
+                return h
+            seen["cmd"] = list(cmd)
+            return _Res()
+        return _fake_run
+
+    monkeypatch.setattr(pmod.subprocess, "run", _mk("--prompt-file <PATH>"))
+    out = pmod.probe_deep("atomcode", "atomcode")
     assert out["status"] == "ok"
     assert "--ephemeral" not in seen["cmd"] and "--no-tools" not in seen["cmd"]
 
-    monkeypatch.setattr(amod, "cli_help_text",
-                        lambda binary="atomcode": "--ephemeral --no-tools")
-    out = mod._probe_engine_worker("atomcode", "atomcode")
+    monkeypatch.setattr(pmod.subprocess, "run", _mk("--ephemeral --no-tools"))
+    out = pmod.probe_deep("atomcode", "atomcode")
     assert out["status"] == "ok"
     assert "--ephemeral" in seen["cmd"] and "--no-tools" in seen["cmd"]
 

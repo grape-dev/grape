@@ -761,9 +761,27 @@ class CubeSandboxAdapter:
         "min_worker_version": "",
     }
 
-    # [引擎探测 spec] 白名单 = ENGINE_REGISTRY 注册引擎——刻意边界：不扫任意
+    # [引擎探测 spec][B5] 白名单 = descriptor sandbox_installable 引擎（箱内
+    # CLI 名经 sandbox.probe_cli，hwcloud=别名 aishell）——刻意边界：不扫任意
     # 二进制（安全+误报控制）。UHP 引擎池接入后清单自然扩大。
-    _PROBE_WHITELIST = ("hermes", "opencode", "codearts", "codex", "aishell")
+    @staticmethod
+    def _box_probe_whitelist() -> tuple:
+        from src.domains.runtime.engine.descriptor import get_registry
+        return tuple(get_registry().sandbox_probe_engines())
+
+    # [B5] 类级派生：descriptor 单源（import 期求值，registry 为纯文件加载无副作用）
+    _PROBE_WHITELIST = tuple(
+        __import__("src.domains.runtime.engine.descriptor", fromlist=["get_registry"])
+        .get_registry().sandbox_probe_engines()
+    )
+
+    @staticmethod
+    def _box_acp_deep_check(engine_name: str) -> bool:
+        """[B5] 箱内 ACP 深检派发位来自 descriptor（sandbox.acp_deep_check，
+        仅 hermes；alias 归一——'aishell'→hwcloud 为假）。深检 shell 公式是
+        引擎 quirk，留本类实现处不描述化。"""
+        from src.domains.runtime.engine.descriptor import get_registry
+        return get_registry().sandbox_acp_deep_check(engine_name)
 
     def _probe_engines_shell(self, sandbox) -> list:
         """建箱层探测：对已建箱沙箱跑白名单引擎 --version。
@@ -791,7 +809,9 @@ class CubeSandboxAdapter:
                     # --version 通过后对 `hermes acp` 发真实 initialize+session/new
                     # 握手（base64 免引号嵌套），响应含 jsonrpc 即 ACP 可用；失败/超时
                     # 不上报（宁缺勿假，与 spec §5.6 一致）。
-                    if engine == "hermes":
+                    if self._box_acp_deep_check(engine):
+                        # [B5] 派发位来自 descriptor sandbox.acp_deep_check（仅 hermes；
+                        # 深检公式是引擎 quirk 留此处——见 _box_acp_deep_check 注记）。
                         # [握手公式复刻 weekly-10 2026-11-11] 旧 echo 短管道在 v0.19.0
                         # 原理性失效（<sandbox-host> 箱内实测三组对照）：
                         #   ① echo(立即 EOF) → adapter 处理完 initialize 但不写 stdout(0字节)

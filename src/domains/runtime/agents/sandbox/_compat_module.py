@@ -32,6 +32,14 @@ def _bwrap_bin() -> str:
     return shutil.which("bwrap") or ""
 
 
+def _engine_overlay_root(backend_name: str) -> str:
+    """[B5] 会话 overlay 挂载根（descriptor sandbox.overlay_root，仅真值引擎；
+    缺省空 = 不挂载）。"""
+    from src.domains.runtime.engine.descriptor import get_registry
+    d = get_registry().get(backend_name)
+    return (d.get("sandbox", {}).get("overlay_root") or "") if d else ""
+
+
 def build_bwrap_cmd(cwd: str, backend_name: str = "") -> list[str] | None:
     """构造 bwrap 包装命令前缀；返回 None 表示不包装（关 / 缺 bwrap / cwd 无效 / Windows）。
 
@@ -77,12 +85,16 @@ def build_bwrap_cmd(cwd: str, backend_name: str = "") -> list[str] | None:
         if p and os.path.isdir(p):
             opts += ["--bind", p, p]
 
-    # /tmp 隔离（tmpfs）；hermes 会话 overlay 单独 rw-bind（在 tmpfs 之上叠加）
+    # /tmp 隔离（tmpfs）；需要宿主机会话续传的引擎单独 rw-bind 其 overlay
     # issue #238: hermes overlay 已从 /tmp 迁移到 ~/.cache/hermes-acp-homes
+    # [B5] 挂载分派来自 descriptor sandbox.overlay_root（仅 hermes）；
+    # cwd-hash 动态子目录算法（md5[:12] + makedirs + 精确子目录 bind）是引擎
+    # quirk，留此处不描述化。
     opts += ["--tmpfs", "/tmp"]
-    if backend_name == "hermes":
+    _overlay_root = _engine_overlay_root(backend_name)
+    if _overlay_root:
         _h = hashlib.md5((cwd or ".").encode()).hexdigest()[:12]
-        _overlay = os.path.join(os.path.expanduser("~"), ".cache", "hermes-acp-homes", _h)
+        _overlay = os.path.join(os.path.expanduser(_overlay_root), _h)
         os.makedirs(_overlay, exist_ok=True)
         opts += ["--bind", _overlay, _overlay]
 

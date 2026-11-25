@@ -101,13 +101,15 @@ class TestGetBackend:
         b = get_runtime("codearts")
         assert isinstance(b, CodeArtsRuntime)
 
-    def test_unknown_fallback_to_opencode(self):
-        b = get_runtime("nonexistent")
-        assert isinstance(b, OpencodeRuntime)
+    def test_unknown_explicit_error(self):
+        """[P0a 契约修正] 未注册引擎显式 KeyError（原 fallback opencode 暗雷已移除）。"""
+        with pytest.raises(KeyError, match="unknown agent backend"):
+            get_runtime("nonexistent")
 
     def test_case_sensitive(self):
-        b = get_runtime("CodeArts")
-        assert isinstance(b, OpencodeRuntime)  # case doesn't match, fallback
+        """[P0a 契约修正] 大小写不匹配=未注册，同样显式报错（不 fallback）。"""
+        with pytest.raises(KeyError, match="unknown agent backend"):
+            get_runtime("CodeArts")
 
 
 class TestBackendParseOutput:
@@ -210,7 +212,8 @@ class TestRedact:
         fake_proc = FakeStream()
         with patch("src.domains.runtime.agents.executor.subprocess.Popen", return_value=fake_proc), \
              patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/fake/opencode"):
-            events = list(stream_runtime("prompt", os.getcwd(), "", "issue",
+            # [P0a 契约修正] backend_name 显式 "opencode"（原传 "" 走 fallback 暗雷）
+            events = list(stream_runtime("prompt", os.getcwd(), "", "issue", "opencode",
                                        bot_token="BOTTOK", user_token="USERTOK"))
         combined = " ".join(str(d) for _, d in events)
         assert "BOTTOK" not in combined
@@ -587,7 +590,8 @@ class TestExecutorPipeInvocation:
         with patch("src.domains.runtime.agents.executor.subprocess.Popen", side_effect=fake_popen), \
              patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"), \
              patch("src.domains.runtime.agents.sandbox.build_bwrap_cmd", return_value=None):
-            list(stream_runtime("p", os.getcwd(), "", "issue"))
+            # [P0a 契约修正] backend_name 显式 "opencode"（原传 "" 走 fallback 暗雷）
+            list(stream_runtime("p", os.getcwd(), "", "issue", "opencode"))
 
         assert captured["cmd"][0] == "/usr/bin/opencode", "命令应为直接 agent CLI，不得是 script 包装"
         assert "script" not in captured["cmd"]
