@@ -45,6 +45,9 @@ def _clean_state(monkeypatch):
     # 每个用例重置阈值/周期，避免互相污染
     monkeypatch.setenv(dlm.WATCHDOG_HOLD_ENV, "0.05")
     monkeypatch.setenv(dlm.WATCHDOG_DEDUP_ENV, "60")
+    # 后台看门狗线程会读同一份 env：周期放大到 1h，保证显式 watchdog_scan() 的断言
+    # 不被后台线程抢先上报（否则同 owner 命中会被去重，用例表现成偶发空 hits）。
+    monkeypatch.setenv(dlm.WATCHDOG_PERIOD_ENV, "3600")
     yield
     dlm._STATE.clear()
     dlm._CHILD_CACHE.clear()
