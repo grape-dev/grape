@@ -658,12 +658,16 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
             set_issue_stage(repo_key, _issue_id, "pending_review", "issue_closed")
         # else: 有 agent 在运行 → 不修改 stage，等 agent 完成后再判定
         _rt_db.commit()
-        # Issue #2419 修复项 2：Issue 关闭兜底转待审核 = 审核点状态变化，须推 🔎 待审核通知
-        if _promoted_review > 0:
-            maybe_notify_review_point_status(
-                repo_key, issue_number, "pending_review",
-                "VCS Issue 已关闭，关联任务转入待审核，请确认是否完结")
-        return c.rowcount
+        _affected = c.rowcount
+    # Issue #4295：通知投递必须在 db_lock **之外**。maybe_notify_review_point_status
+    # 内部要解析通知目标（issue 行 → conv 兜底建/复用 → open_id → 本人 bot ctx/api → cfg），
+    # 属于"锁内做外部 IO + 多次 DB 往返"，会把前台请求的临界区越滚越大（顶到 99.9s）。
+    # 状态判定与 UPDATE 仍全在锁内（_promoted_review/_affected 已在锁内定格）。
+    if _promoted_review > 0:
+        maybe_notify_review_point_status(
+            repo_key, issue_number, "pending_review",
+            "VCS Issue 已关闭，关联任务转入待审核，请确认是否完结")
+    return _affected
 
 def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee: str) -> int:
     """换人：不再把需求标完成（reassigned 语义错位，见 reassign-takeover-no-complete-design.md）。
@@ -716,12 +720,14 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
             set_issue_stage(repo_key, _issue_id, "pending_review", "bot_takeover")
         # else: 有 agent 在运行 → 不修改 stage，等 agent 完成后再判定
         _rt_db.commit()
-        # Issue #2419 修复项 2：bot 接管兜底转待审核 = 审核点状态变化，须推 🔎 待审核通知
-        if _promoted_review > 0:
-            maybe_notify_review_point_status(
-                repo_key, issue_number, "pending_review",
-                "任务已被 bot 接管并转入待审核，请确认后续处理方式")
-        return c.rowcount
+        _affected = c.rowcount
+    # Issue #4295：同 close_issue_tasks ——通知投递移出 db_lock（目标解析含多次 DB 往返
+    # 与本人 bot 凭证解析，锁内执行等同把外部 IO 拉进临界区）。
+    if _promoted_review > 0:
+        maybe_notify_review_point_status(
+            repo_key, issue_number, "pending_review",
+            "任务已被 bot 接管并转入待审核，请确认后续处理方式")
+    return _affected
 
 # ===== Issue #4170：交付终态（PR merged + Issue closed）判定（单点，派发/复位共用）=====
 

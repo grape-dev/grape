@@ -102,6 +102,8 @@ scripts/check_*.py
 # Issue #4158：Makefile lint / scripts/check-all.sh / .github/workflows/lint.yml 引用的门禁脚本
 !scripts/check_duplicate_defs.py
 !scripts/check_f811.py
+# Issue #4295：db_lock 锁内外部 IO 门禁（Makefile lint 引用）
+!scripts/check_db_lock_external_io.py
 scripts/clean_*.py
 !scripts/clean_empty_strings_to_null.py
 scripts/batch_*.py
