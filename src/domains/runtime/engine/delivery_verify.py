@@ -42,6 +42,11 @@ DEFAULT_DELIVERY_VERIFY_SKILLS = ("atomcode-bug-fix",)
 ENV_DELIVERY_VERIFY_SKILLS = "GRAPE_DELIVERY_VERIFY_SKILLS"
 # 环境变量：PR 查询墙钟超时（秒），默认 15，非法值回退默认。
 ENV_DELIVERY_VERIFY_TIMEOUT = "GRAPE_DELIVERY_VERIFY_TIMEOUT_SECONDS"
+# Policy bound（策略性数值，非实测推导）：PR 全量翻页查询的墙钟上限，目的是
+# 不长时间占用收尾请求线程（docs/issue-4440/spec.md「瞬时故障降级」段的定性
+# 要求）。env override: GRAPE_DELIVERY_VERIFY_TIMEOUT_SECONDS。
+# <undecided: 需要托管平台大规模仓库（数万 PR）全量翻页的实测耗时分布，
+# 才能把该值从 policy bound 收敛为实测上界；待决策项已在 MR 正文登记>
 DEFAULT_DELIVERY_VERIFY_TIMEOUT_SECONDS = 15.0
 
 # 未通过核实的机器可读错误码（写 agent_tasks.errors / 事件 failure_info）。

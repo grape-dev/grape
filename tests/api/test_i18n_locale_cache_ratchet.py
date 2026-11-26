@@ -26,7 +26,7 @@ LOCALE_FINGERPRINT = 'a32808d7c777710f'
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
-    'index.html': ('99', '53'),
+    'index.html': ('101', '53'),
     'admin.html': ('20261126-1', '20261114-23'),
     'register.html': ('77', '45'),
     'forgot.html': ('77', '45'),
