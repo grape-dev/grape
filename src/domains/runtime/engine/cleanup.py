@@ -6,7 +6,7 @@
 - 对超 TTL 未活跃的僵尸 workdir 兜底清理；
 - 对 chat / feishu / vod / history 目录做 TTL 清理（无活跃会话时删除）。
 """
-import asyncio, contextlib, fnmatch, os, shutil, tempfile, time
+import asyncio, contextlib, fnmatch, os, re, shutil, tempfile, time
 
 from src.kernel import config, db_registry
 from src.kernel.config import log, CHAT_CWD_BASE
@@ -35,19 +35,61 @@ _OPCODE_FLAT_RESIDUAL_NAMES = frozenset({
 # 会话子目录归属标记（与 session_tmpdir._MARKER_NAME 同步）。
 _SESSION_DIR_MARKER = ".grape-session-tmpdir"
 
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """安全解析正整数 env（Issue #4445 QA Optional）。
+
+    原实现在模块导入期直接 ``int(os.environ[...])``：运维误配空串/非数字会让 worker
+    **导入即崩溃**（心跳全断），比清理策略本身更严重。这里失败回落默认值并留 warning。
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        log.warning(f"sweeper: invalid {name}={raw!r}, falling back to {default}")
+        return default
+    if value < minimum:
+        log.warning(f"sweeper: {name}={raw!r} below minimum {minimum}, "
+                    f"falling back to {default}")
+        return default
+    return value
+
+
+_TMP_JANITOR_MODES = ("on", "dry", "off")
+
+
+def _tmp_janitor_mode() -> str:
+    """janitor 模式：只接受 on/dry/off，未知拼写保守落 dry（不删、仍可观测）。"""
+    raw = (os.environ.get("SWEEPER_TMP_JANITOR") or "on").strip().lower()
+    if raw in _TMP_JANITOR_MODES:
+        return raw
+    log.warning(f"sweeper: unknown SWEEPER_TMP_JANITOR={raw!r}, "
+                f"falling back to dry (统计但不删除)")
+    return "dry"
+
+
 # Issue #4445：节点 /tmp（tmpfs，占用即钉住物理内存）任务派生残留回收。
 # 线上实测 1,032 项残留里绝大多数是 agent/技能自建的 qa*/pr*/verify* 等目录，既无
 # 会话标记也不在既有固定前缀内 → 永不过期。这里按「前缀 + mtime TTL」扩面清理，
 # 同时保留活跃任务、当前 TASK_TMPDIR、符号链接等豁免。
-_TMP_JANITOR_MODE = (os.environ.get("SWEEPER_TMP_JANITOR", "on") or "on").strip().lower()
-_TMP_JANITOR_TTL_SECONDS = int(os.environ.get("SWEEPER_TMP_TTL_SECONDS", "7200"))
+# QA Optional：`base*`/`rev*`/`head*` 这类裸前缀会命中 base_notes/revlog/headless 等
+# 第三方目录，与「白名单外第三方文件不碰」的声明不符 → 收敛成「前缀 + 数字」或
+# 「前缀-」形态（`base4350`/`rev3582` 仍命中，`baseline`/`review`/`headless` 不再命中）。
+_TMP_JANITOR_DEFAULT_PATTERNS = (
+    "qa[0-9]*,qa-*,pr[0-9]*,pr-*,verify[0-9]*,verify-*,base[0-9]*,rev[0-9]*,"
+    "head[0-9]*,deploy-ws,venv[0-9]*,venv-*,pkg-*,wt-*"
+)
+_TMP_JANITOR_MODE = _tmp_janitor_mode()
+_TMP_JANITOR_TTL_SECONDS = _env_int("SWEEPER_TMP_TTL_SECONDS", 7200)
 _TMP_JANITOR_PATTERNS = tuple(
     p.strip() for p in (os.environ.get(
         "SWEEPER_TMP_PATTERNS",
-        "qa*,pr*,verify*,base*,rev*,deploy-ws,venv*,pkg-*,head*,wt-*",
+        _TMP_JANITOR_DEFAULT_PATTERNS,
     ) or "").split(",") if p.strip())
 # 单轮扫描/删除上限：目录异常大时避免 sweeper 被单个节点拖住（超限留 warning）。
-_TMP_JANITOR_MAX_ITEMS = int(os.environ.get("SWEEPER_TMP_MAX_ITEMS", "2000"))
+_TMP_JANITOR_MAX_ITEMS = _env_int("SWEEPER_TMP_MAX_ITEMS", 2000)
 
 _tmp_janitor_items_total = 0
 _tmp_janitor_bytes_total = 0
@@ -1282,9 +1324,14 @@ def _opencode_staging_roots() -> set:
     return bases
 
 
-def _active_session_task_ids() -> set:
-    """Issue #2225：仍在 queued/dispatched/running 的任务 id（其会话子目录跳过）。"""
-    ids = set()
+def _query_active_task_ids() -> tuple[bool, set]:
+    """(探测是否成功, queued/dispatched/running 的 task_id 集合)。
+
+    Issue #4445 QA Required：janitor 需要 fail-closed——查询失败返回 (False, set())，
+    调用方本轮不删任何东西。原实现只返回空集，把「查不到」当成「没有活跃任务」，
+    共享 /tmp 上正在运行的 qa-*/pr-* 目录会被成批删除。
+    """
+    ids: set = set()
     try:
         # G-01/A7 棘轮正解：读侧走免锁通道 bulk_read.reader()，不持 db_lock
         # （持锁 fetchall 会让心跳/claim 路径排队，check_async_blocking 拦截）。
@@ -1293,13 +1340,19 @@ def _active_session_task_ids() -> set:
             c.execute("SELECT id FROM agent_tasks "
                       "WHERE status IN ('queued','dispatched','running')")
             ids = {str(r[0]) for r in c.fetchall() if r and r[0]}
+        return True, ids
     except Exception as e:
         from src.kernel.db_errors import missing_schema
         if missing_schema(e):
             log.debug(f"sweeper opencode active-task lookup skipped (no local table): {e}")
         else:
             log.warning(f"sweeper opencode active-task lookup failed: {e}")
-    return ids
+        return False, ids
+
+
+def _active_session_task_ids() -> set:
+    """Issue #2225：仍在 queued/dispatched/running 的任务 id（其会话子目录跳过）。"""
+    return _query_active_task_ids()[1]
 
 
 def _sweep_opencode_tmpdirs(now: float, roots=None) -> int:
@@ -1505,6 +1558,35 @@ def _tmp_janitor_size(path: str) -> int:
         return 0
 
 
+def _tmp_janitor_owned_by_active(name: str, active_ids: set) -> bool:
+    """目录名是否归属某个活跃任务（Issue #4445 QA Required）。
+
+    真实残留目录由 Agent/技能自行拼名（`qa-1839`、`pr2031-head`、`verify4356`…），
+    目录名**等于** task_id 是罕见的；原实现只判 `name in active_ids`，于是并发多任务
+    worker 上仍在运行、但超 2h 未写入的 `qa-<task_id>` 目录会被误删。这里按「名字被
+    非字母数字分隔符切出的段 == 活跃 task_id」判定归属，另兼容紧贴前缀形态（`qa1839`）。
+
+    判定偏保守：命中即跳过删除（漏删好于误删），未命中不影响正常回收。
+    """
+    if not active_ids or not name:
+        return False
+    if name in active_ids:
+        return True
+    segments = [seg for seg in re.split(r"[^0-9A-Za-z]+", name) if seg]
+    for seg in segments:
+        if seg in active_ids:
+            return True
+        # `pr1839-head`（task_id 紧贴前缀、无分隔符）与 `qa_1839_backup` 这类形态：
+        # 段的前后缀命中活跃 id 即视为归属（偏保守，命中即跳过删除）。
+        for tid in active_ids:
+            if tid and (seg.startswith(tid) or seg.endswith(tid)):
+                return True
+    for tid in active_ids:
+        if tid and (name.startswith(tid) or name.endswith(tid)):
+            return True
+    return False
+
+
 def _sweep_tmp_task_residuals(now: float | None = None, roots=None) -> int:
     """Issue #4445：按「前缀白名单 + mtime TTL」清理 /tmp 下任务派生残留。
 
@@ -1512,11 +1594,12 @@ def _sweep_tmp_task_residuals(now: float | None = None, roots=None) -> int:
     安全边界（全部命中即跳过，不删除）：
 
     - 符号链接一律不跟随、不删除（防止越界删除链接目标）；
-    - ``SWEEPER_TMP_JANITOR=off`` 完全关闭；``dry`` 只统计不删除；
+    - ``SWEEPER_TMP_JANITOR=off`` 完全关闭；``dry`` 只统计不删除（且**不累加**累计指标）；
     - 未命中 ``SWEEPER_TMP_PATTERNS`` 前缀白名单的第三方文件不碰；
     - mtime 在 ``SWEEPER_TMP_TTL_SECONDS``（默认 2h）内的仍在写入对象不删；
-    - 目录名等于 queued/dispatched/running 的 task_id、或路径位于当前
-      ``TASK_TMPDIR``/会话暂存根之下 → 活跃会话豁免。
+    - 目录名归属 queued/dispatched/running 的 task_id（含 `qa-<task_id>` 等前缀形态）、
+      或路径位于当前 ``TASK_TMPDIR``/会话暂存根之下 → 活跃会话豁免；
+    - 活跃任务探测失败 → 本轮整体跳过（fail-closed，宁漏删不误删）。
 
     ``roots``/``now`` 可注入便于单测（与 ``_sweep_opencode_tmpdirs`` 同款设计）。
     """
@@ -1525,7 +1608,11 @@ def _sweep_tmp_task_residuals(now: float | None = None, roots=None) -> int:
         return 0
     _now = time.time() if now is None else float(now)
     bases = list(roots) if roots is not None else [tempfile.gettempdir()]
-    active_ids = _active_session_task_ids()
+    _lookup_ok, active_ids = _query_active_task_ids()
+    if not _lookup_ok:
+        log.warning("tmp janitor: active-task lookup failed, skipping this round "
+                    "(fail-closed, no deletion)")
+        return 0
     protected = {os.path.realpath(p) for p in _tmp_janitor_protected_paths()}
     items = 0
     freed = 0
@@ -1560,7 +1647,7 @@ def _sweep_tmp_task_residuals(now: float | None = None, roots=None) -> int:
                 if _is_protected(p):
                     skipped += 1
                     continue
-                if os.path.isdir(p) and name in active_ids:
+                if os.path.isdir(p) and _tmp_janitor_owned_by_active(name, active_ids):
                     skipped += 1
                     continue
                 if _now - os.path.getmtime(p) < _TMP_JANITOR_TTL_SECONDS:
@@ -1578,12 +1665,38 @@ def _sweep_tmp_task_residuals(now: float | None = None, roots=None) -> int:
                 freed += size
             except OSError as e:
                 log.warning(f"tmp janitor: cleanup failed {p}: {e}")
+    if _TMP_JANITOR_MODE == "dry":
+        # dry-run 只报告不删：不得累加累计清理量（否则「清理量在增长」的告警/看板
+        # 会因演练对象而假阳性）。日志用 would remove 明确语义。
+        log.info(f"tmp janitor(dry-run): would remove {items} items, "
+                 f"would free {freed} bytes, skipped {skipped}(active/protected)")
+        return items
     if items:
         _tmp_janitor_items_total += items
         _tmp_janitor_bytes_total += freed
     log.info(f"tmp janitor: removed {items} items, freed {freed} bytes, "
-             f"skipped {skipped}(active)")
+             f"skipped {skipped}(active/protected)")
     return items
+
+
+def _sweep_local_tmp_once(now: float | None = None, roots=None) -> int:
+    """节点本地 /tmp 清理（不依赖集群级 sweeper 锁，Issue #4445 QA Optional）。
+
+    ``SWEEPER_LOCK_MODE=own`` 时 ``grape:sweeper:merged`` 每轮只有一台节点能拿到锁，
+    其余节点的 /tmp 永不清理（轮转下每节点频率降为 15min×N）。janitor 与 opencode
+    暂存清理都是**本机**资源治理，未持锁的节点也必须照跑。
+    """
+    _now = time.time() if now is None else float(now)
+    cleaned = 0
+    try:
+        cleaned += _sweep_opencode_tmpdirs(_now, roots=roots)
+    except Exception as e:
+        log.warning(f"local sweeper: opencode tmp sweep failed: {e}")
+    try:
+        cleaned += _sweep_tmp_task_residuals(_now, roots=roots)
+    except Exception as e:
+        log.warning(f"local sweeper: tmp janitor failed: {e}")
+    return cleaned
 
 
 def _sweep_stale_workspace_repos() -> int:
@@ -1674,6 +1787,17 @@ async def sweep_loop():
     while True:
         _lock = _ReplicaLock("grape:sweeper:merged")
         if not await _aio.to_thread(_lock.acquire):
+            # Issue #4445 QA Optional：节点本地 /tmp 治理不依赖集群锁。
+            # SWEEPER_LOCK_MODE=own 时每轮只有一台节点拿到 `grape:sweeper:merged`，
+            # 其余节点的 janitor 会被饿死（轮转下每节点频率降为 15min×N）；
+            # 本机资源清理与「谁扫 DB/worktree」无关，未持锁也照跑。
+            try:
+                _local = await _aio.to_thread(_sweep_local_tmp_once)
+                if _local:
+                    log.info(f"sweeper(local): reclaimed {_local} local /tmp entries "
+                             f"while another replica holds the merge lock")
+            except Exception as e:
+                log.warning(f"sweeper(local) tmp sweep failed: {e}")
             log.debug("sweeper(merged): 另一副本正在清扫，本轮跳过")
             await _aio.sleep(_SWEEP_INTERVAL)
             continue
