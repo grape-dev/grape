@@ -786,7 +786,13 @@ function doCreate() {
       // 其它错误保持「检查失败」提示（err 可为字符串——auto rename 耗尽场景）
       if (err && typeof err === 'object' && err.status === 401 && err.detail
         && err.detail.action === 'reauth_required') return
-      G.app.showToast(err || t('templates.check_failed', { msg: '' }))
+      // Issue #4231：后端 check-name 只回裸原因，这里统一补一次「检查失败」前缀；
+      // err 可为字符串（auto rename 耗尽场景，已是完整文案，直接展示）
+      G.app.showToast(
+        err && typeof err === 'object'
+          ? t('templates.check_failed', { msg: err.message || '' })
+          : err || t('templates.check_failed', { msg: '' })
+      )
     }
   )
 }
