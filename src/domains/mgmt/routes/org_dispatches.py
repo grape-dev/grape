@@ -103,11 +103,19 @@ def context(org_id: str, dispatch_id: str,
             user: dict = Depends(require_org_api_user)):
     _require_team_org(org_id)
     _require_member(user["id"], org_id)
-    from src.domains.mgmt.org_context_snapshot import build_dispatch_context_bundle
+    from src.domains.mgmt.org_context_snapshot import (
+        DispatchContextStatus,
+        dispatch_context_read,
+    )
 
-    bundle = build_dispatch_context_bundle(org_id, dispatch_id)
-    if not bundle:
+    bundle, status = dispatch_context_read(org_id, dispatch_id)
+    if status == DispatchContextStatus.NOT_FOUND:
         raise _error(404, "ORG_DISPATCH_NOT_FOUND", "Organization dispatch not found")
+    if status == DispatchContextStatus.FORBIDDEN:
+        raise _error(
+            403, "ORG_DISPATCH_FORBIDDEN",
+            "Dispatch context is not visible to this organization",
+        )
     return bundle
 
 

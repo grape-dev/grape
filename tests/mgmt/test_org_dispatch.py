@@ -1125,3 +1125,134 @@ def test_resolve_target_scene_prefers_explicit_recommendation(monkeypatch):
 
     assert detail["scene_id"] == "s_topic"
     assert detail["source"] == "explicit"
+
+
+def test_child_body_org_follows_target_repo_org_after_rebind(client):
+    """#4352：建单正文内嵌 org_id 取子 Issue 所属组织（目标仓当前托管组织）。
+
+    模拟下派后仓库跨组织重绑定：重试重建子单时正文应内嵌新组织，而不是批次归属组织，
+    保证与 ``issue.org_id``（managed_repos.org_id 权威）一致。
+    """
+    api, _state, calls, _triggers = client
+    org_id = _seed_org()
+    _seed_standard(org_id)
+    from src.domains.mgmt.user.org_db import create_org
+
+    new_org = create_org(slug=f"{SLUG}-rebind", name="rebind", owner_id=OTHER_UID)
+    assert new_org
+
+    created = _create(api, org_id, [TARGET_A])
+    assert created.status_code == 201, created.text
+    did = created.json()["dispatch_id"]
+    assert f'--org_id "{org_id}"' in calls[-1]["description"]
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE managed_repos SET org_id=? WHERE repo_key=?",
+                  (new_org["id"], TARGET_A))
+        c.execute(
+            "UPDATE grape_t_org_dispatch_target SET status='failed', child_issue_number=0, "
+            "child_task_id=0 WHERE dispatch_id=? AND repo_key=?",
+            (did, TARGET_A),
+        )
+        db.commit()
+
+    retry = api.post(f"/api/orgs/{org_id}/dispatches/{did}/targets/{TARGET_A}/retry")
+    assert retry.status_code == 200, retry.text
+    rebuilt = calls[-1]["description"]
+    assert f'--org_id "{new_org["id"]}"' in rebuilt
+    assert f'--org_id "{org_id}"' not in rebuilt
+    with db_lock:
+        c = db.cursor()
+        repo_org = c.execute(
+            "SELECT org_id FROM managed_repos WHERE repo_key=?", (TARGET_A,)
+        ).fetchone()[0]
+    assert repo_org == new_org["id"]
+    assert f'--org_id "{repo_org}"' in rebuilt
+
+
+def test_child_issue_org_falls_back_to_dispatch_org(monkeypatch):
+    """#4352：目标仓库无托管组织时，正文 org_id 回退 dispatch 归属组织。"""
+    from src.domains.mgmt import org_dispatch
+
+    monkeypatch.setattr("src.domains.mgmt.user.org_db.get_org_id_by_repo_key",
+                        lambda repo_key: "")
+    assert org_dispatch._child_issue_org_id("gitcode:x/unbound", "dispatch-org") == "dispatch-org"
+
+
+def _seed_org_context_files(monkeypatch):
+    monkeypatch.setattr(
+        "src.domains.mgmt.org_context_repo._render_files",
+        lambda org_id: {
+            "org-context/rules.md": "# 组织硬规则\n\n安全合规",
+            "org-context/profile.md": "# 组织简介",
+        },
+    )
+
+
+def _create_context_dispatch(api, org_id) -> str:
+    resp = _create(api, org_id, [TARGET_A])
+    assert resp.status_code == 201, resp.text
+    return resp.json()["dispatch_id"]
+
+
+def test_context_route_visible_to_child_issue_org_member(client, monkeypatch):
+    """#4352：子 Issue 所属组织成员经路由读取批次快照 → 200 且 files 非空。
+
+    调用者需为子 Issue 所属组织成员（路由先校验组织存在 + 成员身份）。
+    """
+    from src.domains.mgmt.user.org_db import add_org_member, create_org
+
+    api, state, _calls, _triggers = client
+    org_id = _seed_org()
+    _seed_standard(org_id)
+    dispatch_id = _create_context_dispatch(api, org_id)
+
+    child_org = create_org(slug=f"{SLUG}-child", name="child", owner_id=OTHER_UID)
+    assert child_org
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE managed_repos SET org_id=? WHERE repo_key=?",
+                  (child_org["id"], TARGET_A))
+        db.commit()
+    assert add_org_member(child_org["id"], MEMBER_UID, "member")
+    state["role_uid"] = MEMBER_UID
+    _seed_org_context_files(monkeypatch)
+
+    resp = api.get(f"/api/orgs/{child_org['id']}/dispatches/{dispatch_id}/context")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["org_id"] == str(child_org["id"])
+    assert body["dispatch_org_id"] == str(org_id)
+    assert body["files"], body
+    assert "org-context/rules.md" in body["files"]
+
+
+def test_context_route_forbidden_for_other_org_member(client):
+    """#4352：已存在的他组织成员读取不可见批次 → 403 ORG_DISPATCH_FORBIDDEN。"""
+    from src.domains.mgmt.user.org_db import add_org_member, create_org
+
+    api, state, _calls, _triggers = client
+    org_id = _seed_org()
+    _seed_standard(org_id)
+    dispatch_id = _create_context_dispatch(api, org_id)
+
+    foreign_org = create_org(slug=f"{SLUG}-foreign", name="foreign", owner_id=OTHER_UID)
+    assert foreign_org
+    assert add_org_member(foreign_org["id"], MEMBER_UID, "member")
+    state["role_uid"] = MEMBER_UID
+
+    resp = api.get(f"/api/orgs/{foreign_org['id']}/dispatches/{dispatch_id}/context")
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["error_code"] == "ORG_DISPATCH_FORBIDDEN"
+
+
+def test_context_route_not_found_for_missing_dispatch(client):
+    """#4352：dispatch 不存在 → 404 ORG_DISPATCH_NOT_FOUND（成员校验通过后）。"""
+    api, _state, _calls, _triggers = client
+    org_id = _seed_org()
+    _seed_standard(org_id)
+
+    resp = api.get(f"/api/orgs/{org_id}/dispatches/999999999/context")
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"]["error_code"] == "ORG_DISPATCH_NOT_FOUND"

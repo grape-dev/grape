@@ -181,3 +181,95 @@ def test_collect_knowledge_files_injects_org_snapshot(monkeypatch):
         with db_lock:
             db.cursor().execute("DELETE FROM issue WHERE repo_key=?", (repo_key,))
             db.commit()
+
+
+def _patch_dispatch(monkeypatch, dispatch: dict, targets: list[dict]) -> None:
+    from src.domains.mgmt import org_dispatch as od
+
+    monkeypatch.setattr(
+        od, "_get_dispatch_row",
+        lambda c, did: dispatch if str(did) == str(dispatch["id"]) else None)
+    monkeypatch.setattr(
+        od, "_get_target_rows",
+        lambda c, did: targets if str(did) == str(dispatch["id"]) else [])
+
+
+def _drop_snapshots(*org_ids: str) -> None:
+    with db_lock:
+        c = db.cursor()
+        for org_id in org_ids:
+            c.execute("DELETE FROM grape_t_org_context_snapshot WHERE org_id=?", (org_id,))
+        db.commit()
+    for org_id in org_ids:
+        shutil.rmtree(os.path.join(WORKSPACE_DIR, "context-snapshots", f"org-{org_id}"),
+                      ignore_errors=True)
+
+
+def test_dispatch_context_read_visible_to_child_issue_org(monkeypatch):
+    """#4352：子 Issue 所属组织（目标仓当前托管组织）可读取批次快照。"""
+    child_org = "child-org-4352"
+    monkeypatch.setattr("src.domains.mgmt.org_context_repo._render_files",
+                        lambda org_id: _files())
+    monkeypatch.setattr("src.domains.mgmt.user.org_db.get_org_id_by_repo_key",
+                        lambda repo_key: child_org)
+    dispatch = {"id": 907, "org_id": ORG, "org_issue_number": 1, "status": "running",
+                "plan_json": '{"title": "需求一"}'}
+    targets = [{"repo_key": "gitcode:a/b", "child_issue_number": 7,
+                "status": "running", "pr_number": 0, "error": ""}]
+    _patch_dispatch(monkeypatch, dispatch, targets)
+    try:
+        bundle, status = snap_mod.dispatch_context_read(child_org, 907)
+        assert status == 200, (status, bundle)
+        assert bundle["org_id"] == child_org
+        assert bundle["dispatch_org_id"] == ORG
+        assert "org-context/rules.md" in bundle["files"]
+    finally:
+        _drop_snapshots(ORG, child_org)
+
+
+def test_dispatch_context_read_distinguishes_403_and_404(monkeypatch):
+    """#4352：组织存在但不可见 → 403；dispatch 不存在 → 404，不再混报。"""
+    child_org = "child-org-4352-b"
+    monkeypatch.setattr("src.domains.mgmt.org_context_repo._render_files",
+                        lambda org_id: _files())
+    monkeypatch.setattr("src.domains.mgmt.user.org_db.get_org_id_by_repo_key",
+                        lambda repo_key: child_org)
+    dispatch = {"id": 908, "org_id": ORG, "org_issue_number": 1, "status": "running",
+                "plan_json": '{"title": "需求一"}'}
+    targets = [{"repo_key": "gitcode:a/b", "child_issue_number": 7,
+                "status": "running", "pr_number": 0, "error": ""}]
+    _patch_dispatch(monkeypatch, dispatch, targets)
+    try:
+        forbidden, status = snap_mod.dispatch_context_read("foreign-org", 908)
+        assert status == 403
+        assert forbidden == {}
+
+        missing, status = snap_mod.dispatch_context_read(ORG, "no-such-dispatch")
+        assert status == 404
+        assert missing == {}
+    finally:
+        _drop_snapshots(ORG, child_org)
+
+
+def test_dispatch_context_read_falls_back_when_dispatch_org_unrenderable(monkeypatch):
+    """#4352：批次归属组织不可渲染时，回退子 Issue 组织重建快照，仍返回非空内容。"""
+    child_org = "child-org-4352-c"
+
+    def _render(org_id):
+        return _files() if org_id == child_org else {}
+
+    monkeypatch.setattr("src.domains.mgmt.org_context_repo._render_files", _render)
+    monkeypatch.setattr("src.domains.mgmt.user.org_db.get_org_id_by_repo_key",
+                        lambda repo_key: child_org)
+    dispatch = {"id": 909, "org_id": ORG, "org_issue_number": 1, "status": "running",
+                "plan_json": '{"title": "需求一"}'}
+    targets = [{"repo_key": "gitcode:a/b", "child_issue_number": 7,
+                "status": "running", "pr_number": 0, "error": ""}]
+    _patch_dispatch(monkeypatch, dispatch, targets)
+    try:
+        bundle, status = snap_mod.dispatch_context_read(child_org, 909)
+        assert status == 200, (status, bundle)
+        assert bundle["snapshot_org_id"] == child_org
+        assert "org-context/rules.md" in bundle["files"]
+    finally:
+        _drop_snapshots(ORG, child_org)

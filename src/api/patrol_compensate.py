@@ -32,6 +32,8 @@ from src.kernel.issue_ident import (
     native_issue_number, is_native_issue_ident,
 )  # Issue #3055
 
+from src.api.watchdog_redispatch_guard import CONTEXT_EMPTY_REASON
+
 from src.api.pipeline_constants import (
     PAUSED_ISSUE_STATUSES,
     TARGET_SOURCE_LEGACY_TEXT,
@@ -170,6 +172,40 @@ class RecheckHandler(Handler):
             _set_finding(ctx.finding_id, "false_positive", f"issue 已终态（{_term}），用户已收敛，不补")
             ctx.verdict, ctx.action_meta = "false_positive", f"终检 issue 终态命中（{_term}）"
             return False
+        # Issue #4334：watchdog 重派前强制校验最新 pipeline 终态与外部阻塞标记。
+        # issue_terminal 只看 issue.status/stage；qa 双轮通过但 stage 未落终态的单
+        # （#3888 场景）必须由 pipeline 段判定补齐，命中即跳过并记录判据来源。
+        # Spec 范围限定 watchdog 重派 coding：仅 target=coding 才进入预检，
+        # 且必须带上 Issue 标签以校验 external-block（QA 复审 Spec/Standards）。
+        if str(ctx.target_agent or "").strip().lower() == "coding":
+            try:
+                from src.api.watchdog_redispatch_guard import (
+                    resolve_pipeline_terminal_state, record_redispatch_skip,
+                    load_issue_labels, PIPELINE_TERMINAL_REASON,
+                )
+                _labels = load_issue_labels(ctx.repo_key, ctx.issue_id or "")
+                _pipeline_term = resolve_pipeline_terminal_state(
+                    ctx.repo_key, ctx.issue_id or "",
+                    {"target_agent": ctx.target_agent}, labels=_labels)
+            except Exception as _pge:
+                log.warning(f"[patrol-comp] pipeline terminal precheck failed: {_pge}")
+                _pipeline_term = {}
+            if _pipeline_term.get("terminal"):
+                _detail = (f"target={ctx.target_agent} "
+                           f"criteria={_pipeline_term.get('criteria_source')} "
+                           f"reason={_pipeline_term.get('reason')} "
+                           f"marker={_pipeline_term.get('matched_marker') or ''}")
+                record_redispatch_skip(ctx.repo_key, ctx.issue_id or "",
+                                       ctx.target_agent or "coding",
+                                       PIPELINE_TERMINAL_REASON, _detail)
+                _set_finding(ctx.finding_id, "false_positive",
+                             f"pipeline 已终态（{_pipeline_term.get('reason')}"
+                             f" @ {_pipeline_term.get('criteria_source')}），不补")
+                ctx.verdict = "false_positive"
+                ctx.action_meta = (f"终检 pipeline 终态命中"
+                                   f"（{_pipeline_term.get('reason')}，"
+                                   f"来源 {_pipeline_term.get('criteria_source')}）")
+                return False
         # 终检：任一证据出现 → 误报，放弃补偿
         if _p.l1_event_exists(ctx.repo_key, ctx.issue_id, ctx.completed_at, ctx.target_agent):
             _set_finding(ctx.finding_id, "false_positive", "终检 L1 命中（交棒已发生，入库慢）")
@@ -289,6 +325,43 @@ class ModeHandler(Handler):
             ctx.mode_payload["carried_context"] = {}
         return True
 
+# B2 round-4: the compensated redispatch payload is persisted by
+# src/domains/runtime/routes/webhook.py with context[:500] (its DB-side
+# cap, 5 call sites). BOTH context assembly paths here must therefore
+# bound the conclusion snippet by that cap minus the prefix actually
+# built at assembly time — computed dynamically at the assembly point,
+# never a second guessed constant. Calibration evidence (QA round 3):
+# typical marker patrol:{task_id}:{ISO8601} plus the fixed wording makes
+# the prefix ≈128 chars, which a static reserve of 110 under-covered.
+_REDISPATCH_CONTEXT_DB_CAP = 500        # webhook.py context[:500] (persisted cap)
+
+
+def _compensate_context(marker: str, task_id: str, agent_type: str,
+                         concl: str, finding_id: str = "") -> str:
+    """Assemble the compensated redispatch context so that its total
+    length never exceeds _REDISPATCH_CONTEXT_DB_CAP — what webhook.py
+    persists — with the conclusion tail intact rather than silently
+    truncated at persistence time."""
+    prefix = (f"巡检器补偿交棒[compensated_by={marker}]：原任务 {task_id}"
+              f"（{agent_type or 'agent'}）已完成但未交下游，按其自报 next_step 补发。")
+    concl_part = (f" 原任务结论：{concl}" if concl else
+                  " 原任务无可读结论（result_text 空），仅按自报 next_step 补发。")
+    tail = f" finding={finding_id}" if finding_id else ""
+    total = len(prefix) + len(concl_part) + len(tail)
+    if total > _REDISPATCH_CONTEXT_DB_CAP:
+        # Trim the conclusion portion first; the prefix and the audit
+        # tail must survive so the event stays attributable.
+        room = _REDISPATCH_CONTEXT_DB_CAP - len(prefix) - len(tail)
+        concl_part = (f" 原任务结论：{concl[:max(0, room - len(' 原任务结论：'))]}…(截断)"
+                      if concl and room > len(" 原任务结论：") else
+                      " 原任务无可读结论（结论超长被截），仅按自报 next_step 补发。")
+        total = len(prefix) + len(concl_part) + len(tail)
+        if total > _REDISPATCH_CONTEXT_DB_CAP:      # last-resort hard cap
+            keep = _REDISPATCH_CONTEXT_DB_CAP - len(prefix) - len(tail)
+            concl_part = concl_part[:max(0, keep)] if keep > 0 else ""
+    return prefix + concl_part + tail
+
+
 def _conclusion_snippet(result_text: str) -> str:
     """评审七轮修正④：结论优先取结构化 conclusion 字段。
 
@@ -384,10 +457,11 @@ class DispatchHandler(Handler):
         # "基于原事件结论继续"指针，补偿不带则下游缺上游结论，等价性不成立。
         # 评审七轮修正④：优先取结构化 conclusion 字段，非整段 JSON。
         _concl = _conclusion_snippet(ctx.result_text)
-        if len(_concl) > 600:
-            _concl = _concl[:600] + "…(截断)"
-        _concl_part = (f" 原任务结论：{_concl}" if _concl else
-                       " 原任务无可读结论（result_text 空），仅按自报 next_step 补发。")
+        # B2 round-4: single assembly path for BOTH branches — the helper
+        # bounds total context length to the webhook persistence cap.
+        _ctx_text = _compensate_context(
+            marker, ctx.task_id, ctx.agent_type or "", _concl,
+            finding_id=ctx.finding_id or "")
         payload = {
             "repository": repository,
             "account": repository.split("/", 1)[0],
@@ -395,13 +469,27 @@ class DispatchHandler(Handler):
             "pr_number": "",
             # context 会被 a2a_endpoint 组装进事件 payload——marker 必须出现在 context
             # 里才能落事件（事件可审计：机器补偿 vs 手工重派可区分）。
-            "context": (f"巡检器补偿交棒[compensated_by={marker}]：原任务 {ctx.task_id}"
-                        f"（{ctx.agent_type or 'agent'}）已完成但未交下游，按其自报 next_step 补发。"
-                        f"{_concl_part} finding={ctx.finding_id}"),
+            "context": _ctx_text,
             "compensated_by": marker,                 # 载荷层冗余标记（调用方可读）
             "idempotency_key": _idem_key,             # 决策 A：规范交棒键（同任务同目标恰好一次）
+            # Issue #4334：显式声明 watchdog 自动重派，供频次上限与审计识别。
+            "redispatch_mode": "watchdog",
+            "redispatch_of": ctx.task_id,
         }
         payload.update(ctx.mode_payload)
+        # Issue #4334：重派必须携带原 context（非空），禁止空 context 覆盖既有产物。
+        # 正常路径 marker/结论本就非空；此处只在异常裁剪后仍为空时兜底回填原任务结论。
+        if not str(payload.get("context") or "").strip():
+            _fallback_ctx = _conclusion_snippet(ctx.result_text)
+            if _fallback_ctx:
+                # B2 round-4: same helper as the main path — same cap.
+                payload["context"] = _compensate_context(
+                    marker, ctx.task_id, ctx.agent_type or "", _fallback_ctx)
+            else:
+                _set_finding(ctx.finding_id, "needs_human",
+                             f"{CONTEXT_EMPTY_REASON}：重派 context 为空且无可回填结论")
+                ctx.verdict, ctx.action_meta = CONTEXT_EMPTY_REASON, "空 context 禁止重派"
+                return False
         try:
             res = await a2a_endpoint(
                 None, A2AHandoffBody(agent=ctx.target_agent, payload=payload,

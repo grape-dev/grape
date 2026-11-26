@@ -411,23 +411,30 @@ def _task_status_map(repo_keys: list[str]) -> dict:
             log.warning(f"issues: load tasks status failed: {e}")
     return out
 
-def _review_point_readonly(repo_keys: list[str], number: str) -> dict:
+def _review_point_readonly(repo_keys: list[str], number: str, issue_id=None) -> dict:
     """Issue #4063：审核点只读投影（review_point.status / review_point.references）。
 
     权威源 = `issue.status`（与 detail.task_status、status get.status 同一行）：
     - 在位（status=pending_review）→ status="pending_review"，references 取在位快照；
     - 非在位 → status=""、references=""（不把已流转审核点的历史参考当在位态暴露）。
     仅读，不写、不触发状态迁移；下游技能据 status 即可幂等判断是否已在位。
+
+    Issue #4024：调用方已知内部主键（issue.id）时传入 `issue_id`，改按该行读取，
+    与 detail.task_status / pipeline.review_status 的单一事实源保持一致——多平台别名行下
+    按 repo_key+number 聚合会取到顺序不定的行，导致同源投影契约破裂。
     """
     from src.kernel.session_manager import db_lock
     placeholders = ",".join("?" * len(repo_keys))
     try:
         with db_lock:
             c = _rt_db.cursor()
-            c.execute(
-                f"SELECT status, review_refs FROM issue "
-                f"WHERE repo_key IN ({placeholders}) AND issue_number=?",
-                repo_keys + [number])
+            if issue_id not in (None, "", 0):
+                c.execute("SELECT status, review_refs FROM issue WHERE id=?", (issue_id,))
+            else:
+                c.execute(
+                    f"SELECT status, review_refs FROM issue "
+                    f"WHERE repo_key IN ({placeholders}) AND issue_number=?",
+                    repo_keys + [number])
             row = c.fetchone()
     except Exception as e:
         log.warning(f"issues: load review_point failed: {e}")
@@ -439,6 +446,52 @@ def _review_point_readonly(repo_keys: list[str], number: str) -> dict:
         "status": "pending_review" if _in_place else "",
         "references": ((row[1] or "") if _in_place else ""),
     }
+
+
+def _issue_stage_status_by_id(issue_id) -> tuple[str, str] | None:
+    """Issue #4024：按内部主键（issue.id）读权威行 `(stage, status)`。
+
+    多平台别名（gitcode/github/…）在同仓可能各有一行，按 repo_key+number 聚合时
+    取值顺序不保证一致；status get / pending-review / detail / pipeline 统一以内部
+    主键行为单一事实源，保证审核点态读回同口径。无行/异常 → None（命中行即使
+    stage/status 为空也返回空串二元组，由调用方成对覆盖，避免混合口径）。
+    """
+    if not issue_id:
+        return None
+    from src.kernel.session_manager import db_lock
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute("SELECT stage, status FROM issue WHERE id=?", (issue_id,))
+            row = c.fetchone()
+        return ((row[0] or "", row[1] or "") if row else None)
+    except Exception as e:
+        log.warning(f"issues: load issue stage/status by id={issue_id} failed: {e}")
+        return None
+
+
+def _issue_internal_id_by_number(repo_keys: list[str], number) -> int | None:
+    """Issue #4024：按 issue number 在跨平台候选键内解析规范内部主键（issue.id）。
+
+    同仓多平台别名行共存时以最小 `issue.id` 为确定性规范行，detail / pipeline
+    复用同一解析结果再按 id 读取审核点态，避免聚合顺序漂移。无行/异常 → None。
+    """
+    if not repo_keys or number in (None, ""):
+        return None
+    placeholders = ",".join("?" * len(repo_keys))
+    from src.kernel.session_manager import db_lock
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute(
+                f"SELECT id FROM issue WHERE repo_key IN ({placeholders}) "
+                f"AND issue_number=? ORDER BY id ASC LIMIT 1",
+                (*repo_keys, str(number)))
+            row = c.fetchone()
+        return (row[0] if row else None)
+    except Exception as e:
+        log.warning(f"issues: resolve internal id for #{number} failed: {e}")
+        return None
 
 def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> dict:
     """仓库内 issue_id → events 列表（seq 升序），带时间格式化。
@@ -815,20 +868,31 @@ def start_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该需求"})
         return {"status": row[1]}
 
-@router.get("/{issue_id}/status", operation_id="issues_status_get", summary="Query issue status (polling)", description="Returns the Issue status with context for CLI 'grape issues wait' polling. Authoritative status is `issue.status` (same row as `issues detail.task_status`); `review_point.status`/`review_point.references` are read-only projections of that row (Issue #4063). CLI availability note (Issue #4026): the `grape issues status get --issue_id` subcommand exists in CLI >= 0.3.4; CLI 0.3.2 does not provide this subcommand.")
+@router.get("/{issue_id}/status", operation_id="issues_status_get", summary="Query issue status (polling)", description="Returns the Issue status with context for CLI 'grape issues wait' polling. Authoritative status is `issue.status` (same row as `issues detail.task_status`); `review_point.status`/`review_point.references` are read-only projections of that row (Issue #4063). Issue #4024: also exposes the write-read unified review-point state via `review_status`, derived from the SAME single source (`issue.status` + `issue.stage`) as `issues pending-review` / `issues detail.pipeline.review_status`, so a pending-review set is immediately observable here (`review_status=pending_review`, never stuck at in_progress). CLI availability note (Issue #4026): the `grape issues status get --issue_id` subcommand exists in CLI >= 0.3.4; CLI 0.3.2 does not provide this subcommand.")
 def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
-    """返回 Issue 当前状态（含 repo/issue 上下文），供 CLI `grape issues wait` 轮询至终态。"""
+    """返回 Issue 当前状态（含 repo/issue 上下文），供 CLI `grape issues wait` 轮询至终态。
+
+    Issue #4024：`status` 保持任务态枚举（active/processing/…/pending_review），
+    另增审核点态字段 `review_status` —— 与 `issues pending-review` 置位落库、
+    `issues detail.pipeline.review_status` 聚合读回共用 `derive_review_status`
+    同一判定（事实源 = 同一行 `issue.status` + `issue.stage`），保证置位响应与
+    立即读回同口径、双 runtime 对账读数一致。
+    """
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = _rt_db.cursor()
         c.execute(
             "SELECT id, status, repo_key, issue_number, title, completed_reason, completed_at, "
-            "review_refs FROM issue WHERE id=?",
+            "review_refs, stage FROM issue WHERE id=?",
             (issue_id,),
         )
         row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
+    # Issue #4024：审核点态读回与置位/详情聚合同源（单一事实源 = 本行 status + stage）
+    from src.api.pipeline_status import derive_review_status
+    _status = (row[1] or "")
+    _stage = (row[8] or "")
     # Issue #2072: 数值形态归一为 int，字母 ident（gitee IKSQ4O）原样透传
     # （与 _query_tasks / 详情 _assemble_issue 同口径，禁止无条件 int() 强转）
     from src.domains.runtime.vcs.api_client import _native_issue_number
@@ -844,6 +908,8 @@ def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api
             "status": "pending_review" if _in_place else "",
             "references": ((row[7] or "") if _in_place else ""),
         },
+        "stage": _stage,
+        "review_status": derive_review_status(_stage, _status),
     }
 
 class _IssueStatusBody(BaseModel):
@@ -1536,6 +1602,11 @@ def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_sess
         _sre_result = {"task_ref": dict(_UNAVAILABLE_TASK_REF),
                        "result_ref": dict(_UNAVAILABLE_RESULT_REF)}
 
+    # Issue #4024：审核点态与 `issues status get` 同源——按 issue.id 成对读取 stage/status，
+    # 避免 issue_state.stage 与 issue.status 混合派生导致 review_status 与读回分歧。
+    _id_pair = _issue_stage_status_by_id(issue_id)
+    _biz_stage, _biz_status = _id_pair if _id_pair is not None else (_current_stage, _issue_task_status)
+
     from src.api.pipeline_status import attach_stall_state, extract_failed_node
     # Issue #2432：失败节点（详细路线图展示失败状态 + 失败节点名，不输出失败原因）
     _failed_node, _failed_node_name = extract_failed_node(nodes)
@@ -1552,12 +1623,15 @@ def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_sess
         "source_issue_number": _source_issue_number,
         "has_cross_scene_handoff": _has_cross_scene,
         # Issue #539: 需求级业务状态（待人工确认等）+ SRE 验收结果引用
-        "issue_stage": _current_stage,
-        "issue_task_status": _issue_task_status,
-        "review_status": derive_review_status(_current_stage, _issue_task_status),
+        # ⚠️ `issue_stage` 是需求级业务态（issue 行原始 stage，空值保留空串供
+        # derive_review_status 判 unknown），与 `current_stage`（流水线推进态，
+        # 来自 issue_state/scene 配置）口径不同，二者不可互相归一/替代。
+        "issue_stage": _biz_stage,
+        "issue_task_status": _biz_status,
+        "review_status": derive_review_status(_biz_stage, _biz_status),
         "sre_result": _sre_result,
     }
-    attach_stall_state(_out, events, _current_stage, _issue_task_status)
+    attach_stall_state(_out, events, _biz_stage, _biz_status)
     return _out
 
 class IssueHandoffBody(BaseModel):
@@ -2021,14 +2095,16 @@ def _session_devops_issue(issue_id: int, user: dict) -> dict:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 缺少仓库作用域"})
     with _dl:
         c = _rt_db.cursor()
-        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue WHERE id=?", (issue_id,))
+        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status, stage "
+                  "FROM issue WHERE id=?", (issue_id,))
         _r = c.fetchone()
     if not _r:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
     if _r[1] and to_repo_key(_r[1]) != to_repo_key(_repo):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
     return {"id": _r[0], "repo_key": _r[1], "issue_number": _r[2], "assignee": _r[3] or "",
-            "user_id": _r[4] or 0, "title": _r[5] or "", "status": _r[6] or ""}
+            "user_id": _r[4] or 0, "title": _r[5] or "", "status": _r[6] or "",
+            "stage": _r[7] or ""}
 
 # ===== Issue #2695（#2695 移植）：pending-review 的 issue_id 前置校验（空/非法 → 400，不再误导性 405/422）=====
 
@@ -2066,7 +2142,8 @@ async def issue_pending_review_empty_id():
 
 @router.post("/{issue_id}/pending-review", operation_id="issues_pending-review",
              summary="Agent declares issue pending_review (阶段审核点)",
-             description="任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。幂等（Issue #725/#4063）：已在位且 review_points/references 未变时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）；审核点**内容变更**时 changed:true 并刷新快照。Issue #4103：回执新增 prior_status（写入前同事务实读状态），与 status（写后实读）成对返回；changed 仅表示本次真实写入（rowcount>0），并发 CAS 未命中时为 false，不重复触发通知。`issue.status` 是权威状态，`issues detail.task_status` 与 `issues status get.status` 均回读同一行（detail 的 `review_point.status` 为其派生只读投影）。非审核事件（issue_comment 等）不驱动 pending_review 流转。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。issue_id 必须是纯数字内部 id（Issue #2695：空/非数字在入口前置返回 400 invalid issue_id，不是 GitCode issue number）。")
+
+             description="任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。幂等（Issue #725/#4063）：已在位且 review_points/references 未变时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）；审核点**内容变更**时 changed:true 并刷新快照。Issue #4103：回执新增 prior_status（写入前同事务实读状态），与 status（写后实读）成对返回；changed 仅表示本次真实写入（rowcount>0），并发 CAS 未命中时为 false，不重复触发通知。`issue.status` 是权威状态，`issues detail.task_status` 与 `issues status get.status` 均回读同一行（detail 的 `review_point.status` 为其派生只读投影）。Issue #4024：响应 `status` 回读落库真值，并携带与 `issues status get` / `issues detail.pipeline.review_status` 同源（`issue.status` + `issue.stage`，`derive_review_status`）的 `review_status`，置位响应与立即读回同口径。非审核事件（issue_comment 等）不驱动 pending_review 流转。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。issue_id 必须是纯数字内部 id（Issue #2695：空/非数字在入口前置返回 400 invalid issue_id，不是 GitCode issue number）。")
 async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                                _issue_id_check: None = Depends(_require_numeric_issue_id),
                                user: dict = Depends(get_current_user_or_api_key)):
@@ -2078,6 +2155,7 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
     if not review_points:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "review_points 必填（本次需审核的内容）"})
     it = _session_devops_issue(issue_id, user)
+
     # Issue #4103：统一在同一事务内实读 prior_status，不再用 it["status"] 旧读做终态
     # 早返回；completed/cancelled 不在可覆盖源状态集合内，函数会写前/写后实读且零写入。
     _refs_for_store = (body.references or "").strip()
@@ -2116,8 +2194,18 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                 body.references or "", it["repo_key"], it["issue_number"], _cfg))
         except Exception as e:
             log.warning(f"Issue pending-review: notify schedule failed: {e}")
+    # Issue #4024：置位响应按内部主键（issue.id）回读落库真值，与 status get /
+    # pipeline.review_status 共用同一行（`issue.status` + `issue.stage`，
+    # derive_review_status），避免 repo_key+number 多别名行读到另一行导致分歧。
+    from src.api.pipeline_status import derive_review_status
+    _persisted_pair = _issue_stage_status_by_id(it["id"])
+    _persisted_status = (_persisted_pair[1] if _persisted_pair is not None
+                         else (status_after or prior_status))
+    _persisted_stage = _persisted_pair[0] if _persisted_pair is not None else it.get("stage", "")
     return {"ok": True, "issue_id": it["id"], "prior_status": prior_status,
-            "status": status_after, "changed": _changed, "idempotent": not _changed}
+            "status": _persisted_status,
+            "review_status": derive_review_status(_persisted_stage, _persisted_status),
+            "changed": _changed, "idempotent": not _changed}
 
 class _ReviewPassBody(BaseModel):
     target: str = "processing"   # processing | done
@@ -3006,6 +3094,24 @@ def get_issue_detail(owner: str, repo: str, number: str,
     from src.api.pipeline_status import (load_issue_business_status, load_segment_task_refs,
                                          enrich_pipeline_business_status, _pipeline_segment_seqs)
     _biz_stage, _biz_status = load_issue_business_status(repo_keys, num)
+    # Issue #4024：已知内部主键时以该行（与 status get 同一行）为审核点态单一事实源，
+    # 消除多平台别名行按 repo_key+number 聚合顺序不一致导致的 task_status /
+    # pipeline.review_status 打架（置位后即读回 pending_review，不滞留 in_progress）。
+    _canonical_id = _issue_internal_id_by_number(repo_keys, num)
+    _id_pair = _issue_stage_status_by_id(_canonical_id)
+    if _id_pair is not None:
+        # 命中规范内部主键行 → stage/status 成对覆盖（不残留聚合行 stage）
+        _id_stage, _id_status = _id_pair
+        _biz_stage, _biz_status = _id_stage, _id_status
+        base["issue_id"] = _canonical_id
+        base["task_status"] = _id_status
+        # Issue #4024：review_point 与同一次读回一同单源化（同一 issue.id 行），
+        # 避免多别名仓 task_status 与 review_point.status 各自命中不同行。
+        base["review_point"] = _review_point_readonly(repo_keys, num, _canonical_id)
+        # Issue #2111/#4024：detail 出口 stage 保持 `or "vod"` 归一（与 _assemble_issue /
+        # /mine 同口径），id 行 stage 为空时不得把已归一值覆盖回空串；仅非空时生效。
+        # 注意 `_biz_stage` 仍保留 id 行原始空串语义（review_status 派生 unknown），不受出口归一影响。
+        base["stage"] = _id_stage or "vod"
     enrich_pipeline_business_status(
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
@@ -3068,6 +3174,12 @@ def get_issue_pipeline(owner: str, repo: str, number: str,
     from src.api.pipeline_status import (load_issue_business_status, load_segment_task_refs,
                                          enrich_pipeline_business_status, _pipeline_segment_seqs)
     _biz_stage, _biz_status = load_issue_business_status(repo_keys, num)
+    # Issue #4024：与 detail 一致，按 number 解析规范内部主键后复用 id 行读审核点态，
+    # 消除多平台别名行下 owner/repo/number pipeline 滞留 in_progress 的分歧。
+    _canonical_id = _issue_internal_id_by_number(repo_keys, num)
+    _id_pair = _issue_stage_status_by_id(_canonical_id)
+    if _id_pair is not None:
+        _biz_stage, _biz_status = _id_pair
     enrich_pipeline_business_status(
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))

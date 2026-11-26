@@ -17948,7 +17948,7 @@
           "issues"
         ],
         "summary": "Query issue status (polling)",
-        "description": "Returns the Issue status with context for CLI 'grape issues wait' polling. Authoritative status is `issue.status` (same row as `issues detail.task_status`); `review_point.status`/`review_point.references` are read-only projections of that row (Issue #4063). CLI availability note (Issue #4026): the `grape issues status get --issue_id` subcommand exists in CLI >= 0.3.4; CLI 0.3.2 does not provide this subcommand.",
+        "description": "Returns the Issue status with context for CLI 'grape issues wait' polling. Authoritative status is `issue.status` (same row as `issues detail.task_status`); `review_point.status`/`review_point.references` are read-only projections of that row (Issue #4063). Issue #4024: also exposes the write-read unified review-point state via `review_status`, derived from the SAME single source (`issue.status` + `issue.stage`) as `issues pending-review` / `issues detail.pipeline.review_status`, so a pending-review set is immediately observable here (`review_status=pending_review`, never stuck at in_progress). CLI availability note (Issue #4026): the `grape issues status get --issue_id` subcommand exists in CLI >= 0.3.4; CLI 0.3.2 does not provide this subcommand.",
         "operationId": "issues_status_get",
         "parameters": [
           {
@@ -18738,7 +18738,7 @@
           "issues"
         ],
         "summary": "Agent declares issue pending_review (阶段审核点)",
-        "description": "任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。幂等（Issue #725/#4063）：已在位且 review_points/references 未变时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）；审核点**内容变更**时 changed:true 并刷新快照。Issue #4103：回执新增 prior_status（写入前同事务实读状态），与 status（写后实读）成对返回；changed 仅表示本次真实写入（rowcount>0），并发 CAS 未命中时为 false，不重复触发通知。`issue.status` 是权威状态，`issues detail.task_status` 与 `issues status get.status` 均回读同一行（detail 的 `review_point.status` 为其派生只读投影）。非审核事件（issue_comment 等）不驱动 pending_review 流转。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。issue_id 必须是纯数字内部 id（Issue #2695：空/非数字在入口前置返回 400 invalid issue_id，不是 GitCode issue number）。",
+        "description": "任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。幂等（Issue #725/#4063）：已在位且 review_points/references 未变时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）；审核点**内容变更**时 changed:true 并刷新快照。Issue #4103：回执新增 prior_status（写入前同事务实读状态），与 status（写后实读）成对返回；changed 仅表示本次真实写入（rowcount>0），并发 CAS 未命中时为 false，不重复触发通知。`issue.status` 是权威状态，`issues detail.task_status` 与 `issues status get.status` 均回读同一行（detail 的 `review_point.status` 为其派生只读投影）。Issue #4024：响应 `status` 回读落库真值，并携带与 `issues status get` / `issues detail.pipeline.review_status` 同源（`issue.status` + `issue.stage`，`derive_review_status`）的 `review_status`，置位响应与立即读回同口径。非审核事件（issue_comment 等）不驱动 pending_review 流转。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。issue_id 必须是纯数字内部 id（Issue #2695：空/非数字在入口前置返回 400 invalid issue_id，不是 GitCode issue number）。",
         "operationId": "issues_pending-review",
         "parameters": [
           {
@@ -36574,6 +36574,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "9aed4c0e5",
-  "x-generated-at": "2026-11-25T12:41:18.326878+00:00"
+  "x-source-commit": "d3b7dbbe1",
+  "x-generated-at": "2026-11-25T15:35:00.538109+00:00"
 }

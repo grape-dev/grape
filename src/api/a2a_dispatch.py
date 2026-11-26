@@ -250,7 +250,8 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             try:
                 from src.api.a2a_terminal_guard import guard_terminal_dispatch
                 _terminal = guard_terminal_dispatch(
-                    repo_key, issue_number, agent_name, _evt_payload)
+                    repo_key, issue_number, agent_name, _evt_payload,
+                    exclude_seq=seq)
             except Exception as _te:
                 # 判定数据源/依赖异常一律放行（与 guard 内部保守放行同口径）。
                 log.warning(f"A2A #2816: terminal guard failed seq={seq}: {_te}")
