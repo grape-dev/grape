@@ -11135,6 +11135,62 @@ register_migration(
 )
 
 
+def _fn_migrate_org_scene_vod_node() -> None:
+    """Issue #2321：存量组织场景首部补 org_vod（幂等）。
+
+    只升级仍等于旧 3 节点模板的场景；2 节点精简模板/用户自定义场景不动。
+    迁移失败必须抛出（执行器约定「抛错=不盖章，下次启动重试」），不吞异常。
+    """
+    if _owned_skip("devops_pipeline_scene", "migrate org scene vod node"):
+        return
+    from src.domains.mgmt import public as _mgmt_public
+
+    _changes = _mgmt_public.migrate_org_scene_vod_node()
+    if _changes:
+        log.info(f"Migrated {len(_changes)} org scene(s) to 4-node (org_vod) template")
+        _audit_ops_event("migrate_org_scene_vod_node", {
+            "migration": "202611260001",
+            "changed": len(_changes),
+            "scenes": _changes,
+        })
+
+
+register_migration(
+    version="202611260001",
+    name="add-org-vod-node-to-existing-org-scenes",
+    kind="safe",
+    fn=_fn_migrate_org_scene_vod_node,
+)
+
+
+def _fn_refresh_official_org_scene_template() -> None:
+    """Issue #2321：存量库刷新 scene_market 官方 org 模板（注册式迁移）。
+
+    老轨 ``_migrate_tables`` 在已盖章库不再执行，模板行会永久停在旧 3 节点；
+    这里由注册式迁移调用，保证升级后市场里的 org 模板也是 4 节点。
+    """
+    if _owned_skip("scene_market", "refresh official org scene template"):
+        return
+    from src.domains.mgmt import public as _mgmt_public
+
+    _pp = os.path.join(_CONFIG_DIR, "pipelines.json")
+    _changed = _mgmt_public.refresh_official_org_scene_template(_pp)
+    if _changed:
+        log.info("Refreshed official org scene template to 4-node pipeline")
+        _audit_ops_event("refresh_official_org_scene_template", {
+            "migration": "202611260002",
+            "changed": _changed,
+        })
+
+
+register_migration(
+    version="202611260002",
+    name="refresh-official-org-scene-template",
+    kind="safe",
+    fn=_fn_refresh_official_org_scene_template,
+)
+
+
 # ===== Issue #2150：组织上下文 + 组织知识库迁移（存量库幂等补建）=====
 def _fn_create_org_context_table() -> None:
     """建 org_context 表 + 查询索引（CREATE IF NOT EXISTS 幂等）。"""
@@ -11721,7 +11777,12 @@ def _fn_add_autopilot_exec_params() -> None:
 
 
 def _fn_seed_org_repo_analyzer_skill() -> None:
-    """注册组织 AI 分析技能（通过 runtime public，避免 api 直写 skill 表）。"""
+    """注册组织 AI 分析技能（通过 runtime public，避免 api 直写 skill 表）。
+
+    命名口径（Issue #2321）：技能展示名是「能力名」，与受管自动化任务名分开维护——
+    自动化任务固定叫「组织仓库地图构建分析」（``org_analysis.managed_task_name``），
+    技能行保留「组织仓库 AI 分析」，避免历史技能行与分类清单被动改名。
+    """
     try:
         from src.domains.runtime import public as _rt_public
 

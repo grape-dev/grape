@@ -372,3 +372,43 @@ def test_create_table_migration_must_carry_post_check(monkeypatch):
 
     monkeypatch.setattr(ds, "_table_present", lambda c, table: True)
     mig.post_check()  # 表在位 → 不抛（盖章放行）
+
+
+def test_failed_migration_fn_is_not_stamped(monkeypatch):
+    """执行器契约（register_migration 第 2 条）：fn 抛错 => 不盖章，下次重试。"""
+    import sqlite3
+
+    from src.api import db_setup as ds
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE grape_t_schema_migrations ("
+        "version TEXT PRIMARY KEY, name TEXT, kind TEXT, applied_at TEXT, "
+        "duration_ms INTEGER DEFAULT 0, checksum TEXT DEFAULT '')")
+    conn.execute(
+        "INSERT INTO grape_t_schema_migrations (version,name,kind,applied_at) "
+        "VALUES ('202610300001','legacy-run-all-migrations','legacy-stamp',"
+        "'2026-10-30 00:00:00')")
+    conn.commit()
+
+    import src.kernel.session_manager as sm
+    monkeypatch.setattr(sm, "db", conn, raising=False)
+    monkeypatch.setattr(ds, "_owned_skip", lambda table, what="": False)
+    monkeypatch.setattr(ds, "filter_migration_registry", lambda registry: list(registry))
+
+    calls = []
+
+    def _boom():
+        calls.append(1)
+        raise RuntimeError("boom")
+
+    mig = ds.Migration(version="209901010001", name="boom",
+                       kind="safe", fn=_boom, domains=("mgmt",))
+    ds._run_migrations_with_conn(conn, registry=[mig], allow_legacy=False)
+
+    assert calls == [1], "迁移 fn 未被执行"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM grape_t_schema_migrations WHERE version=?",
+        ("209901010001",)).fetchone()[0] == 0, \
+        "fn 抛错却盖章 = 版本号盖死、永不重试"
+    conn.close()

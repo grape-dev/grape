@@ -331,6 +331,168 @@ def migrate_org_scene_type() -> None:
                 f"WHERE {legacy} AND {prefix}")
 
 
+_LEGACY_ORG_SCENE_NODE_IDS = ("org_intake", "org_dispatch", "org_aggregate")
+_LEGACY_ORG_SCENE_SKILLS = ("org-intake-cli", "org-dispatch-cli", "org-aggregate-cli")
+
+
+def _is_legacy_org_scene_nodes(nodes) -> bool:
+    """判断节点是否仍是旧的 3 节点组织模板（只升级这一种，不碰自定义场景）。"""
+    if not isinstance(nodes, list) or len(nodes) != 3:
+        return False
+    try:
+        return (
+            tuple(str(n.get("id") or "") for n in nodes) == _LEGACY_ORG_SCENE_NODE_IDS
+            and tuple(str(n.get("skill") or "") for n in nodes) == _LEGACY_ORG_SCENE_SKILLS
+        )
+    except Exception:
+        return False
+
+
+def migrate_org_scene_vod_node() -> list[dict]:
+    """存量组织场景首部补 ``org_vod``（幂等）。
+
+    Issue #2321：4 节点组织模板新增 ``org_vod`` 后，已完成 provisioning 的组织
+    不会重跑 ``create_org_scene``。这里只升级仍等于旧 3 节点模板的场景，避免
+    覆盖用户自定义节点或 2 节点精简模板（``skip`` 含 org_intake）；旧场景名
+    ``组织任务下派 - <org>`` 只在同一守卫命中时改为固定名「组织需求下派」，
+    并同步 ``display_name`` / ``description``，避免前端仍显示旧可见名。
+
+    返回每条实际改写记录的摘要（scene_id / repo_key / 旧名→新名 / 节点数），
+    供启动迁移写审计；不含节点内容。
+    """
+    import json as _json  # noqa: PLC0415
+
+    from src.domains.mgmt.pipeline_config import (  # noqa: PLC0415
+        ORG_SCENE_DESCRIPTION,
+        ORG_SCENE_NODES,
+        _get_scene_columns,
+        fill_scene_nodes_skill_id,
+    )
+
+    cols = _get_scene_columns() or set()
+    has_display = "display_name" in cols
+    has_desc = "description" in cols
+    select_fields = ["id", "scene_id", "repo_key", "name", "nodes_json"]
+    if has_display:
+        select_fields.append("display_name")
+    if has_desc:
+        select_fields.append("description")
+    pos = {name: i for i, name in enumerate(select_fields)}
+
+    vod_node = dict(ORG_SCENE_NODES[0])
+    changes: list[dict] = []
+    touched: list[tuple[str, str]] = []
+    with _mgmt_cursor(write=True) as c:
+        rows = c.execute(
+            "SELECT " + ", ".join(select_fields) +
+            " FROM devops_pipeline_scene WHERE scene_type='org'").fetchall()
+        for row in rows:
+            scene_id = row[pos["scene_id"]]
+            repo_key = row[pos["repo_key"]]
+            name = row[pos["name"]]
+            try:
+                nodes = _json.loads(row[pos["nodes_json"]] or "[]")
+            except Exception:
+                continue
+            if not isinstance(nodes, list) or not _is_legacy_org_scene_nodes(nodes):
+                continue
+            old_name = str(name or "")
+            old_len = len(nodes)
+            nodes = fill_scene_nodes_skill_id(
+                [dict(vod_node)] + nodes, repo_key=str(repo_key or ""))
+            new_name = ("组织需求下派" if old_name.startswith("组织任务下派")
+                        else old_name)
+            old_display = (str(row[pos["display_name"]] or "") if has_display
+                           else old_name) or old_name
+            new_display = ("组织需求下派" if old_display.startswith("组织任务下派")
+                           else old_display)
+            old_desc = (str(row[pos["description"]] or "") if has_desc else "")
+            new_desc = (ORG_SCENE_DESCRIPTION
+                        if old_desc in ("", "组织需求接收、任务下派与结果聚合")
+                        else old_desc)
+            set_parts = ["name=?", "nodes_json=?", "updated_at=datetime('now')"]
+            values: list = [new_name, _json.dumps(nodes, ensure_ascii=False)]
+            if has_display:
+                set_parts.append("display_name=?")
+                values.append(new_display)
+            if has_desc:
+                set_parts.append("description=?")
+                values.append(new_desc)
+            c.execute(
+                "UPDATE devops_pipeline_scene SET " + ", ".join(set_parts) +
+                " WHERE id=?", tuple(values + [row[pos["id"]]]),
+            )
+            changes.append({
+                "scene_id": str(scene_id or ""),
+                "repo_key": str(repo_key or ""),
+                "old_name": old_name,
+                "new_name": new_name,
+                "old_display_name": old_display,
+                "new_display_name": new_display,
+                "nodes_before": old_len,
+                "nodes_after": len(nodes),
+            })
+            touched.append((str(scene_id or ""), str(repo_key or "")))
+    if touched:
+        try:
+            from src.domains.mgmt.pipeline_config import invalidate_scene_cache  # noqa: PLC0415
+            for scene_id, repo_key in touched:
+                invalidate_scene_cache(scene_id, repo_key)
+        except Exception:
+            pass
+    return changes
+
+
+def refresh_official_org_scene_template(pipelines_path: str) -> int:
+    """刷新 ``scene_market`` 中的官方组织模板行（幂等，注册式迁移专用）。
+
+    Issue #2321：原 ``seed_official_scene_market`` 只在老轨首跑执行，存量库不会
+    再调用，导致 ``name='org'`` 的行永久停在旧 3 节点模板。此函数由注册式迁移
+    调用；不存在该行时补插，存在时仅在内容变化时更新。
+    """
+    import json as _json  # noqa: PLC0415
+    import os as _os  # noqa: PLC0415
+
+    if not _os.path.exists(pipelines_path):
+        return 0
+    with open(pipelines_path, "r", encoding="utf-8") as fh:
+        data = _json.load(fh)
+    scene = (data.get("scenes") or {}).get("org") or {}
+    if not scene:
+        return 0
+    nodes = _json.dumps(scene.get("nodes", []), ensure_ascii=False)
+    display = scene.get("name", "org")
+    desc = scene.get("description", "")
+    onb = scene.get("onboarding", "repo-onboarding")
+    with _mgmt_cursor(write=True) as c:
+        row = c.execute(
+            "SELECT id, display_name, description, nodes_json, onboarding, scope "
+            "FROM scene_market WHERE name='org' AND source='official' "
+            "AND COALESCE(repo_key,'')='' AND COALESCE(source_user_id,'0')='0' "
+            "ORDER BY CASE WHEN scope='org' THEN 0 ELSE 1 END, id LIMIT 1"
+        ).fetchone()
+        if row:
+            cur = (str(row[1] or ""), str(row[2] or ""), str(row[3] or ""),
+                   str(row[4] or ""), str(row[5] or ""))
+            if cur == (display, desc, nodes, onb, "org"):
+                return 0
+            c.execute(
+                "UPDATE scene_market SET scope='org', display_name=?, description=?, "
+                "nodes_json=?, onboarding=?, updated_at=datetime('now') WHERE id=?",
+                (display, desc, nodes, onb, row[0]),
+            )
+            return 1
+        c.execute(
+            "INSERT OR IGNORE INTO scene_market "
+            "(name, display_name, version, description, market_description, "
+            "category_id, is_featured, like_count, source, source_user_id, "
+            "recommended_template, nodes_json, onboarding, is_active, scope) "
+            "VALUES ('org', ?, '1.0.0', '', ?, 1, 0, 0, 'official', 0, '', ?, ?, 1, 'org')",
+            (display, display, nodes, onb),
+        )
+        return 1
+
+
 def seed_official_scene_market(pipelines_path: str) -> int:
     """从 configs/pipelines.json 增量种入官方场景模板（mgmt 域内）。"""
     import json as _json

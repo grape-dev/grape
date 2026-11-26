@@ -53,6 +53,19 @@ ORG_NODES = [
 ]
 
 
+def _with_vod_node(nodes):
+    """在旧 3 节点模板前补 org_vod，模拟 Issue #2321 的 4 节点组织场景。"""
+    vod = {
+        "id": "org_vod", "tag": "vod", "skill": "vod-cli",
+        "mode": "emit", "next": "org_intake", "handoff": "a2a",
+        "skip": [], "enabled": True, "auto_advance": True, "engine_runtime_ids": [],
+    }
+    return [dict(vod)] + [dict(n) for n in nodes]
+
+
+ORG_NODES_V4 = _with_vod_node(ORG_NODES)
+
+
 def _patch_scene(monkeypatch, nodes=None, scene_id=SCENE_ID, scene_type="org"):
     cfg = {"scene_id": scene_id, "scene_type": scene_type, "nodes": nodes or ORG_NODES}
 
@@ -105,6 +118,37 @@ def test_org_scene_entry_role_bootstraps_first_node(monkeypatch):
     # 普通场景保持 vod 启动
     _patch_scene(monkeypatch, nodes=ORG_NODES, scene_type="standard")
     assert _org_scene_entry_role(NORMAL_REPO, evt) == ""
+
+
+def test_org_scene_entry_role_routes_vod_for_four_node_template(monkeypatch):
+    """Issue #2321：4 节点组织场景首节点是 org_vod，入口必须路由 vod。"""
+    _patch_scene(monkeypatch, nodes=ORG_NODES_V4)
+
+    evt = {"issue_id": "#42", "payload": {"issue": {"number": 42}}}
+    assert _org_scene_entry_role(ORG_REPO, evt) == "vod"
+
+    cfg = {"scene_id": SCENE_ID, "scene_type": "org", "nodes": ORG_NODES_V4}
+    monkeypatch.setattr(pipeline_config, "get_pipeline_config", lambda *a, **kw: cfg)
+    monkeypatch.setattr(session_store, "get_issue_scene", lambda *a, **kw: (SCENE_ID, 0))
+    agent, scene, is_recommend = _resolve_issue_opened_agent(
+        ORG_REPO, evt, attempts=1, interval=0)
+    assert agent == "vod"
+    assert scene == SCENE_ID
+    assert is_recommend is False
+
+
+def test_org_four_node_transition_vod_to_intake(monkeypatch):
+    """Issue #2321：org_vod 完成后自动推进到 org_intake（tag=issue）。"""
+    _patch_scene(monkeypatch, nodes=ORG_NODES_V4)
+
+    tr = pipeline_config.get_pipeline_transition(SCENE_ID, "vod", repo_key=ORG_REPO)
+    assert tr["node"]["id"] == "org_vod"
+    assert tr["next_node"]["id"] == "org_intake"
+    assert tr["next_role"] == "issue"
+
+    tr2 = pipeline_config.get_pipeline_transition(SCENE_ID, "issue", repo_key=ORG_REPO)
+    assert tr2["node"]["id"] == "org_intake"
+    assert tr2["next_role"] == "coding"
 
 
 def test_issue_opened_waits_scene_binding_before_org_routing(monkeypatch):
@@ -474,7 +518,7 @@ def test_org_template_resolves_for_org_repo(monkeypatch):
 
     assert cfg is not None
     assert [n["id"] for n in cfg["nodes"]] == [
-        "org_intake", "org_dispatch", "org_aggregate",
+        "org_vod", "org_intake", "org_dispatch", "org_aggregate",
     ]
 
 

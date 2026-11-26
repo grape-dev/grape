@@ -1,4 +1,4 @@
-"""组织仓库 AI 分析编排（Issue #1820 后续增强）。
+"""组织仓库地图构建分析编排（Issue #1820 后续增强）。
 
 职责：
 - 关联仓库后触发一次 AI 分析（单仓）；
@@ -6,7 +6,7 @@
 - 组织下派前读取分析结果（由 org_repo_map.analysis_context 提供）。
 
 执行载体复用 Autopilot 定时任务：
-- 每个组织在组织仓库上有一条受管任务（name=组织仓库 AI 分析 - <组织名>）；
+- 每个组织在组织仓库上有一条受管任务（name=组织仓库地图构建分析，固定名称不带组织后缀）；
 - 单仓/全量通过 trigger_task_now_with_params 传入本次运行参数；
 - 实际 AI 推理由运行时引擎执行 ``org-repo-analyzer`` 技能完成，结果通过
   ``POST /api/orgs/{id}/repo-map/{repo_key}/ai-result`` 回传。
@@ -68,10 +68,13 @@ def _safe_slug(value: str) -> str:
     return slug[:64] or "org"
 
 
-def managed_task_name(org: dict) -> str:
-    """自动化任务的用户可读默认名（不再用 __org_analysis__ 内部前缀）。"""
-    label = str(org.get("name") or org.get("slug") or org.get("id") or "组织").strip()
-    return (f"组织仓库 AI 分析 - {label}")[:100]
+def managed_task_name(_org: dict | None = None) -> str:
+    """自动化任务的用户可读默认名（固定名称，不再拼接组织名后缀）。
+
+    任务识别仍走 ``repo_key + skill_name``（见 ``ensure_analysis_task`` 的查询），
+    ``name`` 仅用于展示，不承担唯一性。
+    """
+    return "组织仓库地图构建分析"
 
 
 def _next_run(cron_expr: str) -> str:

@@ -138,16 +138,18 @@ def test_org_scene_nodes_are_complete_and_dispatchable():
     from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
 
     assert [n["id"] for n in ORG_SCENE_NODES] == [
-        "org_intake", "org_dispatch", "org_aggregate",
+        "org_vod", "org_intake", "org_dispatch", "org_aggregate",
     ]
-    assert [n["tag"] for n in ORG_SCENE_NODES] == ["issue", "coding", "qa"]
+    assert [n["tag"] for n in ORG_SCENE_NODES] == ["vod", "issue", "coding", "qa"]
     assert [n["skill"] for n in ORG_SCENE_NODES] == [
-        "org-intake-cli", "org-dispatch-cli", "org-aggregate-cli",
+        "vod-cli", "org-intake-cli", "org-dispatch-cli", "org-aggregate-cli",
     ]
     assert [n["next"] for n in ORG_SCENE_NODES] == [
-        "org_dispatch", "org_aggregate", "done",
+        "org_intake", "org_dispatch", "org_aggregate", "done",
     ]
-    assert [n["handoff"] for n in ORG_SCENE_NODES] == ["a2a", "a2a", "complete"]
+    assert [n["handoff"] for n in ORG_SCENE_NODES] == [
+        "a2a", "a2a", "a2a", "complete",
+    ]
     assert all(_required_node_fields() <= set(n) for n in ORG_SCENE_NODES)
     assert all(n["mode"] == "emit" for n in ORG_SCENE_NODES)
     assert all(n["skip"] == [] for n in ORG_SCENE_NODES)
@@ -174,7 +176,7 @@ def test_pipelines_org_matches_code_constant_and_is_unbound():
     invalidate_scene_cache("org", "")
     cfg = get_pipeline_config("org")
     assert cfg["nodes"] == ORG_SCENE_NODES
-    for tag in ("issue", "coding", "qa"):
+    for tag in ("vod", "issue", "coding", "qa"):
         binding = get_scene_engine_binding("org", tag)
         assert binding["status"] == "unbound"
         assert binding["engine_ids"] == []
@@ -476,6 +478,146 @@ def test_existing_org_scene_type_is_migrated():
     assert rows[ORG_SCENE_ID] == "org"
     assert rows[legacy_prefix_scene] == "org"
     assert rows[NORMAL_SCENE_ID] == "standard", "普通自定义场景不得被误升级"
+
+
+def test_legacy_org_scene_gets_vod_node_migration(monkeypatch):
+    """Issue #2321：存量 3 节点组织场景启动迁移为 4 节点（幂等 + 审计摘要）。"""
+    from src.api import db_setup
+    from src.api.db_setup import _fn_migrate_org_scene_vod_node
+    from src.api.pipeline_config import ORG_SCENE_NODES, invalidate_scene_cache
+
+    audits = []
+    monkeypatch.setattr(
+        db_setup, "_audit_ops_event",
+        lambda event, detail: audits.append((event, detail)),
+    )
+
+    _seed_org_scene()
+    legacy_nodes = [dict(n) for n in ORG_SCENE_NODES[1:]]
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE devops_pipeline_scene SET nodes_json=?, name=?, "
+            "display_name=?, description=? WHERE scene_id=? AND repo_key=?",
+            (json.dumps(legacy_nodes, ensure_ascii=False),
+             "组织任务下派 - Issue 2118 Org",
+             "组织任务下派 - Issue 2118 Org",
+             "组织需求接收、任务下派与结果聚合",
+             ORG_SCENE_ID, ORG_REPO_KEY),
+        )
+        db.commit()
+    invalidate_scene_cache(ORG_SCENE_ID, ORG_REPO_KEY)
+
+    _fn_migrate_org_scene_vod_node()
+    invalidate_scene_cache(ORG_SCENE_ID, ORG_REPO_KEY)
+
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT nodes_json, name, display_name, description "
+            "FROM devops_pipeline_scene "
+            "WHERE scene_id=? AND repo_key=?", (ORG_SCENE_ID, ORG_REPO_KEY)).fetchone()
+    nodes = json.loads(row[0])
+    assert [n["id"] for n in nodes] == [
+        "org_vod", "org_intake", "org_dispatch", "org_aggregate",
+    ]
+    assert row[1] == "组织需求下派"
+    assert row[2] == "组织需求下派", "display_name 必须同步，避免前端仍显示旧名"
+    assert row[3] == "组织需求分析、接收、任务下派与结果聚合"
+
+    assert audits and audits[0][0] == "migrate_org_scene_vod_node"
+    audited = audits[0][1]["scenes"]
+    assert any(
+        s["scene_id"] == ORG_SCENE_ID
+        and s["nodes_before"] == 3
+        and s["nodes_after"] == 4
+        and s["old_name"] == "组织任务下派 - Issue 2118 Org"
+        and s["new_name"] == "组织需求下派"
+        and s["old_display_name"] == "组织任务下派 - Issue 2118 Org"
+        and s["new_display_name"] == "组织需求下派"
+        for s in audited
+    )
+
+    _first_audits = len(audits)
+    _fn_migrate_org_scene_vod_node()
+    with db_lock:
+        c = db.cursor()
+        again = json.loads(c.execute(
+            "SELECT nodes_json FROM devops_pipeline_scene "
+            "WHERE scene_id=? AND repo_key=?",
+            (ORG_SCENE_ID, ORG_REPO_KEY)).fetchone()[0])
+    assert [n["id"] for n in again] == [
+        "org_vod", "org_intake", "org_dispatch", "org_aggregate",
+    ], "重复执行不得重复插入 org_vod"
+    assert len(audits) == _first_audits, "无变更时不应重复写审计"
+
+
+def test_vod_migration_skips_custom_org_scene_nodes():
+    """Issue #2321：自定义/精简组织场景不能被迁移覆盖。"""
+    from src.api.db_setup import _fn_migrate_org_scene_vod_node
+    from src.api.pipeline_config import create_custom_scene, invalidate_scene_cache
+
+    custom_scene_id = "custom-org-custom-2118"
+    custom_nodes = [
+        {"id": "org_dispatch", "tag": "coding", "skill": "org-dispatch-cli",
+         "mode": "emit", "next": "org_aggregate", "handoff": "a2a",
+         "skip": ["org_intake"], "enabled": True, "engine_runtime_ids": []},
+        {"id": "org_aggregate", "tag": "qa", "skill": "org-aggregate-cli",
+         "mode": "emit", "next": "done", "handoff": "complete",
+         "skip": [], "enabled": True, "engine_runtime_ids": []},
+    ]
+    create_custom_scene(
+        scene_id=custom_scene_id,
+        name="组织任务下派 - custom",
+        description="custom",
+        repo_key=ORG_REPO_KEY,
+        nodes=custom_nodes,
+        scene_type="org",
+    )
+    invalidate_scene_cache(custom_scene_id, ORG_REPO_KEY)
+
+    _fn_migrate_org_scene_vod_node()
+    invalidate_scene_cache(custom_scene_id, ORG_REPO_KEY)
+
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT nodes_json, name FROM devops_pipeline_scene "
+            "WHERE scene_id=? AND repo_key=?", (custom_scene_id, ORG_REPO_KEY)).fetchone()
+    assert json.loads(row[0]) == custom_nodes
+    assert row[1] == "组织任务下派 - custom", \
+        "节点未命中旧 3 节点模板时不得单独改名"
+
+
+def test_official_org_template_refresh_migration_updates_existing_org_row():
+    """Issue #2321：注册式迁移 202611260002 刷新存量官方 org 模板行。"""
+    from src.api import db_setup
+    from src.api.pipeline_config import ORG_SCENE_NODES
+
+    mig = next(m for m in db_setup._MIGRATIONS
+               if m.version == "202611260002")
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM scene_market WHERE name='org' AND source='official'")
+        c.execute(
+            "INSERT INTO scene_market "
+            "(name, display_name, description, category_id, source, nodes_json, "
+            "onboarding, is_active, scope) "
+            "VALUES ('org', 'old name', '', 1, 'official', ?, 'repo-onboarding', 1, 'org')",
+            (json.dumps([dict(n) for n in ORG_SCENE_NODES[1:]], ensure_ascii=False),),
+        )
+        db.commit()
+
+    mig.fn()
+
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT nodes_json, display_name, scope FROM scene_market "
+            "WHERE name='org' AND source='official'").fetchone()
+    assert json.loads(row[0]) == ORG_SCENE_NODES
+    assert row[1] == "组织需求下派"
+    assert row[2] == "org"
 
 
 def test_create_issue_route_rejects_org_repo_with_standard_scene(monkeypatch):

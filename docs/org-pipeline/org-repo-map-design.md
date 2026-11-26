@@ -405,7 +405,7 @@ order-service
 | 组织与成员 | `organization` / `org_member`，`src/domains/mgmt/user/org_db.py` | 组织归属、角色鉴权 |
 | 组织关联仓库 | `managed_repos.org_id`、`is_org_repo`；`list_org_repos()` / `bind_managed_repo_to_org()` | 关联仓库清单、绑定/解绑事件 |
 | 组织仓库与组织场景 | `organization.org_repo_key/org_scene_id`；`org_provision.py`；`pipeline_config.create_org_scene()` | 组织中枢仓库、组织流水线 |
-| 组织流水线 | `configs/pipelines.json` 的 `org` 场景：`org_intake → org_dispatch → org_aggregate` | 下派入口 |
+| 组织流水线 | `configs/pipelines.json` 的 `org` 场景：`org_vod → org_intake → org_dispatch → org_aggregate` | 下派入口 |
 | 组织需求 | 组织仓库里的真实 Issue；`issues_center` / `event_pipeline` | 评论、状态、任务中心、审计 |
 | 跨仓下派 | `org_dispatch.create_dispatch()`；`org_dispatch_target`；`_create_child_issue()` | 建子 Issue、绑场景、触发目标流水线 |
 | 目标场景解析 | `org_dispatch._resolve_target_scene()` | 显式场景 → 仓库默认场景 → 唯一可用场景 |
@@ -1212,7 +1212,7 @@ description = item.get("task_brief") or dispatch_description
 现有组织流水线：
 
 ```text
-org_intake → org_dispatch → (等待子任务终态) → org_aggregate
+org_vod → org_intake → org_dispatch → (等待子任务终态) → org_aggregate
 ```
 
 新增分支：

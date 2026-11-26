@@ -183,7 +183,7 @@ def test_manual_bind_success_writes_repo_scene_and_audit(client):
         ).fetchone()
     assert scene and scene[1] == org_id
     nodes = json.loads(scene[0])
-    assert [n["id"] for n in nodes] == ["org_intake", "org_dispatch", "org_aggregate"]
+    assert [n["id"] for n in nodes] == ["org_vod", "org_intake", "org_dispatch", "org_aggregate"]
 
     audits = _audit_rows(MANAGED_REPO_KEY)
     assert len(audits) == 1

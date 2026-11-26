@@ -29,6 +29,7 @@ python3 -m pytest tests/runtime/test_issue_2118_org_pipeline_flow.py tests/contr
 
 | id | tag | skill | mode | next | handoff |
 |---|---|---|---|---|---|
+| `org_vod` | `vod` | `vod-cli` | `emit` | `org_intake` | `a2a` |
 | `org_intake` | `issue` | `org-intake-cli` | `emit` | `org_dispatch` | `a2a` |
 | `org_dispatch` | `coding` | `org-dispatch-cli` | `emit` | `org_aggregate` | `a2a` |
 | `org_aggregate` | `qa` | `org-aggregate-cli` | `emit` | `done` | `complete` |

@@ -2357,8 +2357,8 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
 def _org_scene_entry_role(repo_key: str, evt: dict, scene_id: str = "") -> str:
     """Issue #2118：组织场景的入口节点角色（issue_opened 启动用）。
 
-    issue_opened 默认路由 vod；组织场景没有 vod 节点，首节点是
-    org_intake(tag=issue)。已绑定组织场景的 Issue 必须按场景首节点启动，
+    issue_opened 默认路由 vod；组织场景首节点可能是 org_vod(tag=vod)
+    或 org_intake(tag=issue)。已绑定组织场景的 Issue 必须按场景首节点启动，
     否则会被 not_in_scene 静默拦截，组织流水线永不开始。
     非组织场景/无场景/解析异常返回空串（保持原 vod 行为）。
 

@@ -5,7 +5,7 @@ from src.domains.runtime.engine import scheduler
 
 def _task(**overrides):
     task = {
-        "name": "组织仓库 AI 分析 - demo",
+        "name": "组织仓库地图构建分析",
         "instruction": "分析组织仓库",
         "skill_name": "",
         "custom_fields": "",

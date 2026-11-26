@@ -1,4 +1,4 @@
-"""组织仓库 AI 分析编排（单仓/全量/每日任务/输出分支命名）。"""
+"""组织仓库地图构建分析编排（单仓/全量/每日任务/输出分支命名）。"""
 from __future__ import annotations
 
 import json
@@ -212,7 +212,7 @@ def test_managed_task_name_is_user_readable():
     from src.domains.mgmt.org_analysis import managed_task_name
 
     name = managed_task_name({"name": "grape-gitcode", "slug": "grape-gitcode"})
-    assert name == "组织仓库 AI 分析 - grape-gitcode"
+    assert name == "组织仓库地图构建分析"
     assert "__org_analysis__" not in name
 
 

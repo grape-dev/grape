@@ -390,8 +390,8 @@ def _ensure_org_scene(org: dict, repo_key: str, *,
         org_id=str(org["id"] or ""),
         work_branch=work_branch,
     )
-    # 组织仓库默认场景 = 组织场景：保证直接在组织仓库开 Issue 时 issue_opened 能进入
-    # org_intake，而不是回落到 vod/智能推荐。
+    # 组织仓库默认场景 = 组织场景：保证直接在组织仓库开 Issue 时 issue_opened 按
+    # 组织场景首节点（org_vod / org_intake）启动，而不是回落到普通模板。
     try:
         from src.domains.mgmt.user.db import set_repo_scene
 

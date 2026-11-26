@@ -50,7 +50,7 @@
 | 组织节点 id 与 tag 不一致导致 A2A 409 | High | `_scene_node_check`/阶段推进按 id 或 tag 匹配，`_scene_node_order` 同时暴露 id/tag 别名 |
 | 组织技能 sid=0 被建单预校验误拦 | High | `scene_precheck` 在 skill 表未命中时复用 `verify_skill_materializable` 官方包门禁 |
 | 组织技能未交办导致停在 org_intake | High | 三份技能显式 `grape a2a handoff`；complete_task 在 stage 未推进时按 next/handoff 兜底自动交办 |
-| 组织场景 issue_opened 被 vod 路由拦截 | High | 组织场景 issue_opened 按首节点（org_intake/tag=issue）启动，stage 同步初始化 |
+| 组织场景 issue_opened 被 vod 路由拦截 | High | 组织场景 issue_opened 按首节点（org_vod/tag=vod 或 org_intake/tag=issue）启动，stage 同步初始化 |
 | issue_opened 早于 set_issue_scene 到达 → 回落 vod | High | 路由前先等待（3×0.5s）场景绑定落库，再把解析到的 scene_id 传给 org 首节点判定 |
 | org_aggregate 未全终态被提前置 pending_review / 无下一轮 | High | remaining/next_step=a2a-qa 时延迟安排下一轮聚合；达到轮次上限才转待审核 |
 | 自动推进先改 stage 后派发且忽略 failed | High | 先派发并校验 status=ok 且 seq 匹配，成功后才写 stage；失败保持原节点并 `_fail_event` 留痕 |

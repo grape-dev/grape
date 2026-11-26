@@ -810,8 +810,8 @@ def is_node_skipped(scene_id: str, node_id: str, repo_key: str = "") -> bool:
 def node_role(node: dict) -> str:
     """节点对外角色名：tag（阶段/agent_type）优先，缺省回退 id。
 
-    Issue #2118：组织节点 id=org_intake/org_dispatch/org_aggregate，但对外仍复用
-    issue/coding/qa tag。所有阶段的推进、A2A 目标与 pending_review 判定都必须用
+    Issue #2118：组织节点 id=org_vod/org_intake/org_dispatch/org_aggregate，但对外仍复用
+    vod/issue/coding/qa tag。所有阶段的推进、A2A 目标与 pending_review 判定都必须用
     tag 作为角色键，不能只按 id 比对。
     """
     if not isinstance(node, dict):
@@ -855,7 +855,22 @@ def get_pipeline_transition(scene_id: str, agent_role: str,
 
 # ===== Scene CRUD (for custom scenes) =====
 
+ORG_SCENE_DESCRIPTION = "组织需求分析、接收、任务下派与结果聚合"
+
 ORG_SCENE_NODES = [
+    {
+        "id": "org_vod",
+        "tag": "vod",
+        "skill": "vod-cli",
+        "name": "组织需求分析",
+        "mode": "emit",
+        "next": "org_intake",
+        "handoff": "a2a",
+        "skip": [],
+        "enabled": True,
+        "auto_advance": True,
+        "engine_runtime_ids": [],
+    },
     {
         "id": "org_intake",
         "tag": "issue",
@@ -1001,8 +1016,8 @@ def create_org_scene(scene_id: str, org_name: str, repo_key: str,
     """
     db_id = create_custom_scene(
         scene_id=scene_id,
-        name=f"组织任务下派 - {org_name or 'Organization'}",
-        description="组织需求接收、任务下派与结果聚合",
+        name="组织需求下派",
+        description=ORG_SCENE_DESCRIPTION,
         repo_key=repo_key,
         nodes=ORG_SCENE_NODES,
         onboarding="repo-onboarding",

@@ -1,9 +1,22 @@
 {
   "scenes": {
     "org": {
-      "name": "组织任务下派",
+      "name": "组织需求下派",
       "scene_type": "org",
       "nodes": [
+        {
+          "id": "org_vod",
+          "tag": "vod",
+          "skill": "vod-cli",
+          "name": "组织需求分析",
+          "mode": "emit",
+          "next": "org_intake",
+          "handoff": "a2a",
+          "skip": [],
+          "enabled": true,
+          "auto_advance": true,
+          "engine_runtime_ids": []
+        },
         {
           "id": "org_intake",
           "tag": "issue",
