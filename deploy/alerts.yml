@@ -413,25 +413,51 @@ groups:
       # Issue #4445：节点 /tmp（tmpfs，占用即钉住物理内存）水位告警。
       # 24h 内已有 3 台节点可用字节见底（issue-001-0001/0002、coding-001-0002），
       # 且同批节点 24h OOM 达 132 次；>80% 预警、>90% 立即处置（清理残留/迁移临时根）。
-      # 取证：df -h /tmp；du -sh /tmp/* | sort -h | tail -20；
-      # 检查 grape_tmp_janitor_removed_items_total / _bytes_total 是否在增长。
+      #
+      # 两条数据通路都要告警，覆盖不同部署形态：
+      #   ① grape_node_tmp_used_ratio{host}：worker 心跳上报的 tmp_percent（runtime_credentials），
+      #      由控制面 scrape 采样。远端 worker 最小依赖不含 prometheus_client、agent 进程也
+      #      没有 /metrics 端点，心跳是**唯一**可用通路（同 Issue #3773 的 acp_state_db_*）。
+      #   ② grape_tmpfs_used_ratio{mount="/tmp"}：控制面进程本机 /tmp（scrape 时 disk_usage，
+      #      只对装了 prometheus_client 且配了 METRICS_ADDR 的进程生效）。
+      #   ① 的 host = worker device_name；② 的 instance = 控制面进程。
+      # 取证：df -h /tmp；du -sh /tmp/* | sort -h | tail -20；看
+      # grape_node_tmp_janitor_removed_items_total / _bytes_total 是否在增长。
       - alert: GrapeWorkerTmpUsageWarning
+        expr: grape_node_tmp_used_ratio > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker node /tmp (tmpfs) usage above 80% on {{ $labels.host }}"
+          description: "Worker node {{ $labels.host }} reported /tmp usage above 80% for 10 minutes (heartbeat tmp_percent). /tmp is tmpfs, so its occupancy pins physical memory and amplifies OOM risk. Run `df -h /tmp` and `du -sh /tmp/* | sort -h | tail -20` on that node, check grape_node_tmp_janitor_removed_items_total / _bytes_total are advancing, and review long-lived agent temp dirs. See Issue #4445."
+
+      - alert: GrapeWorkerTmpUsageCritical
+        expr: grape_node_tmp_used_ratio > 0.9
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker node /tmp (tmpfs) usage above 90% on {{ $labels.host }}"
+          description: "Worker node {{ $labels.host }} reported /tmp usage above 90% for 5 minutes — available space is below 10%, task temp writes will fail and tmpfs pinning can trigger OOM. Dispatch to this node is refused by the tmp headroom guard. Free space now: `du -sh /tmp/* | sort -h | tail -20`, inspect /tmp/opencode and task-derived qa*/pr*/verify*/venv* dirs, and confirm `SWEEPER_TMP_JANITOR` is not off on that node. See Issue #4445."
+
+      - alert: GrapeHostTmpUsageWarning
         expr: grape_tmpfs_used_ratio{mount="/tmp"} > 0.8
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Node /tmp (tmpfs) usage above 80% on {{ $labels.instance }}"
-          description: "/tmp usage on {{ $labels.instance }} has been above 80% for 10 minutes. /tmp is tmpfs, so its occupancy pins physical memory and amplifies OOM risk. Run `df -h /tmp` and `du -sh /tmp/* | sort -h | tail -20`, check the tmp janitor counters (grape_tmp_janitor_removed_items_total / _bytes_total) are advancing, and review long-lived agent temp dirs. See Issue #4445."
+          summary: "Host /tmp (tmpfs) usage above 80% on {{ $labels.instance }}"
+          description: "/tmp usage of the metrics-emitting host itself has been above 80% for 10 minutes (grape_tmpfs_used_ratio, scrape-time disk_usage). Run `df -h /tmp` and `du -sh /tmp/* | sort -h | tail -20`, check grape_tmp_janitor_removed_items_total / _bytes_total are advancing, and review long-lived agent temp dirs. See Issue #4445."
 
-      - alert: GrapeWorkerTmpUsageCritical
+      - alert: GrapeHostTmpUsageCritical
         expr: grape_tmpfs_used_ratio{mount="/tmp"} > 0.9
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "Node /tmp (tmpfs) usage above 90% on {{ $labels.instance }}"
-          description: "/tmp usage on {{ $labels.instance }} has been above 90% for 5 minutes — available space is below 10%, task temp writes will fail and tmpfs pinning can trigger OOM. Dispatch to this node is refused by the tmp headroom guard. Free space now: `du -sh /tmp/* | sort -h | tail -20`, inspect /tmp/opencode and task-derived qa*/pr*/verify*/venv* dirs, and confirm `SWEEPER_TMP_JANITOR` is not off. See Issue #4445."
+          summary: "Host /tmp (tmpfs) usage above 90% on {{ $labels.instance }}"
+          description: "/tmp usage of the metrics-emitting host itself has been above 90% for 5 minutes — available space is below 10%, task temp writes will fail and tmpfs pinning can trigger OOM. Free space now: `du -sh /tmp/* | sort -h | tail -20`, inspect /tmp/opencode and task-derived qa*/pr*/verify*/venv* dirs, and confirm `SWEEPER_TMP_JANITOR` is not off. See Issue #4445."
 
       # Issue #3750：同仓库 webhook 验签 token 不匹配速率 > 10/min 且持续 5 分钟。
       # 被 403 丢弃的 webhook **不会重放**（Push Hook 丢失 → PR 关联 / push 触发 / 巡检 pipeline

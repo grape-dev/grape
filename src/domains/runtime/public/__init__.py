@@ -3418,6 +3418,14 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT device_name, name, acp_state_db_bytes, acp_state_db_cleanup_counts,"
         " acp_state_db_bytes_freed_total, acp_resume_skipped_total"
         " FROM runtime_credentials WHERE status != 'revoked'"),
+    # ── 节点 /tmp 水位与 janitor 清理量（insight/observability/tmp_usage.py；Issue #4445）──
+    # worker 最小依赖不含 prometheus_client，远端 agent 进程也没有 /metrics 端点 —— 心跳
+    # 落库是唯一通路；控制面 scrape 时按 host 采样并转成 grape_node_tmp_* 序列（同 #3773）。
+    # `tmp_percent` 是百分数（0~100），比率换算在 insight 侧做，本域只给原始列。
+    "runtime_credentials_tmp_rows": (
+        "SELECT device_name, name, tmp_percent, tmp_janitor_removed_items_total,"
+        " tmp_janitor_removed_bytes_total"
+        " FROM runtime_credentials WHERE status != 'revoked'"),
     "agent_task_activity_rows": (
         "SELECT repo_key, created_at, started_at, completed_at FROM agent_tasks"
         " WHERE repo_key IS NOT NULL AND repo_key != ''"),

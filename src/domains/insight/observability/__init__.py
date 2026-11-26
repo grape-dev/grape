@@ -293,6 +293,17 @@ def start_metrics_server():
         return
     if not metrics_enabled():
         return
+    if not _PROMETHEUS_AVAILABLE:
+        # Issue #4445 QA Required：worker 最小依赖不含 prometheus_client，此时 registry 里
+        # 只有 no-op 桩、generate_latest() 恒返回空 body —— /metrics 会「200 但零序列」，
+        # 是静默失效（水位/janitor 告警永不触发却毫无信号）。显式告警一次并说明替代通路。
+        from src.kernel.config import log as _log
+        _log.warning(
+            "metrics: METRICS_ADDR=%s set but prometheus_client is unavailable in this "
+            "process → /metrics serves an empty payload (silent). Install "
+            "prometheus_client, or unset METRICS_ADDR; node-level /tmp series "
+            "(grape_node_tmp_*) are still exported by the controller through the "
+            "heartbeat sampler. (Issue #4445)", metrics_addr())
 
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
