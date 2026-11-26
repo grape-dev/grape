@@ -50,6 +50,9 @@ REDISPATCH_CONTEXT_MARKERS = ("compensated_by=patrol", "watchdog_redispatch")
 WATCHDOG_REDISPATCH_MODES = ("watchdog", "auto_redispatch", "patrol")
 WATCHDOG_MARKER_KEYS = ("watchdog_redispatch", "_reissue")
 
+# Numeric source (five-source rule): defaults 3 / 1800 come from
+# docs/issue-4334/plan.md:36-37 ("Configuration" section); both are
+# overridable via the env vars listed there.
 DEFAULT_REDISPATCH_LIMIT = int(os.environ.get("WATCHDOG_REDISPATCH_LIMIT", "3"))
 DEFAULT_REDISPATCH_WINDOW_SECONDS = int(
     os.environ.get("WATCHDOG_REDISPATCH_WINDOW_SECONDS", "1800"))
