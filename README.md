@@ -29,8 +29,6 @@
     <a href="https://devstation.developer.huaweicloud.com/aidevspace?utm_source=grape&amp;dc=XM49SsRAGMbxq4SnzsJ-JbszrYXsAcRCtniTvNmNzLwzzCQpDAO2Wglews4LeJ14DsmWlg_84flNELIMjd-3z_nnNbsP5Dl75OrhhBz1EHtnuxfqOycRegJ1DY_RU83Lqq8kwgYaDY9snOeAHI2z1MmpgQYdy3VRHNv1dlvsd2VBu_1OHeigik2pSsXIYWiQ-gr9NMG70ENvlFIqnXMIc3PnpO2ChW7JRM4Re_bxFhuqbs_zx_f8_vUf7qwlWQTPrlqxjCtLQhcO2eCzy5IinVNKfwEAAP__&amp;dc_sign=98a24c0b6c5eb94b5e6d06d6847a150a5137930190d2e21dd0e9f8ed660286f0"><img src="assets/deploy-on-ai-devspace.png" alt="Deploy on AI DevSpace" height="30"></a>
   </p>
 
-  <p><small style="color:#6a737d"><strong>AI DevSpace</strong> &mdash; one-click deploy on <strong>Huawei Cloud</strong> (China-first access &middot; zero cross-border latency &middot; enterprise isolation). Prefer global SaaS? Use <strong>Railway</strong>.</small></p>
-
   <p>
     <a href="https://www.grapedev.cn/community.html?cat=join" title="Join the community"><img src="assets/community/feishu.svg" width="18" height="18" alt="Feishu">&nbsp;Feishu</a> ·
     <a href="https://www.grapedev.cn/community.html?cat=join" title="Join the community"><img src="assets/community/wechat.svg" width="18" height="18" alt="WeChat">&nbsp;WeChat</a>
