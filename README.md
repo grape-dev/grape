@@ -26,7 +26,7 @@
 
   <p>
     <a href="https://railway.com/deploy/grape-ai-native-devops"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="30"></a>&nbsp;&nbsp;
-    <a href="https://www.grapedev.cn/devspace"><img src="assets/deploy-on-ai-devspace.png" alt="Deploy on AI DevSpace" height="30"></a>
+    <a href="https://devstation.developer.huaweicloud.com/aidevspace?dc=XM4xTsMwFMbxq0TfnEpt06S1VwbUAyAG1OEleW2D4mfLdjIQWWKFCYlLsHEBrhPOgdKR8ZP-0vebIGQYGr9vn_PPa3bvyXH2yPXDETmaIURruheKnZUAPYG6lsfgqOFlNVcS4R4aLY_cW8ceOVprqJNjCw06VOuyPJzX2225K6qSil2h9rRX5aZSlWLk6GmQ5gr9NMFZH6E3SimVTjmEub2zcu68gY5-4Bwhsgu3tqf6djx_fM_vX__d1hiSBfBs6xXLuDIkdGGfDS67LCnSKaX0FwAA__8&amp;dc_sign=ab1d90220568ba06d3fd8b395b7bb3e219324d6d977b70f16ae9824a80dbea8e"><img src="assets/deploy-on-ai-devspace.png" alt="Deploy on AI DevSpace" height="30"></a>
   </p>
 
   <p><small style="color:#6a737d"><strong>AI DevSpace</strong> &mdash; one-click deploy on <strong>Huawei Cloud</strong> (China-first access &middot; zero cross-border latency &middot; enterprise isolation). Prefer global SaaS? Use <strong>Railway</strong>.</small></p>
