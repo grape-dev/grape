@@ -32905,6 +32905,28 @@
             "title": "Acp Resume Skipped Total",
             "default": 0
           },
+          "tmp_janitor_removed_items_total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tmp Janitor Removed Items Total"
+          },
+          "tmp_janitor_removed_bytes_total": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tmp Janitor Removed Bytes Total"
+          },
           "log_lines": {
             "items": {
               "$ref": "#/components/schemas/LogLineBody"
@@ -33035,6 +33057,28 @@
             "type": "integer",
             "title": "Acp Resume Skipped Total",
             "default": 0
+          },
+          "tmp_janitor_removed_items_total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tmp Janitor Removed Items Total"
+          },
+          "tmp_janitor_removed_bytes_total": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tmp Janitor Removed Bytes Total"
           },
           "log_lines": {
             "items": {
@@ -36574,6 +36618,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "d3b7dbbe1",
-  "x-generated-at": "2026-11-25T15:35:00.538109+00:00"
+  "x-source-commit": "00c022798",
+  "x-generated-at": "2026-11-26T03:17:27.233982+00:00"
 }
