@@ -30,7 +30,9 @@ def rt_db(tmp_path, monkeypatch):
             acp_state_db_bytes REAL DEFAULT 0,
             acp_state_db_cleanup_counts TEXT DEFAULT '',
             acp_state_db_bytes_freed_total REAL DEFAULT 0,
-            acp_resume_skipped_total INTEGER DEFAULT 0
+            acp_resume_skipped_total INTEGER DEFAULT 0,
+            tmp_janitor_removed_items_total INTEGER DEFAULT 0,
+            tmp_janitor_removed_bytes_total REAL DEFAULT 0
         );
         CREATE TABLE agent_runtimes (
             id INTEGER PRIMARY KEY, credential_id INTEGER, name TEXT,
