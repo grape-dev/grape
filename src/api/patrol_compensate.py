@@ -325,6 +325,12 @@ class ModeHandler(Handler):
             ctx.mode_payload["carried_context"] = {}
         return True
 
+# B2 remediation: caps the fallback conclusion snippet embedded in the
+# redispatch context so the payload stays within review-size limits even
+# when the original task produced a very long result_text.
+_CONTEXT_SNIPPET_LIMIT = 600
+
+
 def _conclusion_snippet(result_text: str) -> str:
     """评审七轮修正④：结论优先取结构化 conclusion 字段。
 
@@ -448,7 +454,7 @@ class DispatchHandler(Handler):
             if _fallback_ctx:
                 payload["context"] = (f"巡检器补偿交棒[compensated_by={marker}]：原任务 "
                                       f"{ctx.task_id} 已完成但未交下游，按其自报 next_step 补发。"
-                                      f" 原任务结论：{_fallback_ctx[:600]}")
+                                      f" 原任务结论：{_fallback_ctx[:_CONTEXT_SNIPPET_LIMIT]}")
             else:
                 _set_finding(ctx.finding_id, "needs_human",
                              f"{CONTEXT_EMPTY_REASON}：重派 context 为空且无可回填结论")

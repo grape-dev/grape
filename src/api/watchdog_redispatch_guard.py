@@ -50,12 +50,22 @@ REDISPATCH_CONTEXT_MARKERS = ("compensated_by=patrol", "watchdog_redispatch")
 WATCHDOG_REDISPATCH_MODES = ("watchdog", "auto_redispatch", "patrol")
 WATCHDOG_MARKER_KEYS = ("watchdog_redispatch", "_reissue")
 
-# Numeric source (five-source rule): defaults 3 / 1800 come from
-# docs/issue-4334/plan.md:36-37 ("Configuration" section); both are
-# overridable via the env vars listed there.
+# Policy bound (B2 remediation): limit=3 attempts / window=1800s is a
+# conservative operational cap for automated watchdog redispatch storms.
+# <undecided: needs measured watchdog redispatch frequency distribution and
+# human response latency before final tuning — registered on the pending
+# decision list for PR !2290>; both values stay env-overridable via
+# WATCHDOG_REDISPATCH_LIMIT / WATCHDOG_REDISPATCH_WINDOW_SECONDS.
 DEFAULT_REDISPATCH_LIMIT = int(os.environ.get("WATCHDOG_REDISPATCH_LIMIT", "3"))
 DEFAULT_REDISPATCH_WINDOW_SECONDS = int(
     os.environ.get("WATCHDOG_REDISPATCH_WINDOW_SECONDS", "1800"))
+
+
+# Bounded recent-payload scan (B2 remediation): the caller applies the
+# 1800s window filter to the returned rows, so the 50 most recent dispatch
+# payloads per issue leave ample margin for a 3-attempts-per-window check
+# while capping the worst-case query cost.
+_REDISPATCH_PAYLOAD_QUERY_LIMIT = 50
 
 _TERMINAL_STATUSES = set(TERMINAL_TASK_STATUSES) | set(PAUSED_ISSUE_STATUSES)
 _TERMINAL_STAGES = set(TERMINAL_ISSUE_STAGES) | set(PAUSED_ISSUE_STATUSES)
@@ -311,8 +321,12 @@ def load_issue_labels(repo_key: str, issue_number) -> list[str]:
     if not repo_key or not num:
         return []
     try:
-        from src.api.a2a_terminal_guard import fetch_issue_for_guard, normalize_labels
-        issue = fetch_issue_for_guard(repo_key, num, timeout=10.0)
+        from src.api.a2a_terminal_guard import (
+            fetch_issue_for_guard, normalize_labels, _FETCH_BUDGET_SECONDS)
+        # Single timeout口径 (B2 remediation): share the terminal guard's
+        # A2A_TERMINAL_GUARD_BUDGET (default 20s) instead of a second 10s scale.
+        issue = fetch_issue_for_guard(
+            repo_key, num, timeout=_FETCH_BUDGET_SECONDS)
         if not issue:
             return []
         return normalize_labels(issue.get("labels"))
@@ -338,7 +352,7 @@ def _query_recent_dispatch_payloads(repo_key: str, issue_number,
         from src.domains.runtime import public as _runtime_public
         return _runtime_public.query_events_any(
             "seq, created_at, payload", where=where, params=tuple(params),
-            order_by="seq DESC", limit=50)
+            order_by="seq DESC", limit=_REDISPATCH_PAYLOAD_QUERY_LIMIT)
     except Exception as exc:
         log.warning(f"[watchdog-redispatch] dispatch payload query failed "
                     f"repo={repo_key} issue={issue_number}: {exc}")
