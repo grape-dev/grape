@@ -2700,6 +2700,11 @@ def worktree_last_failure(repo_key: str, issue_num=None, agent_type: str = "") -
 # 跨轮不继承上一轮的拒绝判定（否则上一轮的冲突会把下一轮合法只读会话误判成冲突）。
 _DEGRADE_REFUSED_TTL = 900
 _DEGRADE_REFUSED: dict = {}
+#: 容量上限（B2 五源）：进程内台账只覆盖「同一次建树 → 紧接着的会话自检」的同轮窗口，
+#: 每条 ~120B（三个键 + code/reason/at），200 条 ≈ 24KB，属「单节点同轮在途任务数」的
+#: 上级余量；超限按 at 最旧淘汰，只丢过期判定、不影响正确性（TTL 900s 才是主兜底）。
+#: 并发 (repo, issue, agent) 三元组在途规模未实测 → <undecided: 单节点同轮在途三元组峰值实测>。
+#: 回归：tests/runtime/test_issue_4353_degrade_refused_state.py 覆盖 TTL 滑出与容量淘汰。
 _DEGRADE_REFUSED_MAX = 200
 
 

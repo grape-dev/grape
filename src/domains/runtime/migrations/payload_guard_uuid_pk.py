@@ -13,11 +13,15 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 log = logging.getLogger(__name__)
 
 OLD_TABLE = "autopilot_payload_guard"
+
+#: 搬运主键的固定命名空间（uuid5）：与旧行 id 一起决定新主键，使迁移可重试而幂等。
+_ID_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
 NEW_TABLE = "grape_t_autopilot_payload_guard"
 COLUMNS = ("payload_hash", "task_id", "repo_key", "dispatch_count", "failure_count",
            "status", "reason", "first_seen_at", "last_seen_at", "updated_at")
@@ -54,15 +58,20 @@ def migrate(conn: Any = None) -> int:
                 target.commit()
                 return 0
             cols = ", ".join(COLUMNS)
-            if _is_mysql_backend():
-                cursor.execute(
-                    f"INSERT IGNORE INTO {NEW_TABLE} (id, {cols}) "
-                    f"SELECT REPLACE(UUID(),'-',''), {cols} FROM {OLD_TABLE}")
-            else:
-                cursor.execute(
-                    f"INSERT OR IGNORE INTO {NEW_TABLE} (id, {cols}) "
-                    f"SELECT lower(hex(randomblob(16))), {cols} FROM {OLD_TABLE}")
-            moved = int(getattr(cursor, "rowcount", 0) or 0)
+            # 与 insight 侧同口径（PR #2245 复审 SUP-1）：主键由旧行确定性派生，使
+            # 「DROP 被清理门槛拦截 → 下次启动重试」不会重复搬行。本表另有
+            # UNIQUE(payload_hash) 兜底，两条幂等来源同时成立。
+            is_mysql = _is_mysql_backend()
+            ignore = "INSERT IGNORE" if is_mysql else "INSERT OR IGNORE"
+            ph = "%s" if is_mysql else "?"
+            insert_sql = (f"{ignore} INTO {NEW_TABLE} (id, {cols}) "
+                          f"VALUES ({', '.join([ph] * (len(COLUMNS) + 1))})")
+            rows = cursor.execute(f"SELECT id, {cols} FROM {OLD_TABLE}").fetchall()
+            for row in rows:
+                old_id, *rest = tuple(row)
+                new_id = uuid.uuid5(_ID_NAMESPACE, f"{OLD_TABLE}:{old_id}").hex
+                cursor.execute(insert_sql, (new_id, *rest))
+                moved += int(getattr(cursor, "rowcount", 0) or 0)
             if not _ds._destructive_ddl(cursor, f"DROP TABLE {OLD_TABLE}",
                                         kind_hint="cleanup"):
                 raise RuntimeError(

@@ -14,11 +14,15 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 log = logging.getLogger(__name__)
 
 OLD_TABLE = "obs_webhook_rejects"
+
+#: 搬运主键的固定命名空间（uuid5）：与旧行 id 一起决定新主键，使迁移可重试而幂等。
+_ID_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
 NEW_TABLE = "grape_t_obs_webhook_rejects"
 COLUMNS = ("repo_key", "provider", "event", "ip", "token_fp",
            "expected_fp", "reason", "created_at")
@@ -56,15 +60,22 @@ def migrate(conn: Any = None) -> int:
                 target.commit()
                 return 0
             cols = ", ".join(COLUMNS)
-            if _is_mysql_backend():
-                cursor.execute(
-                    f"INSERT IGNORE INTO {NEW_TABLE} (id, {cols}) "
-                    f"SELECT REPLACE(UUID(),'-',''), {cols} FROM {OLD_TABLE}")
-            else:
-                cursor.execute(
-                    f"INSERT OR IGNORE INTO {NEW_TABLE} (id, {cols}) "
-                    f"SELECT lower(hex(randomblob(16))), {cols} FROM {OLD_TABLE}")
-            moved = int(getattr(cursor, "rowcount", 0) or 0)
+            # SUP-1（PR #2245 复审）：主键必须由旧行**确定性派生**，否则 DROP 被清理门槛
+            # 拦截后 raise 不盖章 → 下次启动重试会把同一批旧行再搬一遍，新表无其它 UNIQUE
+            # 约束，INSERT IGNORE 永远不命中冲突 → 台账行翻倍。
+            # uuid5(固定命名空间, "obs_webhook_rejects:<旧 id>") 让重试落到同一主键上，
+            # INSERT IGNORE / INSERT OR IGNORE 因此真正幂等（双后端一致，不依赖 SQL 方言函数）。
+            is_mysql = _is_mysql_backend()
+            ignore = "INSERT IGNORE" if is_mysql else "INSERT OR IGNORE"
+            ph = "%s" if is_mysql else "?"
+            insert_sql = (f"{ignore} INTO {NEW_TABLE} (id, {cols}) "
+                          f"VALUES ({', '.join([ph] * (len(COLUMNS) + 1))})")
+            rows = cursor.execute(f"SELECT id, {cols} FROM {OLD_TABLE}").fetchall()
+            for row in rows:
+                old_id, *rest = tuple(row)
+                new_id = uuid.uuid5(_ID_NAMESPACE, f"{OLD_TABLE}:{old_id}").hex
+                cursor.execute(insert_sql, (new_id, *rest))
+                moved += int(getattr(cursor, "rowcount", 0) or 0)
             if not _ds._destructive_ddl(cursor, f"DROP TABLE {OLD_TABLE}",
                                         kind_hint="cleanup"):
                 raise RuntimeError(
