@@ -55,6 +55,37 @@ DELIVERY_CODE_NO_ISSUE_NUMBER = "no_issue_number"
 DELIVERY_CODE_PR_QUERY_FAILED = "pr_query_failed"
 DELIVERY_CODE_NO_LINKED_PR = "no_linked_pr"
 
+# prometheus 计数器（注册失败降级 None，不阻断收尾路径；模式与
+# stale_uid.py 的 _stale_uid_total 一致：本模块是唯一定义点，tests 直接
+# import 本模块，不经第二处注册）。
+_delivery_verify_total = None
+try:  # pragma: no cover - 主控环境必有 prometheus_client，降级分支难在单测覆盖
+    from prometheus_client import Counter as _PC
+    from src.domains.insight import public as _obs_public
+    _delivery_verify_total = _PC(
+        "grape_runtime_delivery_verify_total",
+        "coding delivery verification outcomes by result code (issue #4440)",
+        ["outcome"], registry=_obs_public.prometheus_registry())
+except Exception as _e:  # noqa: BLE001
+    _delivery_verify_total = None
+    log.warning(f"delivery verify counter unavailable: {type(_e).__name__}: {_e}")
+
+
+def _bump_delivery_verify_metric(result) -> None:
+    """核实结果单点埋点（A13）：只对 applies=True 的核实计数，未命中清单不计。
+
+    outcome 取值 = delivered / no_issue_number / pr_query_failed / no_linked_pr，
+    与 DELIVERY_CODE_* 常量同源；注册降级时静默跳过（Metrics 不可用不影响判定）。
+    """
+    r = result or {}
+    if not _delivery_verify_total or not r.get("applies"):
+        return
+    outcome = "delivered" if r.get("delivered") else (r.get("code") or "unknown")
+    try:
+        _delivery_verify_total.labels(outcome=outcome).inc()
+    except Exception:  # noqa: BLE001 - 埋点失败不改变核实判定
+        log.warning("delivery verify metric bump failed")
+
 
 def _verify_timeout_seconds() -> float:
     raw = (os.environ.get(ENV_DELIVERY_VERIFY_TIMEOUT) or "").strip()
@@ -247,13 +278,15 @@ def verify_coding_delivery_safe(repo_key: str, issue_id, agent_type: str, skill:
     if not delivery_verify_applies(agent_type, skill):
         return {"applies": False, "delivered": True, "code": "", "reason": "", "prs": []}
     try:
-        return verify_coding_delivery(repo_key, issue_id, agent_type, skill)
+        result = verify_coding_delivery(repo_key, issue_id, agent_type, skill)
     except Exception as e:  # fail-closed：仅命中清单的工作流按未交付处理
         log.warning(f"delivery verify: crashed repo={repo_key} issue={issue_id!r} "
                     f"skill={skill}: {e}")
-        return {"applies": True, "delivered": False,
-                "code": DELIVERY_CODE_PR_QUERY_FAILED,
-                "reason": f"交付核实异常：{str(e)[:200]}", "prs": []}
+        result = {"applies": True, "delivered": False,
+                  "code": DELIVERY_CODE_PR_QUERY_FAILED,
+                  "reason": f"交付核实异常：{str(e)[:200]}", "prs": []}
+    _bump_delivery_verify_metric(result)
+    return result
 
 
 def verify_task_delivery(task_id) -> dict | None:
