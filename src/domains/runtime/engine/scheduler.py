@@ -605,11 +605,14 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
             if isinstance(_ids, list) and _ids:
                 from src.domains.runtime.engine.engine_select import (
                     _engines_by_ids, _health_ok, _norm_repo, load_engine_selection,
+                    _filter_by_tmp_headroom,
                 )
                 _members = _engines_by_ids(
                     [int(x) for x in _ids if str(x).strip().isdigit()],
                     _norm_repo(repo_key), load_engine_selection())
-                _healthy = [m for m in _members if _health_ok(m)]
+                # Issue #4445：任务级绑定随机选机同样受 /tmp 水位门约束
+                _healthy = _filter_by_tmp_headroom(
+                    [m for m in _members if _health_ok(m)])
                 if _healthy:
                     import random as _random
                     engine_id = _random.choice(_healthy)["runtime_id"]
@@ -1680,6 +1683,7 @@ def _probe_task_binding(task: dict, repo_key: str | None = None) -> dict:
     try:
         from src.domains.runtime.engine.engine_select import (
             _engines_by_ids, _engines_by_uids, _health_ok, _norm_repo, load_engine_selection,
+            _filter_by_tmp_headroom,
         )
         _repo = _norm_repo(repo)
         if uids:
@@ -1690,7 +1694,9 @@ def _probe_task_binding(task: dict, repo_key: str | None = None) -> dict:
             out["mode"] = "ids"
             out["ids"] = ids
             out["members"] = _engines_by_ids(ids, _repo, load_engine_selection()) or []
-        out["healthy"] = [m for m in out["members"] if _health_ok(m)]
+        # Issue #4445：/tmp 已见底的节点不算可派发（暴露为 ENGINE_OFFLINE 环境性失败）
+        out["healthy"] = _filter_by_tmp_headroom(
+            [m for m in out["members"] if _health_ok(m)])
         out["engine_ids"] = [m.get("runtime_id") for m in out["members"]]
     except Exception as e:  # 探测失败不判死：交回原有「无可用引擎」路径
         out["error"] = str(e)

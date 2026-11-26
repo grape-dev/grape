@@ -144,6 +144,14 @@ from src.domains.insight.observability.process_memory import (
 
 _install_process_memory(registry)
 
+# Issue #4445：节点 /tmp（tmpfs）水位 + janitor 清理量指标（拉取时采样）。
+from src.domains.insight.observability.tmp_usage import (
+    install as _install_tmp_usage,
+    collect_tmp_usage,
+)
+
+_install_tmp_usage(registry)
+
 HTTP_IN_FLIGHT = Gauge(
     "grape_http_in_flight_requests",
     "Current number of in-flight HTTP requests served by the API server.",
@@ -1113,3 +1121,5 @@ def on_metrics_scrape():
     collect_acp_state_db_metrics()
     # Issue #4203：进程/引擎子进程 RSS 与 cgroup 限额（拉取时采样，无新链路）
     collect_process_memory()
+    # Issue #4445：/tmp tmpfs 水位 + janitor 清理量（拉取时采样）
+    collect_tmp_usage()

@@ -932,6 +932,78 @@ def _filter_by_health(members: list[dict]) -> list[dict]:
         log.warning(f"_filter_by_health failed, skipping health filter: {e}")
         return members  # 模块异常时不过滤（不阻塞派发）
 
+def _tmp_headroom_guard_on() -> bool:
+    """Issue #4445：派发前 /tmp 水位门开关（DISPATCH_TMP_HEADROOM_GUARD=off 关闭）。"""
+    return (os.environ.get("DISPATCH_TMP_HEADROOM_GUARD", "on") or "on").strip().lower() != "off"
+
+
+def _tmp_headroom_max_ratio() -> float:
+    """派发拒绝阈值：目标节点 /tmp 使用率 ≥ 该值（默认 0.9，即可用 <10%）拒绝派发。"""
+    try:
+        return float(os.environ.get("DISPATCH_TMP_MAX_USED_RATIO", "0.9"))
+    except (TypeError, ValueError):
+        return 0.9
+
+
+def _tmp_used_ratios_by_credential(credential_ids: list[int]) -> dict | None:
+    """读取 runtime_credentials.tmp_percent → ``{credential_id: ratio(0~1)}``。
+
+    查询失败/缺列（存量库未迁移）→ ``None``：调用方 fail-open，不因水位查询异常挡住派发。
+    """
+    ids = sorted({int(c) for c in credential_ids if c and int(c) > 0})
+    if not ids:
+        return {}
+    db, lock = _db()
+    try:
+        with lock:
+            c = db.cursor()
+            ph = ",".join("?" * len(ids))
+            c.execute(f"SELECT id, tmp_percent FROM runtime_credentials WHERE id IN ({ph})", ids)
+            rows = c.fetchall()
+        out = {}
+        for row in rows or []:
+            try:
+                if row[1] is None:
+                    continue
+                out[int(row[0])] = float(row[1]) / 100.0
+            except (TypeError, ValueError, IndexError):
+                continue
+        return out
+    except Exception as e:  # 缺表/缺列不阻断派发
+        log.debug(f"_tmp_used_ratios_by_credential skipped: {e}")
+        return None
+
+
+def _filter_by_tmp_headroom(members: list[dict], ratios: dict | None = None) -> list[dict]:
+    """Issue #4445：过滤 /tmp 水位 ≥ 阈值（默认 90%）的目标节点。
+
+    - 本机直连（credential_id=0）不参与远端心跳水位，始终放行；
+    - 无该凭据水位行 → 放行（从未上报过 tmp_percent 的旧 worker 不因缺数据被挡）；
+    - 查询失败 → 返回原成员（fail-open，绝不因水位查询异常挡住派发）；
+    - 全部被挡 → 返回空列表，调用方按既有「全档位不可用」路径报错/降级。
+    """
+    if not _tmp_headroom_guard_on() or not members:
+        return members
+    if ratios is None:
+        ratios = _tmp_used_ratios_by_credential(
+            [m.get("credential_id") or 0 for m in members])
+    if ratios is None:
+        return members
+    threshold = _tmp_headroom_max_ratio()
+    kept = []
+    for m in members:
+        cid = int(m.get("credential_id") or 0)
+        ratio = ratios.get(cid)
+        if ratio is not None and ratio >= threshold:
+            log.warning(
+                f"engine_select: skip runtime {m.get('runtime_id')} "
+                f"(tmp usage {ratio:.1%} >= {threshold:.0%}, available <10%) "
+                f"for dispatch (Issue #4445)")
+            continue
+        kept.append(m)
+    return kept
+
+
 # Issue #3584：同负载并列时的轮转序号（进程内单调递增；多主控下允许最终收敛而非强一致）。
 # 按候选集合（repo/角色/场景/同档候选 runtime_id 集合）分桶，避免不同场景共享同一全局
 # 计数——多场景交织下同一 2 引擎场景若恒定落在奇/偶 seq 会固定命中同一台（QA 复审意见）。
@@ -1410,6 +1482,10 @@ def _select_rid_from_members(members: list[dict], cfg: dict, repo_key: str,
         cand = _filter_by_health(cand)
         if not cand:
             continue  # 该档位全不健康，尝试下一档位
+        # Issue #4445：目标节点 /tmp 可用 <10% 时拒绝派发（fail-open，查询异常不挡）
+        cand = _filter_by_tmp_headroom(cand)
+        if not cand:
+            continue
         # Issue #3584：档内最小负载优先、负载并列按 seq 取模轮转
         # （替代旧 min(priority, runtime_id) 钉死最小 id，避免其余绑定引擎空转）
         picked = _pick_decision(cand, repo_key=repo_key, agent_type=agent_type,
@@ -1419,7 +1495,8 @@ def _select_rid_from_members(members: list[dict], cfg: dict, repo_key: str,
         if picked is not None:
             return picked["runtime_id"], scope
     # 所有档位均无健康引擎 → 降级兜底：取所有候选中健康分最高的
-    all_cand = _apply_filters(members, cfg)
+    # Issue #4445：兜底同样不得把 /tmp 已见底的节点选回来（否则水位门形同虚设）
+    all_cand = _filter_by_tmp_headroom(_apply_filters(members, cfg))
     if all_cand:
         _best = _best_health_fallback(all_cand)
         if _best:
