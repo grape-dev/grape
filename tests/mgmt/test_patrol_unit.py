@@ -2683,3 +2683,31 @@ def test_issue_2327_dispatch_stalled_threshold_source():
     from src.domains.runtime.engine.service import _STALE_QUEUED_THRESHOLD
     assert rt_public.patrol_dispatch_stall_threshold_seconds() == int(_STALE_QUEUED_THRESHOLD)
     assert patrol_mod._DISPATCH_STALL_MIN_SECONDS == 2 * patrol_mod._ENGINE_HEARTBEAT_SECONDS
+
+
+def test_compensate_context_bounded_to_persisted_cap():
+    """B2 round-4 (PR !2290): both compensation context paths must produce
+    a context no longer than what webhook.py persists (context[:500]),
+    with prefix + audit tail intact — so what is sent is byte-identical
+    to what lands in the DB, no silent tail loss on long conclusions."""
+    import src.api.patrol_compensate as pc
+    marker = f"patrol:t_d8e288a3b631:2026-11-26T09:30:00+08:00"
+    long_concl = "结论" * 400                    # ≥600 chars conclusion
+    # main path shape (with finding tail)
+    ctx_text = pc._compensate_context(
+        marker, "t_d8e288a3b631", "coding", long_concl, finding_id="f-123")
+    assert len(ctx_text) <= pc._REDISPATCH_CONTEXT_DB_CAP      # ≤500, no DB truncation
+    assert f"compensated_by={marker}" in ctx_text              # prefix intact
+    assert ctx_text.endswith("finding=f-123")                  # audit tail intact
+    assert "原任务结论：" in ctx_text                             # conclusion present
+    # fallback path shape (no finding tail)
+    fb_text = pc._compensate_context(marker, "t_d8e288a3b631", "coding", long_concl)
+    assert len(fb_text) <= pc._REDISPATCH_CONTEXT_DB_CAP
+    assert f"compensated_by={marker}" in fb_text
+    assert "原任务结论：" in fb_text
+    # short conclusion passes through unclipped
+    short_text = pc._compensate_context(marker, "t_d8e288a3b631", "coding", "修复完成", finding_id="f-1")
+    assert "修复完成" in short_text and len(short_text) <= pc._REDISPATCH_CONTEXT_DB_CAP
+    # empty conclusion wording preserved
+    empty_text = pc._compensate_context(marker, "t_d8e288a3b631", "coding", "")
+    assert "无可读结论" in empty_text
