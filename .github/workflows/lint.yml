@@ -65,6 +65,27 @@ jobs:
         run: |
           python -m pytest -q tests/runtime/test_issue_3923_worktree_head_and_attribution.py \
                             tests/runtime/test_repogit.py
+      - name: Issue ident grouping (provider + full ident) regression (issue #4341)
+        # Issue #4341 QA 审查（Required）：新增 tests/runtime/test_issue_4341_ident_grouping.py
+        # 与受影套件此前未接入任何 CI workflow，PR 的「新用例全绿 / 零新增失败」无法在 CI
+        # 复算；本步骤把新套件（含 tasks/current、build_issue_context 随迁用例）与可复算的
+        # 受影套件纳入门禁。
+        # 受影响但未纳入的套件（本基线既有红，与 #4341 归组键无关，单独跟踪）：
+        #   - test_issue_859_event_output_logs / test_issue_events_api：/events `output`
+        #     未内联（_attach_event_payloads 无调用点，#859 回归）；
+        #   - test_issue_1938_cascade_compensation：同 #859 输出内联面；
+        #   - test_issue_2050_structured_handoff_stall：patrol FakeDb 与现查询列不匹配（基线项）；
+        #   - test_perf_mys_payload_index_cache：旧库伪行缺 result/completed_at/repo_key 列；
+        #   - test_3055_issue_ident_hardening：service.py:4355/4362 int()/isdigit 基线红。
+        # 上述套件变绿后再补入本步骤，避免门禁常红掩盖真实回退。
+        run: |
+          python -m pytest -q tests/runtime/test_issue_4341_ident_grouping.py \
+                            tests/runtime/test_issue_252_entity_type.py \
+                            tests/runtime/test_issue_3891_pipeline_shared_resolution.py \
+                            tests/runtime/test_issue_539_pipeline_review_status.py \
+                            tests/runtime/test_issue_667_detail_fallback.py \
+                            tests/runtime/test_event_structured.py \
+                            tests/runtime/test_3865_runtime_domain_reads.py
       - name: Hermes overlay profiles policy regression (issue #3904)
         # PR #2208 复审 Required：本单新增用例此前只在本地跑过，未接入任何 CI job，
         # 合入后「构建跳过清单与自检必需清单同源 / profiles 不再 100% 回退共享 home /

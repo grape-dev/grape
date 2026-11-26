@@ -1275,15 +1275,54 @@ def _create_indexes():
         log.warning(f"Upgrade idx_tasks_repo_issue to UNIQUE failed: {e}")
 
 
+def _seed_owners_missing() -> list[str]:
+    """种子表归属自检：返回在 `table_ownership.json` 里查不到 owner 的种子表。
+
+    为什么要单独查：`_owned_skip` 只跳过「别家的表」；清单里**没有条目**时它一律放行。
+    三库模式下这种表会变成「谁都不种」——非 owner 库没建表 → 1146，owner 库以为别家
+    会种 → 数据静默缺失。所以每张种子表都必须在归属清单里有 owner。
+
+    守卫/清单本身不可用时放行（与 `_owned_skip` 的「不因守卫故障阻断启动」一致）；
+    只告警不中断启动。
+    """
+    try:
+        from src.kernel import table_ownership as _own
+        mapping = _own.owner_map() or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"seed 归属自检跳过（归属清单不可用：{exc}）")
+        return []
+
+    missing: list[str] = []
+    for seed_key, json_file, table in _SEED_FILES:
+        if not (mapping.get(table) or "").strip():
+            missing.append(table)
+            log.error(
+                f"[SEED_OWNERSHIP] 种子表 `{table}` 在 table_ownership.json 无归属"
+                f"（seed_key={seed_key}, file={json_file}）→ 三库模式下无人导入"
+            )
+    return missing
+
+
 def _seed_from_json():
-    """首次运行时从 JSON 种子文件导入数据"""
+    """首次运行时从 JSON 种子文件导入数据。
+
+    种子表同样受表归属守卫约束：三库模式下别域的种子表由 owner 进程负责。
+    否则非 owner 库既没有种子目标表、也没有 meta 记账表，legacy 首跑必 1146
+    崩启动（2026-11-19 实测：mgmt 库无 agent_type/meta → startup failed）。
+    """
+    _seed_owners_missing()  # 归属清单缺条目会让种子静默不导入（只告警，不阻断）
+    seed_files = [(k, j, t) for (k, j, t) in _SEED_FILES if not _owned_skip(t, "seed")]
+    if not seed_files:
+        log.info("seed: 无本域归属的种子表，跳过（三库模式由 owner 域进程负责）")
+        return
+
     with db_lock:
         c = db.cursor()
         c.execute(runtime_mig.SELECT_META)
         row = c.fetchone()
         seeded_keys = set(row[0].split(",")) if row and row[0] else set()
 
-    for seed_key, json_file, db_table in _SEED_FILES:
+    for seed_key, json_file, db_table in seed_files:
         if seed_key in seeded_keys:
             log.info(f"Seed key '{seed_key}' already run, skip")
             continue

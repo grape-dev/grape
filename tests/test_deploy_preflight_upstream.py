@@ -49,7 +49,8 @@ server {
     location /api/runtime/ { proxy_pass http://grape_worker; }
     location /api/runtime/install { proxy_pass http://grape_worker; }
     location /api/tasks/ { proxy_pass http://grape_worker; }
-    location /api/webhook/ { proxy_pass http://grape_event; }
+    location /webhook/ { proxy_pass http://grape_event; }
+    location = /api/pipeline/handoff { proxy_pass http://grape_event; }
     location /api/a2a { proxy_pass http://grape_event; }
     location /api/dashboard/ { proxy_pass http://grape_insight; }
     location / { proxy_pass http://grape_mgmt; }

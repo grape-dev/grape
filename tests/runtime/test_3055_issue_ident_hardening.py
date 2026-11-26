@@ -271,10 +271,12 @@ _CLOSURE_MODULES = [
 ]
 
 # 允许的既有例外：PR 号 / 路径参数归一（设计口径明确「不改」）
+# Issue #4341 审查（Nit）：`src/domains/runtime/routes/issues.py` 已无 int()/isdigit
+# 命中（编号解析转发 normalize_issue_ident），原 `issues.py:174` 白名单条目失效，
+# 删除以免行号漂移后误导（条目为空不代表放开判据，扫描命中仍会变红）。
 _ALLOWED_LINES = {
     ("src/domains/runtime/pipeline/event_pipeline.py", 1016),   # PR 号 _numeric_value
     ("src/domains/runtime/pipeline/event_pipeline.py", 5358),   # PR 号 exclude
-    ("src/domains/runtime/routes/issues.py", 174),              # PR 号解析
     ("src/api/qa_gate.py", 656),                                # PR 号
 }
 

@@ -47,7 +47,7 @@ FROZEN = {
         'organizations.js': '88',
         'pipeline.js': '58',
         'platform-icons.js': '2',
-        'plugins.js': '57',
+        'plugins.js': '58',
         'pwd-blocklist.js': '3',
         'repos-view.js': '69',
         'runtimes-view.js': '97',

@@ -64,7 +64,14 @@ UPSTREAM_ROLE_PORT = {"mgmt": 38081, "event": 38082, "worker": 38083, "insight":
 ROLE_LOCATION_HINTS: tuple[tuple[str, str], ...] = (
     ("/api/runtime", "worker"),
     ("/api/tasks", "worker"),
+    # 旧模板前缀（保留兼容未升级部署）；新模板真实路径见下一条。
     ("/api/webhook", "event"),
+    # webhook.router 无 prefix → 真实路径 /webhook/{provider}（nginx-grape-cluster.conf:149）。
+    ("/webhook", "event"),
+    # chat SSE 分流到 worker（nginx-grape-cluster.conf:135 `location ~ ^/api/chat/(send|submit)`）。
+    ("/api/chat", "worker"),
+    # pipeline handoff 指 event（nginx-grape-cluster.conf:158 `location = /api/pipeline/handoff`）。
+    ("/api/pipeline/handoff", "event"),
     ("/api/a2a", "event"),
     ("/api/dashboard", "insight"),
     ("/api/obs", "insight"),

@@ -568,17 +568,23 @@ def get_current_task(user: dict = Depends(get_current_user_or_api_key)):
     from src.domains.insight.public import resolve_error_messages
     task["errors"] = resolve_error_messages(task["errors"])
 
-    # 关联需求（repo_key + issue_id 去 '#'）
-    import re as _re
-    _num = _re.sub(r"[^0-9]", "", str(row[5] or ""))
+    # 关联需求（repo_key + 完整 ident）
+    # Issue #4341：不得抠数字串（`#IKXR3B` 曾变 "3"，事件/链接全串号）；
+    # ident 归一转发内核唯一入口。
+    from src.kernel.issue_ident import normalize_issue_ident
+    _num = normalize_issue_ident(row[5])
     task["issue"] = None
     task["events_count"] = 0
     task["latest_event"] = None
     if _num:
         try:
-            from src.domains.runtime.routes.issues import _group_events_by_issue
-            group = _group_events_by_issue(_repo)
-            evs = group.get(_num) or []
+            from src.domains.runtime.routes.issues import (_group_events_by_issue,
+                                                          _issue_group_events)
+            # Issue #4341：桶键 = `<provider>:<ident>`，取值走单一助手
+            # （此前传裸字符串 repo_key，`repo_keys + params` 直接 TypeError 被吞，
+            # events_count/latest_event 恒空）
+            group = _group_events_by_issue([_repo])
+            evs = _issue_group_events(group, [_repo], _num) or []
             task["events_count"] = len(evs)
             task["latest_event"] = evs[-1] if evs else None
             from src.api.session_store import get_issue_stage

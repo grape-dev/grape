@@ -56,3 +56,27 @@ def apply_feature_flags(html: str) -> str:
         html = _PLUGINS_NAV_RE.sub("", html)
 
     return html
+
+
+# ---- 前端 RUM（Faro）注入开关 ----
+# 上报反代 /faro/collect 的上游必须由 ``GRAPE_FARO_UPSTREAM`` 显式提供（Alloy
+# faro.receiver）；未配置时反代固定 503，此时前端仍注入 SDK 只会每会话打空包
+# → 这里在渲染 shell HTML 时整块移除（配了上游即自动恢复，无需改代码）。
+_FARO_SCRIPT_RE = re.compile(
+    r"[ \t]*<script[^>]*src=\"/static/js/vendor/faro-web-sdk\.iife\.js[^\"]*\"[^>]*>\s*</script>[ \t]*(?:<!--.*?-->)?[ \t]*\r?\n"
+    r"[ \t]*<script[^>]*src=\"/static/js/vendor/faro-web-tracing\.iife\.js[^\"]*\"[^>]*>\s*</script>[ \t]*(?:<!--.*?-->)?[ \t]*\r?\n"
+    r"[ \t]*<script[^>]*src=\"/static/js/faro\.js[^\"]*\"[^>]*>\s*</script>[ \t]*(?:<!--.*?-->)?[ \t]*\r?\n?",
+    re.DOTALL,
+)
+
+
+def faro_enabled() -> bool:
+    """前端 RUM 是否开启（= 反代上游是否配置）。"""
+    return bool(os.environ.get("GRAPE_FARO_UPSTREAM", "").strip())
+
+
+def apply_faro_toggle(html: str) -> str:
+    """未配上游时移除 shell HTML 中的 Faro 脚本块（幂等）。"""
+    if faro_enabled():
+        return html
+    return _FARO_SCRIPT_RE.sub("", html, count=1)

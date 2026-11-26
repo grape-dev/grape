@@ -28,7 +28,7 @@ from src.api.version_check import ensure_python_version
 # Issue #4248：全局异常处理器的唯一实现（本模块 build_app 只装配、不再内联一份）
 from src.api.exception_handlers import install_exception_handlers
 # Issue #3395：前端功能开关单一下发源（shell HTML 注入 window.__FEATURES__）
-from src.api.frontend_flags import apply_feature_flags
+from src.api.frontend_flags import apply_feature_flags, apply_faro_toggle, faro_enabled
 # Issue #2784：契约版本号单一来源（健康探针与 /openapi.json 必须是同一个号）
 from src.api.contract_versioning import CONTRACT_VERSION
 from src.kernel.config import log
@@ -923,13 +923,16 @@ document.documentElement.classList.remove('i18n-loading');})();
                 f'<script>window.__EMAIL_CONFIGURED__={val};document.documentElement.className+=" {cls} {oauth_classes}";'
                 f'window.__OAUTH_CONFIGURED__={oauth_json};'
                 f'window.__OAUTH_PROVIDERS__={_json_mod.dumps(catalog)};'
-                f'window.__I18N_BOOST__={boost_json};</script>'
+                f'window.__I18N_BOOST__={boost_json};'
+                f'window.__FARO_ENABLED__={"true" if faro_enabled() else "false"};</script>'
             )
             html = html.replace('</head>', head_inject + '</head>', 1)
             html = html.replace('</body>', _EARLY_TRANSLATE_SCRIPT + '</body>', 1)
             html = html.replace('</head>', _EARLY_EXCHANGE_SCRIPT + '</head>', 1)
             # Issue #3395：注入前端功能开关（flag=0 时移除侧边栏插件入口整块）
             html = apply_feature_flags(html)
+            # 前端 RUM（Faro）：未配 GRAPE_FARO_UPSTREAM 时整块移除，配了自动恢复
+            html = apply_faro_toggle(html)
             return html
 
         def _serve_auth_page(filename: str) -> HTMLResponse:

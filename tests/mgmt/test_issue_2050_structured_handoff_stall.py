@@ -480,7 +480,7 @@ def test_issue_detail_events_carry_completed_at():
     with patch.object(sm, "db", db, create=True), \
          patch.object(sm, "db_lock", threading.Lock(), create=True):
         grouped = issues_mod._group_events_by_issue(["gitcode:o/r"], numbers=["2050"])
-    ev = grouped["2050"][0]
+    ev = issues_mod._issue_group_events(grouped, ["gitcode:o/r"], "2050")[0]
     assert ev["completed_at"] == "2026-11-12 10:30:00"
     # 值必须能被停滞判定解析（不解析 = 白取一列）
     state = ps.compute_stall_state([ev], "coding", "processing", confirm_minutes=10)

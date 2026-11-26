@@ -139,22 +139,89 @@ from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
 router = APIRouter(prefix="/api/issues", tags=["issues"])
 
 def _num_from_issue_id(issue_id: str) -> str:
-    """从 issue_id 提取编号。
+    """issue_id → 完整编号 ident（`#` 后整串即编号）。
 
-    Issue #252: #pr_ 前缀的 PR 订阅伪 ID 不参与 issue 事件分组
+    Issue #4341：历史实现用 `re.search(r"(\\d+)", _raw)` 抠**首个数字串**，
+    `#IKXR3A` / `#IKXR3B` / `#IKXR3C` 全部塌成键 `"3"`（并与纯数字 `#3` 撞桶）：
+    events 串号、`/pipeline` segments 恒空、`issue_state` 兜底键与 `issue` 单表键
+    错位。编号解析只做「去 `#` + 合法性判定」，禁止再做数字提取。
+
+    Issue #252: `#pr_` 前缀的 PR 订阅伪 ID 不参与 issue 事件分组
     （它们由 _query_pr_subscription_events 独立处理，不应混入同编号的 issue 分组）。
+    Issue #3055：ident 判据转发内核唯一实现（禁止在此复制正则）。
     """
     _raw = str(issue_id or "")
     if _raw.startswith("#pr_"):
         return ""
-    m = re.search(r"(\d+)", _raw)
-    if m:
-        return m.group(1)
-    # D105 字符串 ident（gitee IK*）：无数字时返回去 # 原始 ident——
-    # 此前回退 ''，gitee 事件被全量归到空键组，events/pipeline/detail 查不到
-    # （2026-11-10 部署实例实测：IKUDWW events 返回空、pipeline 422）。
-    # Issue #3055：ident 判据转发内核唯一实现（禁止在此复制正则）
     return normalize_issue_ident(_raw)
+
+def _issue_group_key(repo_key: str, ident) -> str:
+    """events 归组键：`<provider>:<完整编号>`（Issue #4341 单一构造入口）。
+
+    键里带平台前缀而非只带编号，是为了让同号不同平台（`gitcode #3` / `gitee #3`）
+    分桶；同一逻辑仓库的多平台别名由调用方传入 **repo_key 候选集**
+    （`_repo_keys_of` / `repo_key_candidates`）逐个构造候选键，而不再靠
+    「跨 `repo_keys` 合并同号」——那条老路径正是本缺陷跨平台撞桶的成因。
+    裸 repo_key（历史写入行）按 `parse_repo_key()` 默认 provider（gitcode）归组，
+    候选集含裸键本身，存量行照旧可查（无需数据迁移）。
+    """
+    _ident = _num_from_issue_id(ident)
+    if not _ident:
+        return ""
+    return f"{_provider_of_repo_key(repo_key or '')}:{_ident}"
+
+# repo_key → provider 前缀的进程内缓存上限。
+# 基数依据：本机 dev 库 issue 表实测 distinct repo_key = 1（2 行）；生产按单实例托管仓
+# 量级 10^1~10^2 估，provider 前缀仅 gitcode/github/gitee/gitlab 等 5 种以内。
+# 成本依据：未命中仅为一次 parse_repo_key 字符串切分（µs 级），命中即返回，非热点路径。
+# 取 256（2× 余量、约 20KB 级内存）；待现网基数测量后按需调整（登记于 docs/issue-4341/task.md）。
+_PROVIDER_CACHE_MAXSIZE = 256
+
+
+@_ft_cache.lru_cache(maxsize=_PROVIDER_CACHE_MAXSIZE)
+def _provider_of_repo_key(repo_key: str) -> str:
+    """repo_key → 平台前缀（`parse_repo_key` 单一入口，进程内缓存）。
+
+    归组在事件循环里逐行调用，缓存避免逐行走平台卡注册表（数万事件级别的热路径）。
+    """
+    from src.kernel.repo_key import parse_repo_key
+    return parse_repo_key(repo_key or "")[0]
+
+def _issue_group_keys(repo_keys: list[str], ident) -> list[str]:
+    """某编号在候选 repo_key 集上的归组键全集（保序去重）。"""
+    out: list[str] = []
+    for rk in repo_keys or []:
+        _k = _issue_group_key(rk, ident)
+        if _k and _k not in out:
+            out.append(_k)
+    return out
+
+def _issue_group_events(group_map: dict, repo_keys: list[str], ident) -> list[dict]:
+    """从 `_group_events_by_issue()` 结果取某编号的事件（同 ident 跨平台桶合并，seq 升序）。
+
+    编号 → 事件桶的唯一取值入口：detail / events / pipeline / 列表富化 /
+    `_assemble_issue` / 存在性解析共用，避免再次出现「详情 200 / 子资源 404」式
+    口径分裂（#3891 教训）。
+
+    Issue #4341 的两层语义（不要混淆）：
+      - 归组层（`_group_events_by_issue`）按 `<provider>:<ident>` **分桶**，
+        不同 ident（`IKXR3A` / `3`）永不进同一桶——这是本缺陷的修复点；
+      - 取值层（本函数）只合并**同一个 ident** 的多个平台桶：同一逻辑仓库的
+        provider 别名（裸键 legacy 行 + `gitee:` 新行、镜像仓双写）必须都能看到，
+        否则会把存量事件静默藏起来（比串号更难排查）。按 seq 去重后升序返回。
+    """
+    merged: list[dict] = []
+    _seen: set = set()
+    for _k in _issue_group_keys(repo_keys, ident):
+        for _ev in group_map.get(_k) or []:
+            _seq = _ev.get("seq")
+            if _seq in _seen:
+                continue
+            _seen.add(_seq)
+            merged.append(_ev)
+    if merged:
+        merged.sort(key=lambda _e: (_e.get("seq") is None, _e.get("seq") or 0))
+    return merged
 
 def _normalize_issue_number(number) -> str:
     """路径参数 `{number}` 归一：去 `#` 前缀、纯数字去前导零、字符串 ident 原样。
@@ -313,6 +380,7 @@ def _repo_keys_of(owner: str, repo: str) -> list[str]:
     用户可能经任意平台 Webhook 接入仓库，DB 前缀不定——手写双平台互查
     （gitcode↔github）会漏 gitee/gitlab；候选集含裸键+全平台前缀，
     repo_key 名空间全局唯一，超集查询安全。
+
     Issue #3397：请求路径可能全小写，而 `issue`/`events` 行按 VCS 实际大小写存储，
     故再按登记反查补入实际大小写候选（歧义不合并），否则列表/详情读路径漏查存量行。
 
@@ -382,6 +450,8 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
                 f"FROM issue_state WHERE repo_key IN ({placeholders}){_iid_clause}",
                 repo_keys + _iid_params)
             for r in c.fetchall():
+                # Issue #4341：兜底键与 `issue` 单表同形（完整 ident），
+                # 否则同号在两源落成不同键（`#IKXR3B` 曾成 "3"），兜底行永远补不进。
                 n = _num_from_issue_id(r[0])
                 if not n or n in out:
                     continue
@@ -494,7 +564,7 @@ def _issue_internal_id_by_number(repo_keys: list[str], number) -> int | None:
         return None
 
 def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> dict:
-    """仓库内 issue_id → events 列表（seq 升序），带时间格式化。
+    """仓库内 issue → events 列表（seq 升序），带时间格式化。
 
     Issue #252: 排除 entity_type='pull_request' 的事件，PR 事件不混入 issue 展示
     （编号相同时 PR 事件与 issue 事件分离，避免关联混淆）。
@@ -502,6 +572,11 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
     numbers（Issue #542）：可选 issue number 集合，非空时 SQL 按 `issue_id IN ('#n',...)`
     收窄（events 表 issue_id 规范写路径恒为 `#N`；`#pr_` 伪 ID 由
     _query_pr_subscription_events 独立处理，不受影响）。
+
+    Issue #4341：桶键 = `_issue_group_key(行 repo_key, 完整编号)`（`<provider>:<ident>`），
+    逐行按自己的 repo_key 归组——**不得**再跨 repo_keys 合并同号（老实现把 Gitee
+    `IKXR3A/B/C` 全并进 `"3"`，并与纯数字 `#3` 撞桶）。取值一律走
+    `_issue_group_events(group_map, repo_keys, ident)`。
     """
     from src.kernel.session_manager import db, db_lock
     import json as _json
@@ -520,12 +595,13 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
             # 供 fetch_display_meta 兜底识别存量（#587 时代）补偿记录的历史固定文案。
             # 列序固定：0 seq … 8 created_at、9 entity_type（#252 PR 事件过滤）、
             # 10 runtime、11 skill、12 result、13 completed_at（Issue #2050：
-            # 详情 view 的停滞判定要读末段完成时间，缺这列会让 stall_state 恒为 unknown）。
+            # 详情 view 的停滞判定要读末段完成时间，缺这列会让 stall_state 恒为 unknown）；
+            # 14 repo_key（Issue #4341：归组键的平台前缀来源）。
             # 本视图不取 structured_output/agent_logs（Issue 列表一次加载全仓库事件，
             # 不加载整份执行日志）。
             c.execute(
                 f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, "
-                f"created_at, entity_type, runtime, skill, result, completed_at "
+                f"created_at, entity_type, runtime, skill, result, completed_at, repo_key "
                 f"FROM events WHERE repo_key IN ({placeholders}) AND issue_id!=''{_num_clause} ORDER BY seq ASC",
                 repo_keys + _num_params)
             rows = c.fetchall()
@@ -542,7 +618,8 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
         # Issue #252: PR 事件不混入 issue 分组
         if _entity_type == "pull_request":
             continue
-        n = _num_from_issue_id(iid)
+        # 行 repo_key 优先（老库/伪游标无该列时退回查询键，仍是平台前缀语义）
+        n = _issue_group_key((r[14] if len(r) > 14 else "") or (repo_keys[0] if repo_keys else ""), iid)
         if not n:
             continue
         item = {
@@ -565,21 +642,33 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
     return out
 
 def _issue_title_map(repo_keys: list[str]) -> dict:
-    """仓库内 issue_number → 标题（从 events 首条带 title 的事件取）。"""
+    """仓库内 issue_number → 标题（从 events 首条带 title 的事件取）。
+
+    Issue #4341：桶键为 `<provider>:<ident>`，此处剥回完整 ident——标题兜底只要
+    编号维度，同号跨平台取首个命中即可。
+    """
     g = _group_events_by_issue(repo_keys)
     out = {}
-    for n, evs in g.items():
+    for _k, evs in g.items():
+        n = _k.split(":", 1)[-1]
+        if n in out:
+            continue
         for ev in evs:
             if ev.get("title"):
                 out[n] = ev["title"]
                 break
     return out
 
-def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dict,
+def _assemble_issue(repo_keys: list[str], number: str, stage_map: dict, status_map: dict,
                     group_map: dict, title_map: dict) -> dict:
     """聚合单个 Issue 展示对象（列表条目）。"""
+    # 兼容两种入参：上游 #4301 链按单 repo_key 调用（tests/runtime/test_issue_detail_org_context.py），
+    # 本分支是多键候选集（#3397 大小写 / #4341 平台别名）。单键等价于单元素候选集。
+    if isinstance(repo_keys, str):
+        repo_keys = [repo_keys] if repo_keys else []
+    repo_keys = list(repo_keys or [])
     stage = stage_map.get(number) or {}
-    events = group_map.get(number) or []
+    events = _issue_group_events(group_map, repo_keys, number)
     latest = events[-1] if events else None
     # D105 字符串 ident：数字 ident 保持 int 契约不变；平台字符串 ident（gitee IK*）
     # 原样透传——对 IK* 裸强转 int 会抛 ValueError（2026-11-10 :3001 实测 500）。
@@ -588,7 +677,9 @@ def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dic
     return {
         "number": _native_num,
         # 组织下派详情需要 repo_key/org_id；深链直达详情不再依赖列表上下文。
-        "repo_key": str(repo_key or ""),
+        # 注：上游把本函数签名改成单 repo_key（#4301 链），本分支是多键候选版
+        # （#3397/#4341 别名），故此处显式取首个候选键——直接引用 repo_key 会 NameError。
+        "repo_key": str((repo_keys[0] if repo_keys else "") or ""),
         "org_id": str(stage.get("org_id") or ""),
         # Issue #569：内部需求卡片 id（issue 表主键）——awaiting-input/pending-review/review-pass
         # 的 --issue_id 用此值；与 GitCode 侧 issue number 语义不同，与 git-repo issues get 的
@@ -2901,7 +2992,11 @@ def list_repo_issues(owner: str, repo: str,
         it.setdefault("assignee", _st.get("assignee", ""))
         it.setdefault("parent_issue_id", _st.get("parent_issue_id", ""))
         it.setdefault("is_subtask_mode", _st.get("is_subtask_mode") or 0)
-        evs = group_map.get(str(_num or "")) or []
+        # Issue #4341：卡片自带 repo_key 优先（多平台别名逐个构造候选键），
+        # 再退回请求级候选集——桶键为 `<provider>:<ident>`，不再按裸编号取。
+        evs = _issue_group_events(
+            group_map, [rk for rk in ([it.get("repo_key") or ""] + repo_keys) if rk],
+            _num) or []
         it["events_count"] = len(evs)
         # P1-E: Slim latest_event to essential fields (reduce response from ~713KB)
         _ev = evs[-1] if evs else None
@@ -3081,14 +3176,14 @@ def get_issue_detail(owner: str, repo: str, number: str,
         status_map = _task_status_map(repo_keys)
         group_map = _group_events_by_issue(repo_keys)
         title_map = _issue_title_map(repo_keys)
-    base = _assemble_issue(repo_keys[0], num, stage_map, status_map, group_map, title_map)
+    base = _assemble_issue(repo_keys, num, stage_map, status_map, group_map, title_map)
     if _resolved["synced"]:
         # Issue #667 契约（test_issue_667_detail_fallback 断言）：仅「本次经 VCS 核实并补建」的
         # 响应带该存在性标志；后续命中内部行不再出现（区分「已登记」与「刚补建」）。
         base["synced_by_fallback"] = True
     # Issue #4063：只读审核点投影，与 task_status / status get.status 同源（issue.status）。
     base["review_point"] = _review_point_readonly(repo_keys, num)
-    events = group_map.get(num) or []
+    events = _issue_group_events(group_map, repo_keys, num)
     pipeline = _pipeline_from_archive(repo_keys, num) or _pipeline_from_events(repo_keys[0], num, events)
     # Issue #539：详情内嵌 pipeline 同步叠加需求级业务状态与任务/结果引用
     from src.api.pipeline_status import (load_issue_business_status, load_segment_task_refs,
@@ -3123,14 +3218,17 @@ def get_issue_events(owner: str, repo: str, number: str,
     repo_keys = _repo_keys_of(owner, repo)
     _enforce_session_repo_scope(user, repo_keys)
     group_map = _group_events_by_issue(repo_keys)
-    num = _num_from_issue_id(number) or number.replace("#", "")
-    if num not in group_map:
+    # Issue #4341：与 detail / pipeline 同一编号归一口径（完整 ident），
+    # 并用单一取值助手取桶——此前这里用 `_num_from_issue_id`（首个数字串），
+    # 与另两入口键不同，导致任一 IKXR3* 都返回同一批其它 issue 的事件（串号）。
+    num = _normalize_issue_number(number)
+    events = _issue_group_events(group_map, repo_keys, num)
+    if not events:
         stage_map = _issue_stage_map(repo_keys)
         status_map = _task_status_map(repo_keys)
         if num not in stage_map and num not in status_map:
             raise HTTPException(status_code=404, detail={"code": 404, "message": f"Issue #{number} 不存在"})
         return {"events": [], "segments": [], "total": 0}
-    events = group_map[num]
     return {"events": events, "segments": events, "total": len(events)}
 
 @router.get("/{owner}/{repo}/{number}/pipeline", operation_id="issues_pipeline", summary="Issue pipeline roadmap", description="Pipeline roadmap of an issue: issue + summary + status + segments. Issue #539: top-level `status` means event execution finished (not requirement completion); business status is exposed via optional `issue_stage`/`issue_task_status`/`review_status`, and each segment output carries optional `task_ref`/`result_ref` (explicit enums: available/pending/unavailable; no restricted logs or credentials). Issue #3891: shares the main resource's resolution chain — an issue that exists on the VCS side but is not registered internally (issue_id=null) returns 200 with an empty pipeline plus `diagnostics{exists:true, has_pipeline_data:false, reason:\"issue_unregistered\", source:\"vcs\"}`; only a confirmed-missing issue returns 404, where `detail.error_code`/`detail.reason` (`issue_not_found` vs `internal_sync_missing`) distinguishes 'does not exist' from 'exists but unverifiable/no pipeline data'.")
@@ -3140,7 +3238,8 @@ def get_issue_pipeline(owner: str, repo: str, number: str,
     # D105 字符串 ident（gitee IK*）：与 issues_detail 同口径（number: int 对 IK* 422）。
     num = _normalize_issue_number(number)
     group_map = _group_events_by_issue(repo_keys)
-    events = group_map.get(num) or []
+    # Issue #4341：单一取值助手（候选键 = 平台前缀 + 完整编号）
+    events = _issue_group_events(group_map, repo_keys, num)
     # weekly-05：优先 events 表（含结构化 output）；无事件时回退 event.json 档案
     if events:
         pipeline = _pipeline_from_events(repo_keys[0], num, events)
@@ -3374,7 +3473,7 @@ def _resolve_issue_presence(owner: str, repo: str, repo_keys: list[str], number,
     _stage = stage_map if stage_map is not None else _issue_stage_map(repo_keys)
     _status = status_map if status_map is not None else _task_status_map(repo_keys)
     _group = group_map if group_map is not None else _group_events_by_issue(repo_keys)
-    if num and (num in _stage or num in _status or num in _group):
+    if num and (num in _stage or num in _status or _issue_group_events(_group, repo_keys, num)):
         return {"num": num, "state": "exists", "source": "ledger",
                 "vcs": None, "vcs_provider": "", "synced": False}
     if num:

@@ -11,6 +11,7 @@ import asyncio
 import json as _json_mod
 import logging
 import os
+import re
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -19,7 +20,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import ClientDisconnect
 
 # Issue #3395：前端功能开关单一下发源（shell HTML 注入 window.__FEATURES__）
-from src.api.frontend_flags import apply_feature_flags
+from src.api.frontend_flags import apply_feature_flags, apply_faro_toggle, faro_enabled
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,11 @@ log = logging.getLogger(__name__)
 _FARO_UPSTREAM = os.environ.get("GRAPE_FARO_UPSTREAM", "").strip()
 # 单次上报体上限（SDK 批量上报通常 <64KB；公开端点防滥用）
 _FARO_MAX_BODY = int(os.environ.get("GRAPE_FARO_MAX_BODY", str(256 * 1024)))
+
+# 前端 RUM 脚本块的双向开关在 frontend_flags（与 feature flags 同一处下发源）：
+# 未配 GRAPE_FARO_UPSTREAM 时整块移除，配了自动恢复。
+
+
 # 同源校验开关（默认开；无 Origin 的探针请求放行）
 _FARO_STRICT_ORIGIN = os.environ.get("GRAPE_FARO_STRICT_ORIGIN", "1").strip() not in ("0", "false", "no")
 
@@ -275,10 +281,12 @@ document.documentElement.classList.remove('i18n-loading');})();
             f'oauth-{key}-not-configured' for key, ok in oauth_map.items() if not ok
         )
         oauth_json = _json_mod.dumps(oauth_map)
+        faro_flag = 'true' if faro_enabled() else 'false'
         head_inject = (
             f'<script>window.__EMAIL_CONFIGURED__={val};document.documentElement.className+=" {cls} {oauth_classes}";'
             f'window.__OAUTH_CONFIGURED__={oauth_json};'
             f'window.__OAUTH_PROVIDERS__={_json_mod.dumps(catalog)};'
+            f'window.__FARO_ENABLED__={faro_flag};'
             f'window.__I18N_BOOST__={boost_json};</script>'
         )
         html = html.replace('</head>', head_inject + '</head>', 1)
@@ -286,6 +294,8 @@ document.documentElement.classList.remove('i18n-loading');})();
         html = html.replace('</head>', _EARLY_EXCHANGE_SCRIPT + '</head>', 1)
         # Issue #3395：注入前端功能开关（flag=0 时移除侧边栏插件入口整块）
         html = apply_feature_flags(html)
+        # 前端 RUM（Faro）：未配 GRAPE_FARO_UPSTREAM 时整块移除，配了自动恢复
+        html = apply_faro_toggle(html)
         return html
 
     def _serve_auth_page(filename: str) -> HTMLResponse:

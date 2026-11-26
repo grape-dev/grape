@@ -110,6 +110,11 @@ def test_api_issue_events_cross_provider_filter():
     r = _client.get("/api/issues/org/evapi2/3/events", headers=_headers)
     assert r.status_code == 200
     assert len(r.json()["segments"]) == 2  # gitcode + github 双查
+    # Issue #4341：归组层按 `<provider>:<ident>` 分桶（不同 ident 永不合并），
+    # 取值层仅合并同一 ident 的平台别名桶——两条事件仍应都可见。
+    from src.domains.runtime.routes.issues import _group_events_by_issue
+    group = _group_events_by_issue(["gitcode:org/evapi2", "github:org/evapi2"])
+    assert set(group) == {"gitcode:3", "github:3"}
 
 
 # ── tk_ 会话 token：dual 支持 + repo 作用域 ──

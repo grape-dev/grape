@@ -334,8 +334,9 @@ class TestDisplayLayer:
                 "UPDATE events SET result=?, runtime=?, skill=? WHERE seq=?",
                 ("任务已完成：级联收敛（回报丢失补偿）", "hermes", "coding-cli-1", 19423))
             db.commit()
+        from src.domains.runtime.routes.issues import _issue_group_events
         groups = _group_events_by_issue([REPO])
-        ev = next(e for e in groups["1938"] if e["seq"] == 19423)
+        ev = next(e for e in _issue_group_events(groups, [REPO], "1938") if e["seq"] == 19423)
         assert ev["result_kind"] == "system_compensation_synthesized", \
             "存量补偿文案须在本视图识别（SELECT 补 result 列 + 传 result_by_seq）"
         assert ev["is_agent_conclusion"] is False

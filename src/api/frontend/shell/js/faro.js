@@ -6,6 +6,9 @@
  */
 (function () {
   'use strict';
+  // 服务端未配 GRAPE_FARO_UPSTREAM 时页面注入 __FARO_ENABLED__=false（脚本通常整块不发，
+  // 但浏览器缓存了旧 HTML 时仍需此闸）→ 不上报，避免 /faro/collect 恒定 503 噪音
+  if (window.__FARO_ENABLED__ === false) { return; }
   var SDK = window.GrafanaFaroWebSdk;
   if (!SDK) { console.warn('[faro] SDK not loaded, telemetry disabled'); return; }
   var TRACING = window.GrafanaFaroWebTracing;

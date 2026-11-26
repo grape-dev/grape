@@ -201,7 +201,8 @@ def build_issue_context(repo_key, issue_num, max_chars=4000) -> str:
     lines = [f"## Issue #{issue_num} 档案摘要"]
     gathered = False
     try:
-        from src.domains.runtime.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import (_group_events_by_issue,
+                                                      _issue_group_events)
         rk = repo_key or ""
         keys = [rk]
         if ":" in rk:
@@ -211,9 +212,9 @@ def build_issue_context(repo_key, issue_num, max_chars=4000) -> str:
                 if _alt != rk:
                     keys.append(_alt)
                     break
-        _num = str(issue_num).lstrip("#")
         gmap = _group_events_by_issue(keys)
-        events = gmap.get(_num) or []
+        # Issue #4341：桶键 = `<provider>:<ident>`，取值走单一助手
+        events = _issue_group_events(gmap, keys, issue_num)
         if events:
             for ev in events:
                 agent = ev.get("agent_type", "?")

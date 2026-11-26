@@ -210,12 +210,30 @@ class WechatLoginManager:
 
     def _on_confirmed(self, session: WechatLoginSession, body: dict) -> dict:
         baseurl = as_str(body.get("baseurl")) or as_str(body.get("base_url"))
+        # 诊断：只记字段名与形态（类型/长度/是否含冒号），绝不计值 —— 用于核对
+        # bot_token 到底取自回包哪个字段（线上曾出现绑进来的是 "<id>@im.bot" 截断串）。
+        try:
+            shapes = {}
+            for _k, _v in (body or {}).items():
+                if isinstance(_v, str):
+                    shapes[_k] = "str(%d%s)" % (len(_v), ",has_colon" if ":" in _v else "")
+                elif isinstance(_v, (dict, list)):
+                    shapes[_k] = type(_v).__name__ + "(%d)" % len(_v)
+                else:
+                    shapes[_k] = type(_v).__name__
+            log.debug("[wechat] login %s confirmed body shapes: %s",
+                     session.login_id[:8], shapes)
+        except Exception:
+            pass
         credentials = {
             "bot_token": as_str(body.get("bot_token")),
             "ilink_bot_id": as_str(body.get("ilink_bot_id") or body.get("bot_id")),
             "baseurl": baseurl,
             "ilink_user_id": as_str(body.get("ilink_user_id") or body.get("user_id")),
         }
+        log.debug("[wechat] login %s parsed credentials: bot_token_len=%d ilink_bot_id_len=%d",
+                 session.login_id[:8], len(credentials["bot_token"] or ""),
+                 len(credentials["ilink_bot_id"] or ""))
         session.credentials = credentials
         session.status = STATUS_CONFIRMED
         result = {

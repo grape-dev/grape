@@ -120,7 +120,7 @@ def test_legacy_db_without_payload_columns(monkeypatch):
 
     monkeypatch.setattr("src.kernel.session_manager.db", _DB())
     out = iss._group_events_by_issue([REPO])
-    assert out["9"][0]["runtime"] == "rt"
+    assert out[iss._issue_group_key(REPO, "9")][0]["runtime"] == "rt"
     assert calls["n"] == 0, "旧库不应触发 payload 补查"
 
 

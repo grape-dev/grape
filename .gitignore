@@ -219,5 +219,5 @@ docs/engine-run-as-task-owner.md
 /tunnel/
 /.pipcache/
 
-# Issue #1011 worker engine_uid runtime persistence (runtime written, never committed)
+# worker 运行时产物（引擎 uid 缓存），不入库（Issue #1011）
 worker-engine-uids.json

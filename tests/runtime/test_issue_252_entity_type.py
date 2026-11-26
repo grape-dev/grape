@@ -181,7 +181,7 @@ class TestGroupEventsByEntityType:
     def test_pr_events_excluded_from_issue_group(self):
         """entity_type='pull_request' 的事件不混入 issue 分组"""
         from src.api.event_store import append_event
-        from src.domains.runtime.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue, _issue_group_events
 
         # 写入 issue 事件
         append_event(repo_key=REPO, event_type="issue_opened", title="Issue #224",
@@ -191,28 +191,28 @@ class TestGroupEventsByEntityType:
                      issue_id="#224", agent_type="coding", entity_type="pull_request")
 
         groups = _group_events_by_issue([REPO])
-        events_224 = groups.get("224", [])
+        events_224 = _issue_group_events(groups, [REPO], "224")
         assert len(events_224) == 1, f"expected 1 issue event, got {len(events_224)}"
         assert events_224[0]["event_type"] == "issue_opened"
 
     def test_old_events_without_entity_type_included(self):
         """无 entity_type 的旧事件仍正常分组（向后兼容）"""
         from src.api.event_store import append_event
-        from src.domains.runtime.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue, _issue_group_events
 
         # 模拟旧事件（不传 entity_type，默认空串）
         append_event(repo_key=REPO, event_type="issue_opened", title="Old Issue #224",
                      issue_id="#224", agent_type="vod")
 
         groups = _group_events_by_issue([REPO])
-        events_224 = groups.get("224", [])
+        events_224 = _issue_group_events(groups, [REPO], "224")
         assert len(events_224) == 1
         assert events_224[0]["event_type"] == "issue_opened"
 
     def test_pr_subscription_events_excluded(self):
         """#pr_ 前缀的 PR 订阅事件不混入 issue 分组"""
         from src.api.event_store import append_event
-        from src.domains.runtime.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue, _issue_group_events
 
         # issue 事件
         append_event(repo_key=REPO, event_type="issue_opened", title="Issue #224",
@@ -223,7 +223,7 @@ class TestGroupEventsByEntityType:
                      scene_id="scene1")
 
         groups = _group_events_by_issue([REPO])
-        events_224 = groups.get("224", [])
+        events_224 = _issue_group_events(groups, [REPO], "224")
         assert len(events_224) == 1, f"PR subscription event should not be in issue group, got {len(events_224)}"
 
 
@@ -262,7 +262,7 @@ class TestSameNumberE2E:
     def test_issue_and_pr_same_number_separated(self):
         """issue #224 和 PR #224 同时存在时，事件分组不混淆"""
         from src.api.event_store import append_event
-        from src.domains.runtime.routes.issues import _group_events_by_issue, _query_pr_subscription_events
+        from src.domains.runtime.routes.issues import _group_events_by_issue, _issue_group_events, _query_pr_subscription_events
 
         # issue 事件
         append_event(repo_key=REPO, event_type="issue_opened", title="Issue #224",
@@ -274,7 +274,7 @@ class TestSameNumberE2E:
                      issue_id="#224", agent_type="coding", entity_type="pull_request")
 
         groups = _group_events_by_issue([REPO])
-        events_224 = groups.get("224", [])
+        events_224 = _issue_group_events(groups, [REPO], "224")
 
         # issue 分组只含 2 个 issue 事件，PR 事件被排除
         assert len(events_224) == 2

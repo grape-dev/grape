@@ -37,6 +37,12 @@ def _clean():
         db.commit()
 
 
+def _events_for(groups, ident):
+    """Issue #4341：桶键为 `<provider>:<ident>`，取值走单一助手（不再按裸编号取）。"""
+    from src.domains.runtime.routes.issues import _issue_group_events
+    return _issue_group_events(groups, [REPO], ident)
+
+
 def _has_structured_col():
     cols = [r[1] for r in db.cursor().execute("PRAGMA table_info(events)").fetchall()]
     return "structured_output" in cols
@@ -80,7 +86,7 @@ class TestOutputLogsReturned:
                     runtime="opencode", skill="coding-cli-1")
 
         groups = _group_events_by_issue([REPO])
-        evs = groups.get("859", [])
+        evs = _events_for(groups, "859")
         assert len(evs) == 1
         ev = evs[0]
         assert ev["output"] is not None, "output 永不返回（Issue #859 主缺陷）"
@@ -96,7 +102,7 @@ class TestOutputLogsReturned:
         from src.domains.runtime.routes.issues import _group_events_by_issue
         _seed_event(85902, runtime="hermes", skill="issue-skill")
         groups = _group_events_by_issue([REPO])
-        ev = groups["859"][0]
+        ev = _events_for(groups, "859")[0]
         assert ev["runtime"] == "hermes"
         assert ev["skill"] == "issue-skill"
 
@@ -115,7 +121,7 @@ class TestParseFallback:
                 "WHERE seq=85903")
             db.commit()
         groups = _group_events_by_issue([REPO])
-        ev = groups["859"][0]
+        ev = _events_for(groups, "859")[0]
         assert ev["output"] is None
         assert ev["logs"] == []
 
@@ -129,7 +135,7 @@ class TestParseFallback:
                 "UPDATE events SET structured_output=NULL WHERE seq=85904")
             db.commit()
         groups = _group_events_by_issue([REPO])
-        ev = groups["859"][0]
+        ev = _events_for(groups, "859")[0]
         assert ev["output"] is None
         assert ev["logs"] == [{"type": "x"}]
 
@@ -141,7 +147,7 @@ class TestBackwardCompat:
         from src.domains.runtime.routes.issues import _group_events_by_issue
         _seed_event(85905)
         groups = _group_events_by_issue([REPO])
-        evs = groups.get("859", [])
+        evs = _events_for(groups, "859")
         assert len(evs) == 1
         assert evs[0]["event_type"] == "issue_comment"
 
@@ -154,7 +160,7 @@ class TestEntityTypeFilter:
         _seed_event(85906, entity_type="issue")
         _seed_event(85907, entity_type="pull_request")
         groups = _group_events_by_issue([REPO])
-        evs = groups.get("859", [])
+        evs = _events_for(groups, "859")
         assert len(evs) == 1, "PR 事件应被过滤（Issue #252）"
 
     def test_pr_event_with_output_still_excluded(self):
@@ -166,7 +172,7 @@ class TestEntityTypeFilter:
         _seed_event(85909, entity_type="pull_request",
                     structured_output={"conclusion": "pr-done"})
         groups = _group_events_by_issue([REPO])
-        evs = groups.get("859", [])
+        evs = _events_for(groups, "859")
         assert len(evs) == 1
         assert evs[0]["output"]["conclusion"] == "issue-done"
 
@@ -179,4 +185,4 @@ class TestNumbersFilter:
         _seed_event(85910, issue_id="#100")
         _seed_event(85911, issue_id="#200")
         groups = _group_events_by_issue([REPO], numbers=["100"])
-        assert list(groups.keys()) == ["100"]
+        assert [k.split(":", 1)[-1] for k in groups] == ["100"]

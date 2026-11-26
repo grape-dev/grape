@@ -269,7 +269,7 @@ function _toggleAppLang(){
 <script src="/static/js/vendor/qrcode.min.js?v=1" defer></script>
 <script src="/static/js/vendor/select2.min.js?v=1" defer></script>
 <script src="/static-vue/vendor/echarts.min.js?v=1" defer></script><!-- 可观测性图表（vendored，不走 CDN） -->
-<script src="/static/js/vendor/faro-web-sdk.iife.js?v=1" defer></script><!-- Faro RUM（vendored，上报走 /api/faro/collect 反代；未配 GRAPE_FARO_UPSTREAM 时整块移除） -->
+<script src="/static/js/vendor/faro-web-sdk.iife.js?v=1" defer></script><!-- Faro RUM（vendored，上报走 /faro/collect 反代；服务端未配 GRAPE_FARO_UPSTREAM 时整块移除，见 frontend_flags.apply_faro_toggle） -->
 <script src="/static/js/vendor/faro-web-tracing.iife.js?v=1" defer></script><!-- Faro 追踪（fetch 注入 traceparent，前后端 trace 关联） -->
 <script src="/static/js/faro.js?v=8" defer></script><!-- Faro 初始化（在 app.js 之前，尽早捕获异常/日志） -->
 <script src="/static/js/api.js?v=39" defer></script>
@@ -285,7 +285,7 @@ function _toggleAppLang(){
 <script type="module" src="/static-vue/viewjs/account-view.js?v=71"></script>
 <script type="module" src="/static-vue/viewjs/scene-market.js?v=63"></script>
 <script type="module" src="/static-vue/viewjs/skills-view.js?v=67"></script>
-<script type="module" src="/static-vue/viewjs/plugins.js?v=57"></script>
+<script type="module" src="/static-vue/viewjs/plugins.js?v=58"></script>
 <script type="module" src="/static-vue/viewjs/knowledge-view.js?v=49"></script>
 <script type="module" src="/static-vue/viewjs/runtimes-view.js?v=97"></script>
 <script type="module" src="/static-vue/viewjs/observability-view.js?v=61"></script>
