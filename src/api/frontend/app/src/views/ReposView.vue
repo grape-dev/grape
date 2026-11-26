@@ -889,6 +889,41 @@ function hostAndSelect(r, event) {
   }
 }
 
+// ── Issue #4241：托管三态徽标 + webhook 地址漂移一键修复 ──
+// 后端 /repos/member 每行带 webhook_state，值域固定为 ok/stale/absent/unknown
+// （webhook_state_for_row 生成，纯本地比对）。注意与 host_status 的 'webhook_stale'
+// 区分：本字段不含 webhook_ 前缀，stale = 实际注册地址与当前权威 webhook_url 不一致
+// → 显示「需修复托管」。
+function repoStatusClass(r) {
+  if (!r || !r.is_hosted) return 'project-card-status-none'
+  if (r.webhook_state === 'stale') return 'project-card-status-stale'
+  return 'project-card-status-hosted'
+}
+function repoStatusText(r) {
+  if (!r || !r.is_hosted) return t('repos.card.status_not_joined')
+  if (r.webhook_state === 'stale') return t('repos.card.status_webhook_stale')
+  return t('repos.card.status_hosted')
+}
+function repairHostFor(r) {
+  if (!r || !r.owner || !r.name || repairingRepo.value) return
+  repairingRepo.value = r.full_name
+  G.API.post('/repos/' + r.owner + '/' + r.name + '/repair-host', {})
+    .then((d) => {
+      repairingRepo.value = ''
+      if (d && d.status === 'ok') {
+        G.app.showToast(t('repos.card.repair_host_ok'))
+        loadProjects({ silent: true })
+      } else {
+        G.app.showToast((d && d.message) || t('repos.card.repair_host_failed'))
+      }
+    })
+    .catch((e) => {
+      repairingRepo.value = ''
+      const det = (e && (e.detail || {})) || {}
+      G.app.showToast(t('repos.card.repair_host_failed') + ' ' + (det.message || (e && e.message) || ''))
+    })
+}
+
 function unhostRepo(fullName, event) {
   const doUnhost = function () {
     G.API.post('/repos/remove', { full_name: fullName })
