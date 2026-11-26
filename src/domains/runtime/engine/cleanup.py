@@ -88,7 +88,10 @@ _TMP_JANITOR_PATTERNS = tuple(
         "SWEEPER_TMP_PATTERNS",
         _TMP_JANITOR_DEFAULT_PATTERNS,
     ) or "").split(",") if p.strip())
-# 单轮扫描/删除上限：目录异常大时避免 sweeper 被单个节点拖住（超限留 warning）。
+# 单轮扫描/删除上限（B2 五源）：目录异常大时避免 sweeper 被单个节点拖住（超限留
+# warning，下一轮继续）。2000 条按 ~50ms/条（stat+rmtree 小目录）≈ 100s/轮，落在 15min
+# sweeper 周期内；env 可调（SWEEPER_TMP_MAX_ITEMS）。单节点 /tmp 残留条目数与单轮耗时
+# 未实测 → <undecided: 单节点 /tmp 残留条目数 / 单轮耗时实测>。
 _TMP_JANITOR_MAX_ITEMS = _env_int("SWEEPER_TMP_MAX_ITEMS", 2000)
 
 _tmp_janitor_items_total = 0
@@ -1613,6 +1616,16 @@ def _sweep_tmp_task_residuals(now: float | None = None, roots=None) -> int:
         log.warning("tmp janitor: active-task lookup failed, skipping this round "
                     "(fail-closed, no deletion)")
         return 0
+    # OPS-1（PR #2245 复审）：worker 侧本进程库可能「表在但无 controller 侧任务行」
+    # （独立 SQLite / 非 owner 库），此时空活跃集不代表没有在跑的任务。空集时把 TTL
+    # 抬到 6h 下限并降级告警——仍在运行但 2h 未写盘的 qa*/pr* 目录因此不会被当残留删。
+    _ttl = _TMP_JANITOR_TTL_SECONDS
+    if not active_ids:
+        _degraded_ttl = max(_ttl, 6 * 3600)
+        if _degraded_ttl != _ttl:
+            log.warning("tmp janitor: active-task set empty (worker-local DB may not "
+                        f"carry controller rows); degrading TTL {_ttl}s → {_degraded_ttl}s")
+        _ttl = _degraded_ttl
     protected = {os.path.realpath(p) for p in _tmp_janitor_protected_paths()}
     items = 0
     freed = 0
@@ -1650,7 +1663,7 @@ def _sweep_tmp_task_residuals(now: float | None = None, roots=None) -> int:
                 if os.path.isdir(p) and _tmp_janitor_owned_by_active(name, active_ids):
                     skipped += 1
                     continue
-                if _now - os.path.getmtime(p) < _TMP_JANITOR_TTL_SECONDS:
+                if _now - os.path.getmtime(p) < _ttl:
                     continue
                 size = _tmp_janitor_size(p)
                 if _TMP_JANITOR_MODE == "dry":

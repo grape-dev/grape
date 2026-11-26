@@ -170,3 +170,28 @@ def test_default_patterns_reject_loose_prefixes():
     for name in ("qa-1839", "pr2031-head", "verify4356", "base4350",
                  "rev3582", "head4350", "deploy-ws", "venv4241", "wt-abc"):
         assert any(cleanup.fnmatch.fnmatchcase(name, p) for p in patterns), name
+
+
+def test_empty_active_set_degrades_ttl_to_six_hours(tmp_path, monkeypatch):
+    """OPS-1（PR #2245 复审）：活跃集为空时不能当「没有活跃任务」。
+
+    worker 侧本进程库可能「表在但无 controller 侧任务行」，此时 2h TTL 会把仍在运行、
+    但久未写盘的 qa*/pr* 目录当残留删掉。空集时 TTL 抬到 6h 下限：
+    · 3h 前 → 保留（原 TTL 2h 会删，这是回归点）
+    · 7h 前 → 删除
+    """
+    import time
+
+    monkeypatch.setattr(cleanup, "_query_active_task_ids", lambda: (True, set()))
+    now = time.time()
+    recent = tmp_path / "qa-9-recent"
+    old = tmp_path / "qa-9-old"
+    recent.mkdir(); old.mkdir()
+    os.utime(recent, (now - 3 * 3600, now - 3 * 3600))
+    os.utime(old, (now - 7 * 3600, now - 7 * 3600))
+
+    removed = cleanup._sweep_tmp_task_residuals(now=now, roots=[str(tmp_path)])
+
+    assert recent.is_dir(), "3h 的目录在降级 TTL(6h) 内，不得删除"
+    assert not old.exists(), "7h 的目录已超降级 TTL，应被清除"
+    assert removed == 1, f"只应删掉超 6h 的那一个，实际 {removed}"

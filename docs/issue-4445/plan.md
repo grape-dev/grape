@@ -50,3 +50,10 @@
 - `tests/api/test_issue_4445_tmp_metrics_columns.py`
 - `tests/insight/test_issue_4445_tmp_node_metrics.py`（心跳落库 → 控制面序列）
 - `tests/deploy/test_issue_4445_tmp_alerts.py`（两条通路的告警规则）
+
+## 待决策（数值证据，B2 五源闸门 · PR #2245 复审）
+
+| 数值 | 位置 | 缺哪种测量 | 现状 |
+|---|---|---|---|
+| `SWEEPER_TMP_MAX_ITEMS = 2000` | `src/domains/runtime/engine/cleanup.py` | 单节点 /tmp 残留条目数、单轮耗时 | 2000 条 ≈100s/轮（15min 周期内）；env `SWEEPER_TMP_MAX_ITEMS` 可调；未实测 |
+| `SWEEPER_TMP_TTL_SECONDS = 7200` | 同上 | 运行中任务最长静默时长 | 有设计记录、无实测；空活跃集时 TTL 降级到 6h（OPS-1） |

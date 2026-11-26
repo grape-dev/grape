@@ -309,7 +309,8 @@ def test_negcache_bounded_evicts_earliest_when_all_unexpired():
     """QA Optional 收口：缓存满且全未过期时驱逐最早到期项，物理条目不超上限。"""
     _cleanup()
     cache = api_client_mod._ref_404_cache
-    limit = api_client_mod._REF_404_MAX_ENTRIES
+    # B2（PR #2245 复审）：上限改为 env 可调函数，默认值常量更名
+    limit = api_client_mod._ref_404_max_entries()
     now = __import__("time").monotonic()
     with api_client_mod._ref_404_lock:
         cache.clear()
@@ -323,3 +324,23 @@ def test_negcache_bounded_evicts_earliest_when_all_unexpired():
     assert evicted_key not in cache, "最早到期项应被驱逐"
     assert "gitcode:evict/repo#new" in cache, "新写入项应保留"
     _cleanup()
+
+
+def test_get_404_logging_scope_is_limited_to_issue_reads():
+    """C2（PR #2245 复审）：404 降噪只允许覆盖“负缓存已收口”的 issue 读路径。
+
+    其余读路径（repo info / branches / tree / contents / labels / milestones）必须保留
+    窗口聚合 WARNING，否则孤儿仓库/删库/owner 拼错在运维侧零留痕。
+    """
+    import inspect
+
+    base = "https://gitcode.com/api/v5/repos/o/r"
+    assert api_client_mod._ref_404_log_quiet(f"{base}/issues/12")
+    assert api_client_mod._ref_404_log_quiet(f"{base}/issues/12/comments")
+    for url in (base, f"{base}/branches", f"{base}/contents/a.py",
+                f"{base}/labels", f"{base}/milestones"):
+        assert not api_client_mod._ref_404_log_quiet(url), f"未收口路径不得静默: {url}"
+
+    # 降噪判定必须在真正发起上游请求的 _do_request 里（_request 只做分派）
+    src = inspect.getsource(api_client_mod.VcsApiClient._do_request)
+    assert "_ref_404_log_quiet" in src, "GET 404 的降噪必须经由收口判定，不能无条件 debug"

@@ -81,7 +81,22 @@ _REF_404_TTL_ENV = "GRAPE_VCS_REF_404_TTL_SECONDS"
 _REF_404_TTL_DEFAULT = 60
 _REF_404_TTL_MIN = 60
 _REF_404_TTL_MAX = 300
-_REF_404_MAX_ENTRIES = 10000
+# 容量上限（B2 五源）：每条缓存值 ~ (repo_key+ident) 键 + 已截断的 detail dict，
+# 按 300B/条估算，10000 条 ≈ 3MB 常驻，与 token_resolver / open-title 两个同类缓存
+# 同量级；env 可调（GRAPE_VCS_REF_404_MAX_ENTRIES）以应对 OOM 时降档。
+# 单进程负缓存常驻内存与命中率未实测 → <undecided: 10000 条常驻内存与 404 命中率实测>。
+_REF_404_MAX_ENTRIES_ENV = "GRAPE_VCS_REF_404_MAX_ENTRIES"
+_REF_404_MAX_ENTRIES_DEFAULT = 10000
+
+
+def _ref_404_max_entries() -> int:
+    """负缓存条目上限：env 可调，下限 100（太小会让负缓存形同虚设）。"""
+    try:
+        raw = int(os.environ.get(_REF_404_MAX_ENTRIES_ENV,
+                                 str(_REF_404_MAX_ENTRIES_DEFAULT)))
+    except (TypeError, ValueError):
+        raw = _REF_404_MAX_ENTRIES_DEFAULT
+    return max(100, raw)
 _ref_404_cache: dict[str, tuple[float, dict]] = {}
 _ref_404_lock = threading.Lock()
 
@@ -94,6 +109,16 @@ def ref_404_neg_cache_ttl() -> int:
         raw = _REF_404_TTL_DEFAULT
     return max(_REF_404_TTL_MIN, min(_REF_404_TTL_MAX, raw))
 
+
+
+def _ref_404_log_quiet(url: str) -> bool:
+    """该 GET 404 是否已由负缓存写入口收口（只有 issue 单条读路径）。
+
+    `get_issue` 在 404 时写负缓存并落 1 条带 repo/ident 的 WARNING；其余读路径
+    没有这个收口，必须保留窗口聚合 WARNING（PR #2245 C2）。
+    """
+    u = str(url or "")
+    return "/issues/" in u or "/issues?" in u
 
 def _ref_404_key(repo_key: str, ident) -> str:
     return f"{str(repo_key or '').lower()}#{str(ident or '')}"
@@ -128,13 +153,13 @@ def remember_ref_404(repo_key: str, ident, detail: str = "", *, warn: bool = Tru
     with _ref_404_lock:
         # 有界防御：超阈值时先惰性清除过期项（物理占用随读取清除，长轮询
         # 场景仍可能堆积已过期键，此处显式兜底防无界增长）。
-        if len(_ref_404_cache) >= _REF_404_MAX_ENTRIES:
+        if len(_ref_404_cache) >= _ref_404_max_entries():
             for k in [k for k, v in _ref_404_cache.items() if v[0] <= now]:
                 _ref_404_cache.pop(k, None)
             # QA Optional 收口：清理后仍超阈值（全为未过期键）时驱逐最早到期项，
             # 保证物理条目不越过上限，而不是只靠 TTL 自愈短暂超限。
-            if len(_ref_404_cache) >= _REF_404_MAX_ENTRIES:
-                _overflow = len(_ref_404_cache) - _REF_404_MAX_ENTRIES + 1
+            if len(_ref_404_cache) >= _ref_404_max_entries():
+                _overflow = len(_ref_404_cache) - _ref_404_max_entries() + 1
                 for k, _entry in sorted(_ref_404_cache.items(),
                                         key=lambda kv: kv[1][0])[:_overflow]:
                     _ref_404_cache.pop(k, None)
@@ -1316,12 +1341,15 @@ class VcsApiClient:
                 except Exception:
                     pass
                 _err_code = _status_to_error_code(e.code)
-                # Issue #4343：读路径（GET）404 是「资源不存在」的语义结果而非
-                # 运行故障——降 DEBUG（可归因告警由负缓存写入口落 1 条）。
-                # 写路径 404 保持 WARNING：可能是路由拼错（如 gitlab /repos/ 旧坑），
-                # 静默会把配置错误藏成「不存在」。
-                if method == "GET" and e.code == 404:
-                    log.debug(f"VcsApiClient: {method} {redact_url(url)} → HTTP 404")
+                # Issue #4343 / PR #2245 C2：读路径 404 是「资源不存在」的语义结果而非
+                # 运行故障，但**不能整体降 DEBUG**——负缓存只覆盖 get_issue 一条读路径，
+                # 其余（repo info / branches / tree / contents / labels / milestones）
+                # 若零留痕，孤儿仓库/删库/owner 拼错在运维侧无法归因。
+                # 折中：所有 404 一律走下面的「仓库+资源+错误码」窗口聚合，窗口内只留
+                # 首条 WARNING，后续折叠为 debug 计数；这样既降噪又不丢可归因记录。
+                if method == "GET" and e.code == 404 and _ref_404_log_quiet(url):
+                    log.debug(f"VcsApiClient: {method} {redact_url(url)} → HTTP 404 "
+                              f"(covered by ref-404 negative cache)")
                 else:
                     # Issue #3759：上游 4xx 在此同样逐次刷 WARNING（孤儿仓库卡 404 轮询的
                     # 另一半噪声源）。按「仓库 + 资源 + 错误码」窗口聚合，窗口内只留首条。

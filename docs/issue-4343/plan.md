@@ -92,3 +92,12 @@ python3 -m pytest tests/runtime/test_issue_4343_prefix_select_404_negcache.py \
 make lint 2>/dev/null || python3 -m flake8 src/domains/runtime/vcs/api_client.py \
   src/kernel/token_resolver.py src/domains/runtime/routes/issues.py --max-line-length=120
 ```
+
+## 待决策（数值证据，B2 五源闸门 · PR #2245 复审）
+
+| 数值 | 位置 | 缺哪种测量 | 现状 |
+|---|---|---|---|
+| `_REF_404_MAX_ENTRIES_DEFAULT = 10000` | `src/domains/runtime/vcs/api_client.py` | 单进程负缓存常驻内存、404 命中率 | 按 300B/条估算 ≈3MB；env `GRAPE_VCS_REF_404_MAX_ENTRIES` 可调，下限 100；未实测 |
+| `engine_select.py:943` 阈值 0.9 | `src/domains/runtime/engine/engine_select.py` | 选择器命中分布 | 有设计记录、无实测 |
+| `token_resolver.py:115` TTL 300s | `src/domains/runtime/vcs/token_resolver.py` | 凭据缓存命中率/失效延迟 | 有设计记录、无实测 |
+| `deploy/alerts.yml` 阈值 `>0.8 / >0.9` 与 `for: 10m / 5m` | `deploy/alerts.yml` | 生产告警误报/漏报率 | 有设计记录、无实测 |

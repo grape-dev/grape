@@ -93,8 +93,6 @@ grape git push origin feat/issue-5
 | `grape tasks notify` | 通知（等待人工确认等场景）|
 
 > ⚠️ `tasks` 组命令面（0.3.3 实测 `grape tasks --help`）仅为 `complete` / `current` / `notify` / `wait`——`tasks mine` / `start` / `status` / `close` / `clarify` **不存在**（v2.1.0 契约已移除）；`tasks create` 亦不存在——建任务用 `issues create`；轮询终态用 `tasks wait --task_id <id>`（或 `issues pipeline` 查流水线）。不得使用上述不存在命令。
->
-> ⚠️ **Issue #4343：`issues pipeline` 轮询 404 快速失败**——返回 404（`error_code=issue_not_found`，响应带 `Retry-After` 头）说明 Issue 在 VCS 侧不存在，属预期终态：**立即停止重试**，不得以固定 20s 间隔继续轮询；确需重试必须指数退避（20s→40s→80s）且 **最多 3 次**后终止并如实上报「Issue 不存在」。401/403/网络错误仍可按原重试语义处理（服务端不缓存鉴权故障）。
 
 ### A2A 交办
 
