@@ -1900,12 +1900,16 @@ const agentStatusCardHtml = computed(() => {
     const isRunningS = s.status === 'running'
     const isCompletedS = s.status === 'completed'
     const isFailedS = s.status === 'failed'
-    const pulseStyle = isRunningS ? ';animation:iskPulse 1.2s ease-in-out infinite' : ''
+    // Pulse via a class: Vue renames @keyframes inside a scoped style block
+    // (iskPulse-<hash>) and never rewrites an inline animation name, so an
+    // inline `animation:iskPulse ...` silently stops matching and the dot
+    // stops breathing.
+    const pulseCls = isRunningS ? ' isk-pulse' : ''
     const seq = s.latest_seq
     const clickable = (isRunningS || isCompletedS || isFailedS) && seq
     const clickAttr = clickable ? ` data-isk-jump="${seq}" style="cursor:pointer"` : ''
     html += `<div class="isk-node"${clickAttr}>`
-    html += `<div class="isk-node-dot" style="background:${si.bg}${pulseStyle}">${si.icon}</div>`
+    html += `<div class="isk-node-dot${pulseCls}" style="background:${si.bg}">${si.icon}</div>`
     html += `<span class="isk-node-lbl" style="color:${si.color}">${esc(s.label || s.agent || '')}</span>`
     html += '</div>'
     if (i < statuses.length - 1) {
@@ -2035,7 +2039,8 @@ const pipelineCardHtml = computed(() => {
               : isSkipped
                 ? 'var(--t3)'
                 : 'var(--chip-bg)'
-      const pulse = isCurrent ? ';animation:iskPulse 1.2s ease-in-out infinite' : ''
+      // Pulse via a class, for the same reason as the agent-status dots above.
+      const pulseCls = isCurrent ? ' isk-pulse' : ''
       const nodeSeq = (n.latest_event && n.latest_event.seq) || ''
       // Issue #566：failed/cancelled 终态节点也可点进事件详情执行重新派发
       const clickable = isCurrent || isCompleted || isFailed || isCancelledN
@@ -2047,7 +2052,7 @@ const pipelineCardHtml = computed(() => {
       const cursor = clickable ? ';cursor:pointer' : ''
       const icon = isCompleted ? '✓' : isFailed ? '✕' : isCancelledN ? '⊘' : isSkipped ? '–' : i + 1
       html += `<div class="isk-fnode"${clickAttr} style="cursor:${clickable ? 'pointer' : 'default'}">`
-      html += `<div class="isk-fdot" style="background:${bg}${pulse}">${icon}</div>`
+      html += `<div class="isk-fdot${pulseCls}" style="background:${bg}">${icon}</div>`
       html += `<span class="isk-flbl" style="color:${col}${cursor}">${esc(n.name || n.id || '')}</span>`
       html += '</div>'
       if (i < nodes.length - 1) {
@@ -5021,5 +5026,12 @@ onBeforeUnmount(function () {
     transform: scale(1.1);
     box-shadow: 0 0 0 6px rgba(59, 130, 246, 0);
   }
+}
+/* Running-node pulse. The animation declaration must live in this scoped
+   block so the compiler renames it together with the @keyframes above; an
+   inline style would keep the unhashed name and match nothing. */
+.isk :deep(.isk-fdot.isk-pulse),
+.isk :deep(.isk-node-dot.isk-pulse) {
+  animation: iskPulse 1.2s ease-in-out infinite;
 }
 </style>
