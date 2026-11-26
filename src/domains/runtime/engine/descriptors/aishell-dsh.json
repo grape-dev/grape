@@ -1,0 +1,33 @@
+{
+  "canonical": "aishell-dsh",
+  "aliases": [],
+  "protocol": "acp",
+  "discover": {
+    "cli": "aishell",
+    "pip": "",
+    "capability": "acp"
+  },
+  "display": {
+    "name": "AIShell-DSH",
+    "dot_color": "",
+    "icon": "/static/img/engines/AIShellDsh.svg"
+  },
+  "probe": {
+    "mode": "acp_handshake",
+    "command": [
+      "aishell",
+      "acp"
+    ],
+    "impl": "aishell_dsh_acp"
+  },
+  "model_config_path": "~/.aishell/profiles/acp",
+  "usage_retry": true,
+  "device_known": false,
+  "capabilities": {
+    "sandbox_installable": false,
+    "im_session_valid": true
+  },
+  "usage": {
+    "mode": "aishell_dsh_watermark"
+  }
+}

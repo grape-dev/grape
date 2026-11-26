@@ -1117,47 +1117,10 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
     if not body.instruction or not body.instruction.strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "巡检指令不能为空"})
 
-    import os, json, urllib.request, time
-    import yaml
+    import asyncio
+    import time
 
-    # 从 hermes config.yaml 读 LLM 配置
-    hermes_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
-    cfg_path = os.path.join(hermes_home, "config.yaml")
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            hermes_cfg = yaml.safe_load(f) or {}
-    except Exception as e:
-        raise HTTPException(status_code=503, detail={"code": 503, "message": f"无法读取 LLM 配置: {e}"})
-
-    model_cfg = hermes_cfg.get("model", {})
-    base_url = model_cfg.get("base_url", "").rstrip("/")
-    # 润色用轻量模型，不走默认的 glm-5.2（响应慢）
-    model_name = "deepseek-v4.1-flash-1017"
-    api_key = ""
-
-    # api_key 可能是 ${ENV_VAR} 格式
-    raw_key = model_cfg.get("api_key", "")
-    if raw_key.startswith("${") and raw_key.endswith("}"):
-        env_name = raw_key[2:-1]
-        api_key = os.environ.get(env_name, "")
-    elif raw_key:
-        api_key = raw_key
-
-    # fallback: 如果主配置缺 api_key，试 fallback_providers
-    if not api_key or not base_url:
-        for fb in hermes_cfg.get("fallback_providers", []):
-            fb_url = fb.get("base_url", "").rstrip("/")
-            fb_model = fb.get("model") or model_name
-            key_env = fb.get("key_env", "")
-            fb_key = os.environ.get(key_env, "") if key_env else fb.get("api_key", "")
-            if fb_url and fb_key:
-                base_url = base_url or fb_url
-                model_name = model_name or fb_model
-                api_key = api_key or fb_key
-                break
-
-    if not base_url or not api_key or not model_name:
-        raise HTTPException(status_code=503, detail={"code": 503, "message": "LLM 配置不完整（缺 base_url/api_key/model）"})
+    from src.kernel.llm import DEFAULT_MODEL, LLMConfigError, LLMRequestError, chat_completion
 
     polish_prompt = f"""请优化以下自动化任务指令，使其更清晰、更结构化。
 
@@ -1175,26 +1138,19 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
 
     def _call_llm():
         _t0 = time.time()
-        body_json = json.dumps({
-            "model": model_name,
-            "messages": [{"role": "user", "content": polish_prompt}],
-            "temperature": 0.3,
-            "max_tokens": 1000,
-            "thinking": {"type": "disabled"},
-        }).encode("utf-8")
-        req = urllib.request.Request(f"{base_url}/chat/completions", data=body_json, method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", f"Bearer {api_key}")
+        try:
+            # 润色用轻量模型，不走默认的 glm-5.2（响应慢）
+            content = chat_completion(polish_prompt, max_tokens=1000, temperature=0.3,
+                                      timeout=30, force_model=DEFAULT_MODEL)
+        except LLMConfigError as e:  # 配置缺失/不完整 → 503
+            raise HTTPException(status_code=503, detail={"code": 503, "message": str(e)})
+        except LLMRequestError as e:  # 网络/上游失败 → 500（保留原有状态码）
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"润色失败: {e}"})
         _t1 = time.time()
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        _t2 = time.time()
-        log.info(f"Autopilot polish LLM: build={(_t1-_t0)*1000:.0f}ms request={(_t2-_t1)*1000:.0f}ms total={(_t2-_t0)*1000:.0f}ms finish={data.get('choices',[{}])[0].get('finish_reason','?')}")
-        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
-        return content.strip()
+        log.info(f"Autopilot polish LLM: request={(_t1 - _t0) * 1000:.0f}ms chars={len(content)}")
+        return content
 
     try:
-        import asyncio
         polished = await asyncio.to_thread(_call_llm)
         if not polished:
             raise HTTPException(status_code=500, detail={"code": 500, "message": "润色结果为空"})
@@ -1204,6 +1160,7 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
     except Exception as e:
         log.warning(f"Autopilot polish: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": f"润色失败: {e}"})
+
 
 def _skill_display_name(skill_name: str) -> str:
     """skill 表 display_name（与场景选择处同款查询条件）；无/空返回空串由前端回退 Skill ID。"""

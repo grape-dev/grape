@@ -1,0 +1,36 @@
+{
+  "canonical": "atomcode",
+  "aliases": [],
+  "protocol": "ndjson",
+  "discover": {
+    "cli": "atomcode",
+    "pip": "@atomgit.com/atomcode"
+  },
+  "display": {
+    "name": "AtomCode",
+    "dot_color": "#e05a33",
+    "device_types": true
+  },
+  "probe": {
+    "mode": "cli_run",
+    "command": [
+      "atomcode",
+      "-p",
+      "Reply OK"
+    ],
+    "args_hook": "atomcode_help_flags",
+    "optional_flags": [
+      "--no-tools",
+      "--ephemeral"
+    ]
+  },
+  "model_config_path": "",
+  "usage_retry": false,
+  "device_known": true,
+  "capabilities": {
+    "sandbox_installable": false
+  },
+  "usage": {
+    "mode": "event_stream"
+  }
+}

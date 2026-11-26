@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import src.domains.runtime.engine.registry  # noqa: E402,F401 先触发（绕开 src.domains.runtime.agents.__init__ 循环导入）
 from src.domains.runtime.agents.hermes_acp import (  # noqa: E402
-    _ACPSimpleClient,
+    _HermesACPSimpleClient,
     _clip_tool_input,
     _extract_tool_call_input,
     _input_from_content_blocks,
@@ -51,7 +51,7 @@ class _FakeStdout:
 
 def _make_client():
     messages = []
-    client = _ACPSimpleClient(stdin=_FakeStdin(), stdout=_FakeStdout(), label="[test] ",
+    client = _HermesACPSimpleClient(stdin=_FakeStdin(), stdout=_FakeStdout(), label="[test] ",
                               on_message=lambda t, c: messages.append((t, c)))
     return client, messages
 

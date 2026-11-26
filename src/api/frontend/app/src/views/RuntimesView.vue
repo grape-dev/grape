@@ -207,7 +207,12 @@
             :style="cardLeftBorder(rt.health || rt.status || 'offline', rt)"
             @click="openEngineDetail(rt.id)"
           >
-            <img v-if="watermark(rt.name)" :src="watermark(rt.name)" class="rtv-watermark" alt="" />
+            <img
+              v-if="watermark(rt.page_type)"
+              :src="watermark(rt.page_type)"
+              class="rtv-watermark"
+              alt=""
+            />
             <div class="rtv-ecard-head">
               <span :class="['rtv-hbadge', rt.health || 'offline']"
                 ><span class="rtv-dot7"></span>{{ healthLabel(rt.health) }}</span
@@ -1273,6 +1278,7 @@ import {
 } from './runtime-tag-link.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { pluginsEnabled } from '@/lib/features'
+import { engineWatermark, loadEngineMeta } from '@/lib/engineMeta.js'
 
 const G = globalThis
 // Issue #3395：插件市场前端入口开关（服务端注入 window.__FEATURES__，默认开）
@@ -1621,14 +1627,12 @@ function copyText(txt) {
     app().showToast(t('credential.toast_copied'))
   }
 }
-function watermark(name) {
-  const n = (name || '').toLowerCase()
-  if (n.includes('aishell') || n.includes('hwcloud')) return '/static/img/engines/AIShell.svg'
-  if (n.includes('opencode')) return '/static/img/engines/opencode.png'
-  if (n.includes('hermes')) return '/static/img/engines/Hermes.png'
-  if (n.includes('codearts')) return '/static/img/engines/codearts.jpg'
-  if (n.includes('codex')) return '/static/img/engines/codex.png'
-  return ''
+// 引擎半透明底图：logo 图片水印（右下角）
+// [B6 尾/C08-A2] 图标资产从 /api/engines/meta display.icon（descriptor 派生）读取，
+// 键=后端 annotate 的 page_type（hwcloud 与 aishell 共用 AIShell.svg、aishell-dsh
+// 独立资产——2026-11-09 裁定两文件分开存可独立替换）；meta 未载入或缺 icon 返回空。
+function watermark(pageType) {
+  return engineWatermark(pageType)
 }
 function healthScoreHtml(rt) {
   const s = rt.health_score
@@ -1916,21 +1920,10 @@ function pageNums(which) {
 // 筛选选项
 const availTypes = computed(() => {
   if (tab.value === 'engines') {
+    // [B6 尾/C08-A2] 类型筛选标签=后端 annotate 的 page_type 单源派生，前端零引擎名判定
     const types = []
     runtimes.value.forEach((e) => {
-      const n = (e.display_name || e.name || e.instance_name || '').toLowerCase()
-      const tn =
-        n.includes('aishell') || n.includes('hwcloud')
-          ? 'aishell'
-          : n.includes('hermes')
-            ? 'hermes'
-            : n.includes('opencode')
-              ? 'opencode'
-              : n.includes('codearts')
-                ? 'codearts'
-                : n.includes('codex')
-                  ? 'codex'
-                  : ''
+      const tn = e.page_type || ''
       if (tn && !types.includes(tn)) types.push(tn)
     })
     return types
@@ -2919,6 +2912,7 @@ function onPluginConfigSaved() {
   if (engineDetail.value) loadRtPlugins(engineDetail.value)
 }
 onMounted(function () {
+  loadEngineMeta() // [P0b B6] 引擎水印图标元数据（/api/engines/meta，descriptor 派生）
   G.window._currentView = 'runtimes' // app.js nav 契约（已设，防御）
   document.addEventListener('click', onDocClick)
   G.window.addEventListener('grape:plugin-config-saved', onPluginConfigSaved)

@@ -262,7 +262,8 @@ def test_sandbox_mounts_only_prompt_readonly(fake_cli, tmp_path, monkeypatch):
 
 def test_registration_skills_and_usage(monkeypatch, tmp_path):
     from src.domains.runtime.agents.executor import discover_backends, get_backend
-    from src.domains.runtime.engine.agent import _backend_for_engine, _PROBE_COMMANDS
+    from src.domains.runtime.engine.agent import _backend_for_engine
+    from src.domains.runtime.engine.descriptor import get_registry
     from src.domains.runtime.engine.os_adapter import engine_skill_dirs
     from src.domains.runtime.engine.engine_select import engine_role_tags
     from src.domains.runtime.engine.usage_collect import UsageCollector
@@ -273,8 +274,17 @@ def test_registration_skills_and_usage(monkeypatch, tmp_path):
     assert discovered["pip_package"] == "@atomgit.com/atomcode"
     assert isinstance(get_backend("atomcode"), AtomCodeRuntime)
     assert _backend_for_engine("atomcode-worker-1") == "atomcode"
-    assert "--ephemeral" in _PROBE_COMMANDS["atomcode"]
-    assert "--no-tools" in _PROBE_COMMANDS["atomcode"]
+    probe_cmds = get_registry().probe_commands()  # [B5] 表已消，经 registry 派生
+    # [R3 口径] 可选开关不在 probe.command（老 CLI 收到未知 flag 会 exit=2 误报
+    # healthy 引擎为 fail）——基础命令保持最小，开关经 args_hook 按 --help 能力
+    # 追加；此处断言声明位齐备 + 装配路径生效（help 支持时 cmd 含开关）。
+    from src.domains.runtime.engine.descriptor import get_registry as _rg
+    _ap = _rg().get("atomcode").get("probe", {})
+    assert _ap["args_hook"] == "atomcode_help_flags"
+    assert "--ephemeral" in _ap["optional_flags"] and "--no-tools" in _ap["optional_flags"]
+    from src.domains.runtime.engine.probe_dispatch import _append_optional_flags_by_help
+    _cmd = _append_optional_flags_by_help(["atomcode", "-p", "Reply OK"], _ap["optional_flags"])
+    assert _cmd == ["atomcode", "-p", "Reply OK", "--ephemeral", "--no-tools"]
     # Issue #658 修订（2026-11-03 用户裁定）：引擎角色不按类型默认映射，
     # 仅显式声明 role_tags 时才硬过滤——atomcode 默认不限角色。
     assert engine_role_tags("atomcode") is None
@@ -299,15 +309,22 @@ def test_server_side_registration_is_complete():
     任一处漏登记 → 引擎已注册却无法按类型筛选 / 探活恒为 skip。
     """
     from src.domains.mgmt.routes.settings import _device_engine_types, _engine_type_of
-    from src.domains.insight.observability.engine_probe import _PROBE_COMMANDS, _probe_engine
+    from src.domains.runtime.engine.descriptor import get_registry
+    from src.domains.insight.observability.engine_probe import _probe_engine
 
     assert _engine_type_of({"name": "atomcode-worker-1"}) == "atomcode"
     assert _engine_type_of({"name": "atomcode"}) == "atomcode"
     assert _device_engine_types({"runtimes": [{"name": "atomcode-w1"}]}) == ["atomcode"]
 
-    assert "atomcode" in _PROBE_COMMANDS
-    probe = _PROBE_COMMANDS["atomcode"]
-    assert "--ephemeral" in probe and "--no-tools" in probe
+    probe_cmds = get_registry().probe_commands()  # [B5] 表已消，经 registry 派生
+    assert "atomcode" in probe_cmds
+    probe = probe_cmds["atomcode"]
+    # [R3 口径] 基础命令最小化；可选开关经 args_hook 按 help 能力追加（见上侧
+    # test_discovery 注释）——此处断言声明齐备即可，装配路径同上被覆盖。
+    _ap = get_registry().get("atomcode").get("probe", {})
+    assert probe == ["atomcode", "-p", "Reply OK"]
+    assert _ap["args_hook"] == "atomcode_help_flags"
+    assert {"--ephemeral", "--no-tools"} <= set(_ap["optional_flags"])
     # 有命令模板就不能是 skip（否则探活恒 skip，引擎永远显示未探活）
     assert _probe_engine("atomcode", "")["status"] != "skip"
 

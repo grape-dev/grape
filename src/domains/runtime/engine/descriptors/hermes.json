@@ -1,0 +1,42 @@
+{
+  "canonical": "hermes",
+  "aliases": [],
+  "protocol": "acp",
+  "discover": {
+    "cli": "hermes",
+    "pip": "hermes"
+  },
+  "display": {
+    "name": "Hermes",
+    "dot_color": "#8b5cf6",
+    "device_types": true,
+    "icon": "/static/img/engines/Hermes.png"
+  },
+  "probe": {
+    "mode": "acp_handshake",
+    "command": [
+      "hermes",
+      "acp"
+    ],
+    "impl": "hermes_acp",
+    "light_args": [
+      "acp",
+      "--check"
+    ],
+    "local_acp_deep_check": true
+  },
+  "model_config_path": "~/.hermes/config.yaml",
+  "usage_retry": true,
+  "device_known": true,
+  "capabilities": {
+    "sandbox_installable": true,
+    "im_session_valid": true
+  },
+  "usage": {
+    "mode": "hermes_cumulative"
+  },
+  "sandbox": {
+    "acp_deep_check": true,
+    "overlay_root": "~/.cache/hermes-acp-homes"
+  }
+}

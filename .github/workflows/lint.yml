@@ -89,6 +89,7 @@ jobs:
         run: |
           python -m pytest -q tests/kernel/test_issue_4295_*.py \
                             tests/api/test_issue_4295_*.py
+
       - name: Runtime auth failure budget regression (issue #4347)
         # PR #2233 第三轮复审 Required：本单 19 例新增回归此前只在本地跑过，8 个 pytest
         # step 均未登记——「IP 失败预算 → 429 / 小时封禁 / Retry-After 对齐滑动窗口 /
@@ -96,3 +97,13 @@ jobs:
         # 同目录 conftest.py 的 autouse reset 随本 step 生效；与 PR 描述「测试」段同一命令。
         run: |
           python -m pytest -q tests/runtime/test_4347_auth_failure_budget.py
+      - name: GitHub workflow capability regression (issue #4301)
+        # PR #2249 复审 Required：本单新增/改动的 4 个能力用例此前只在本地跑过，CI 里没有入口。
+        # 合入后 scope 解析（三态）、绑定期预检与落键、spec 阶段阻断、模板未知态保留四族回归
+        # 都不会变红（删任一条断言 CI 仍绿）。与 PR 描述「测试」段同一组命令，可直接复算用例数。
+        run: |
+          python -m pytest -q tests/mgmt/test_issue4301_push_capability_chain.py \
+                            tests/mgmt/test_issue4301_workflows_scope_precheck.py \
+                            tests/mgmt/test_d105m_workflows_capability.py \
+                            tests/mgmt/test_github_oauth_scope.py
+

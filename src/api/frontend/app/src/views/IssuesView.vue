@@ -237,7 +237,74 @@
         <div class="tsk-detail isk-detail">
           <template v-if="sel">
             <div v-html="detailCardHtml"></div>
+            <!-- 与全屏详情共用 dispatchDetails；列表右侧详情同样展示下派仓库/子 Issue -->
+            <div v-if="dispatchLoading" class="isk-card isk-dispatch-card">
+              <div class="isk-card-tt">{{ t('dispatch.title') }}</div>
+              <div class="isk-muted">{{ t('loading') }}</div>
+            </div>
+            <div v-else-if="dispatchDetails.length" class="isk-card isk-dispatch-card">
+              <div class="isk-card-tt">{{ t('dispatch.title') }}</div>
+              <div v-for="d in dispatchDetails" :key="'side-dispatch-' + d.id" class="isk-dispatch">
+                <div class="isk-dispatch-head">
+                  <b>{{ t('dispatch.batch') }} #{{ d.id }}</b>
+                  <span class="isk-dispatch-badge">{{ dispatchStatusLabel(d.status) }}</span>
+                  <span class="isk-muted">{{ fmtLocal(d.created_at).substring(0, 16) }}</span>
+                  <span v-if="(d.targets || []).length" class="isk-muted">
+                    {{ (d.targets || []).length }} {{ t('dispatch.targets') }}
+                  </span>
+                </div>
+                <div v-if="!(d.targets || []).length" class="isk-muted">
+                  {{ t('dispatch.empty') }}
+                </div>
+                <div
+                  v-for="tgt in d.targets || []"
+                  :key="d.id + '-side-' + tgt.repo_key"
+                  class="isk-dispatch-target"
+                >
+                  <div class="isk-dispatch-row">
+                    <span>{{ t('dispatch.repo') }}</span>
+                    <a class="isk-link" @click.prevent="openDispatchRepo(tgt)">
+                      {{ bareRepo(tgt.repo_key) }} ↗
+                    </a>
+                  </div>
+                  <div class="isk-dispatch-row">
+                    <span>{{ t('dispatch.scene') }}</span>
+                    <b>{{ tgt.scene_name || tgt.scene_id || '—' }}</b>
+                    <span v-if="tgt.scene_name && tgt.scene_id" class="isk-muted"
+                      >({{ tgt.scene_id }})</span
+                    >
+                  </div>
+                  <div class="isk-dispatch-row">
+                    <span>{{ t('dispatch.issue') }}</span>
+                    <a
+                      v-if="tgt.child_issue_number"
+                      class="isk-link"
+                      :href="vcsUrl(tgt.repo_key, '/issues/' + tgt.child_issue_number)"
+                      target="_blank"
+                      rel="noopener"
+                      >#{{ tgt.child_issue_number }} ↗</a
+                    >
+                    <span v-else class="isk-muted">—</span>
+                  </div>
+                  <div v-if="tgt.pr_number" class="isk-dispatch-row">
+                    <span>PR</span>
+                    <a
+                      class="isk-link"
+                      :href="vcsUrl(tgt.repo_key, '/pull/' + tgt.pr_number)"
+                      target="_blank"
+                      rel="noopener"
+                      >#{{ tgt.pr_number }} ↗</a
+                    >
+                  </div>
+                  <div v-if="tgt.error" class="isk-dispatch-row">
+                    <span></span>
+                    <span class="isk-dispatch-error">{{ tgt.error }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
             <div v-html="reviewBannerHtml"></div>
+            <div @click="onPipelineClick($event)" v-html="agentStatusCardHtml"></div>
             <!-- 附件区 -->
             <div class="isk-attach-card">
               <div class="isk-card-tt">{{ td('attachments') }}</div>
@@ -369,7 +436,11 @@
           <div class="isk-board-head">
             <span
               class="isk-board-dot"
-              :style="{ background: col.color, boxShadow: '0 0 6px ' + col.color + '40' }"
+              :style="{
+                background: col.color,
+                // R-Δ1：光晕同走 color-mix（token 拼不上 alpha 后缀）
+                boxShadow: '0 0 6px ' + 'color-mix(in srgb, ' + col.color + ' 25%, transparent)',
+              }"
             ></span>
             <span class="isk-board-name">{{ col.lbl }}</span>
             <span class="isk-board-cnt">{{ boardColCount(col.k) }}</span>
@@ -618,6 +689,7 @@
           </div>
         </div>
         <div v-html="reviewBannerHtml"></div>
+        <div @click="onPipelineClick($event)" v-html="agentStatusCardHtml"></div>
         <div class="isk-attach-card">
           <div class="isk-card-tt">{{ td('attachments') }}</div>
           <div class="isk-attach-list">
@@ -1132,11 +1204,13 @@ const STATUS_LABELS = computed(() => {
   })
   return out
 })
+// #4234 状态色走主题语义 token（QA Medium：原硬编码 hex 不随暗色主题适配）：
+// 进行中=accent、待输入=橙、待审核/完成=绿、未开始/已取消=次级文本色。
 const STATUS_COLORS = {
   pending: 'var(--t3)',
-  in_progress: '#3b82f6',
-  awaiting_input: '#f59e0b',
-  pending_review: '#10b981',
+  in_progress: 'var(--a)',
+  awaiting_input: 'var(--or)',
+  pending_review: 'var(--g)',
   done: 'var(--g)',
   cancelled: 'var(--t3)',
 }
@@ -1150,13 +1224,15 @@ const STAGE_LABELS = computed(() => ({
   done: t('status.tag_completed') || '已完成',
   '': '—',
 }))
+// 阶段标签色同走语义 token：vod=粉、issue=红、coding=accent、qa=紫、sre=橙、
+// 待审核/完成=绿。
 const STAGE_COLORS = {
-  vod: '#ec4899',
-  issue: '#ef4444',
-  coding: '#3b82f6',
-  qa: '#a855f7',
-  sre: '#f59e0b',
-  pending_review: '#10b981',
+  vod: 'var(--pk)',
+  issue: 'var(--r)',
+  coding: 'var(--a)',
+  qa: 'var(--pu)',
+  sre: 'var(--or)',
+  pending_review: 'var(--g)',
   done: 'var(--g)',
   '': 'var(--t3)',
 }
@@ -1709,9 +1785,13 @@ function stageStyle(tk) {
   return { color: c, background: 'color-mix(in srgb, ' + c + ' 9%, transparent)' }
 }
 function radarBg(tk) {
+  // R-Δ1：token 迁移后不得按位拼 alpha（var(--xx) 拼不上）；改 color-mix 生成半透明档，
+  // 明暗主题与 token 同源，雷达扫描在两主题下均可见（同 stageStyle 的既有先例）。
   const c = stageColor(tk)
   return {
-    background: 'conic-gradient(from 0deg, transparent 0deg, ' + c + '14 40deg, transparent 90deg)',
+    background:
+      'conic-gradient(from 0deg, transparent 0deg, ' +
+      'color-mix(in srgb, ' + c + ' 10%, transparent) 40deg, transparent 90deg)',
   }
 }
 
@@ -1783,6 +1863,53 @@ const detailCardHtml = computed(() => {
       ${tk.completed_at ? `<div class="isk-row"><span>${esc(td('detail.completed_at'))}</span><b>${esc(fmtLocal(tk.completed_at).substring(0, 16))}</b></div>` : ''}
       ${tk.task_description ? `<div class="isk-row isk-row-col isk-row-last"><span style="margin-bottom:4px">${esc(td('detail.no_description') || '任务描述')}</span><div class="isk-desc">${esc(tk.task_description)}</div></div>` : ''}
     </div>`
+})
+
+// ═══════════ Agent 节点状态卡（Issue #126 等价） ═══════════
+const agentStatusCardHtml = computed(() => {
+  const tk = detailTarget.value
+  if (!tk || !(tk.agent_statuses || []).length) return ''
+  const sm = {
+    pending: {
+      color: 'var(--t3)',
+      bg: 'var(--chip-bg)',
+      icon: '○',
+      label: t('agent_status.pending'),
+    },
+    running: { color: '#3b82f6', bg: '#3b82f6', icon: '●', label: t('agent_status.running') },
+    completed: { color: 'var(--g)', bg: 'var(--g)', icon: '✓', label: t('agent_status.completed') },
+    failed: { color: '#ef4444', bg: '#ef4444', icon: '✕', label: t('agent_status.failed') },
+    cancelled: {
+      color: 'var(--t3)',
+      bg: 'var(--chip-bg)',
+      icon: '⊘',
+      label: t('agent_status.cancelled'),
+    },
+  }
+  const statuses = tk.agent_statuses
+  let html =
+    '<div class="isk-card"><div class="isk-card-tt">' + esc(t('agent_status.title')) + '</div>'
+  html += '<div class="isk-nodebar">'
+  statuses.forEach(function (s, i) {
+    const si = sm[s.status] || sm.pending
+    const isRunningS = s.status === 'running'
+    const isCompletedS = s.status === 'completed'
+    const isFailedS = s.status === 'failed'
+    const pulseStyle = isRunningS ? ';animation:iskPulse 1.2s ease-in-out infinite' : ''
+    const seq = s.latest_seq
+    const clickable = (isRunningS || isCompletedS || isFailedS) && seq
+    const clickAttr = clickable ? ` data-isk-jump="${seq}" style="cursor:pointer"` : ''
+    html += `<div class="isk-node"${clickAttr}>`
+    html += `<div class="isk-node-dot" style="background:${si.bg}${pulseStyle}">${si.icon}</div>`
+    html += `<span class="isk-node-lbl" style="color:${si.color}">${esc(s.label || s.agent || '')}</span>`
+    html += '</div>'
+    if (i < statuses.length - 1) {
+      const lineCol = isCompletedS ? 'var(--g)' : isFailedS ? '#ef4444' : 'rgba(0,0,0,.1)'
+      html += `<div class="isk-node-line" style="background:${lineCol}"></div>`
+    }
+  })
+  html += '</div></div>'
+  return html
 })
 
 // ═══════════ Issue #539：需求级业务状态 + SRE 验收结论 ═══════════
@@ -2042,14 +2169,27 @@ function dispatchStatusLabel(status) {
   return DISPATCH_STATUS_LABELS[String(status || '')] || String(status || '—')
 }
 function dispatchTaskOrgId(tk) {
-  return String((tk && tk.org_id) || '')
+  // 只认 Issue 自己的组织归属；不回退 localStorage，避免跨组织同号议题误读批次。
+  return tk && tk.org_id ? String(tk.org_id) : ''
 }
 function loadDispatchDetails(tk) {
   const seq = ++dispatchReqSeq
   dispatchDetails.value = []
   const orgId = dispatchTaskOrgId(tk)
   // 子 Issue 看父组织需求；组织需求看自己。
-  const issueNumber = Number((tk && (tk.parent_issue_number || tk.issue_number)) || 0)
+  // 组织需求本身是「单需求」，parent_issue_number 会是 0/"0"/"#0"；
+  // 不能让这个哨兵遮蔽自己的 issue_number，否则下派查询编号=0 直接跳过。
+  let _parentRaw = ''
+  for (const _cand of [tk && tk.parent_issue_number, tk && tk.parent_issue_id]) {
+    const _v = String(_cand || '').replace(/^#/, '')
+    if (_v && _v !== '0') {
+      _parentRaw = _v
+      break
+    }
+  }
+  const _ownRaw = String((tk && tk.issue_number) || '').replace(/^#/, '')
+  const _targetRaw = _parentRaw || _ownRaw
+  const issueNumber = Number(_targetRaw) || 0
   if (!tk || tk.is_pr_event || !orgId || !issueNumber) {
     dispatchLoading.value = false
     return
@@ -3331,6 +3471,7 @@ function openDeeplinkDetailViaApi(repo, issueNum) {
         id: d.issue_id,
         issue_number: d.number,
         number: d.number,
+        org_id: d.org_id || '',
         title: d.title || '',
         status: d.task_status || 'active',
         task_status: d.task_status || '',
@@ -3341,7 +3482,7 @@ function openDeeplinkDetailViaApi(repo, issueNum) {
         creator: d.creator || '',
         is_subtask_mode: d.is_subtask_mode || 0,
         parent_issue_id: d.parent_issue_id || '',
-        repo_key: repo.repoKey || repo.fullName || '',
+        repo_key: d.repo_key || repo.repoKey || repo.fullName || '',
         created_at: '',
         events_count: d.events_count || 0,
         is_running: false,

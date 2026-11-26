@@ -1717,6 +1717,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     try:
         from src.domains.runtime.public import query_engines
         from src.domains.runtime.public import instance_name, to_display
+        from src.domains.runtime.engine.instances import page_type_of_instance
         _uname = user.get("username") or ""
 
         # Issue #1310（对齐 origin/weekly-10 dashboard.py）：凭据名缓存，供前端引擎下拉展示
@@ -1780,6 +1781,9 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                                                      else _cred_name(e.get("credential_id") or 0)),
                                      "engine_uid": e.get("engine_uid") or "",
                                      "engine_type": e.get("name") or "",
+                                     # [B6 尾/C08-A2] page_type=实例名→页面类型单源派生
+                                     # （dashboard 弹窗 availTypes/autopilot 类型归并读此字段，前端零引擎名判定）
+                                     "page_type": page_type_of_instance(e.get("name") or ""),
                                      "role_tags": _parse_role_tags(e.get("role_tags_raw") or ""),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
                                      # Issue #592（对齐 origin/weekly-10 dashboard.py）：本机直连（credential_id=0）

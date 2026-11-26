@@ -1004,20 +1004,49 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
         except Exception:
             pass  # 查询失败不阻断
 
+    _wf_warnings: list[str] = []
     if body.bot_token and not _is_placeholder(body.bot_token):
         token = body.bot_token.strip()
         # FR-9.1: verify token 有效性（与 R15 同口径）
         from src.domains.mgmt.vcs import create_provider_from_repo_key
         _vcs_provider = create_provider_from_repo_key(repo_key)
         _verified_login = ""
+        _bot_headers: dict = {}
         try:
-            _info = _vcs_provider.verify_token(token) or {}
+            # Reuse the baseline header capture (#3386 verify_token_with_headers) so
+            # the workflow verdict costs no extra /user round-trip.
+            _verify = getattr(_vcs_provider, "verify_token_with_headers", None)
+            if callable(_verify):
+                _info, _bot_headers = _verify(token)
+            else:
+                _info = _vcs_provider.verify_token(token)
             _verified_login = str((_info or {}).get("login") or "").strip()
         except Exception:
             raise HTTPException(status_code=400, detail={
                 "code": 400, "error_code": "TOKEN_INVALID",
                 "message": "Bot Token 无效，请检查后重试"
             })
+        # Issue #4301: the settings page is the SECOND writer of the repository bot
+        # token (the canonical one is PUT /repos/bot-token). Both entries must apply
+        # the same workflow precheck, otherwise a bot bound here stays silent.
+        from src.domains.mgmt.user.repo_manager import (
+            parse_x_oauth_scopes as _parse_bot_scopes,
+            workflows_probe_supported as _wf_probe_ok,
+        )
+        _wf_cap = None
+        _provider_str = repo_key.split(":", 1)[0] if ":" in repo_key else ""
+        _bot_scopes = _parse_bot_scopes(_bot_headers) if _bot_headers else None
+        if _wf_probe_ok(_provider_str):
+            _wf_cap = None if _bot_scopes is None else ("workflow" in _bot_scopes)
+            if _wf_cap is False:
+                _wf_warnings.append(
+                    "该 Bot Token 缺少 workflow 权限：涉及 .github/workflows 的推送会被 GitHub "
+                    "拒绝。请用含 workflow 权限的令牌重新绑定（经典 PAT 勾选 workflow；"
+                    "细粒度 PAT 把 Workflows 设为 Read and write）。")
+            elif _wf_cap is None:
+                _wf_warnings.append(
+                    "未能从令牌确认 workflow 权限（通常为细粒度 PAT）：请确认 Workflows 权限为 "
+                    "Read and write，否则涉及 .github/workflows 的推送会被拒绝。")
         # 先校验最终会写下去的用户名（显式值优先，其次令牌所属账号），再写令牌
         _assert_bot_username_free((body.bot_username or _verified_login or "").strip())
         _result = update_managed_repo_bot_token(repo_key, token)
@@ -1032,6 +1061,23 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
             body.bot_username = _verified_login
             _log.info(f"settings: bot username auto-filled from token owner: {_verified_login}")
         _log.info(f"settings: bot token updated for {repo_key} by user {user.get('id')}")
+        # Issue #4301: persist the known capability for the chain-based diagnosis
+        # (rc row, data-only, no DDL); unknown stays unpersisted on purpose.
+        if _wf_cap is not None:
+            try:
+                from datetime import datetime, timezone
+                from src.domains.insight.public import upsert_repo_credential_value as _rc_upsert
+                _rc_upsert(repo_key, "workflows_write", "true" if _wf_cap else "false",
+                           datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+                # Issue #4301 review F1/C3: same audit as the /repos/bot-token entry (see there).
+                from src.domains.mgmt.auth.audit import log_audit as _log_audit
+                _log_audit("repo_workflows_capability_set",
+                           user_id=str((user or {}).get("id") or ""),
+                           operator_id=str((user or {}).get("id") or ""),
+                           detail={"repo_key": repo_key, "cred_type": "workflows_write",
+                                   "capability": bool(_wf_cap), "source": "settings_gitcode_repo"})
+            except Exception as _wfe:
+                _log.warning(f"settings: persist workflows_write failed: {_wfe}")
     else:
         _result = {"ok": True, "warning": "", "related_repos": []}
     if body.bot_username:
@@ -1040,11 +1086,15 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
             _assert_bot_username_free(body.bot_username.strip())
         update_managed_repo_bot_username(repo_key, body.bot_username)
     # FR-20.11: 返回 warning + related_repos
-    _response = {"message": "GitCode Repo 配置已更新"}
+    _response: dict = {"message": "GitCode Repo 配置已更新"}
     if _result.get("warning"):
         _response["warning"] = _result["warning"]
+    _scope_warnings = list(_wf_warnings)
     if _result.get("related_repos"):
-        _response["scope_warnings"] = [f"该 Token 变更将影响 {len(_result['related_repos'])} 个关联仓库的跨仓信任域"]
+        _scope_warnings.append(
+            f"该 Token 变更将影响 {len(_result['related_repos'])} 个关联仓库的跨仓信任域")
+    if _scope_warnings:
+        _response["scope_warnings"] = _scope_warnings
     return _response
 
 @router.get("/oauth", operation_id="settings_oauth_get", summary="Get GitCode OAuth config", description="Returns whether GitCode OAuth is configured (client id/redirect uri; secret masked).")
@@ -1309,7 +1359,10 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         _ri_platform = (_ri.get("platform") or "").strip() if isinstance(_ri, dict) else ""
         _name_platform = ""
         _name_parts = (rt.get("name") or "").split(":")
-        if _name_parts and _name_parts[0] in ("hermes", "opencode", "codearts", "codex", "aishell"):
+        # [B5] 引擎名白名单派生自 descriptor（sandbox_installable 引擎的箱内
+        # CLI 名；hwcloud 以别名 aishell 出现——原手抄元组即此口径）。
+        from src.domains.runtime.engine.descriptor import get_registry as _engine_reg
+        if _name_parts and _name_parts[0] in _engine_reg().sandbox_engine_names():
             if len(_name_parts) >= 4:
                 _name_platform = _name_parts[2]
             elif len(_name_parts) == 3:
@@ -1474,6 +1527,10 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     health_stats = _health_stats(visible_runtimes)
 
     # Issue #185: 分页（page_size>0 时对 visible_runtimes 切片，total 为过滤后总数）
+    # [B6 尾/C08-A2] 每行 annotate page_type（单源派生）——前端三页类型归并/水印图
+    # 读此字段，不再 includes 名字归并（dashboard/autopilot/runtimes 零引擎名判定）。
+    for rt in visible_runtimes:
+        rt["page_type"] = _engine_type_of(rt)
     total_runtimes = len(visible_runtimes)
     if page_size and page_size > 0:
         _page = max(page, 1)
@@ -1492,45 +1549,11 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             "health_stats": health_stats}
 
 def _engine_type_of(rt: dict) -> str:
-    """从引擎名派生类型标签——走 canonical_engine 查表后转展示类型名
-    （canonical 是后端键：aishell/hwcloud → hwcloud；本函数是页面类型：
-    旧 AI Shell 显示 aishell、新引擎 aishell-dsh，与前端 _availTypes 一致）。
-    非前缀形态的历史名保留 includes 兜底（旧轨判定不变）。"""
-    n = (rt.get("instance_name") or rt.get("name") or "").lower()
-    if not n:
-        return ""
-    from src.domains.runtime.public import canonical_engine
-
-    c = canonical_engine(n)
-    if c == "aishell-dsh":
-        return "aishell-dsh"
-    if c == "hwcloud":
-        return "aishell"
-    # [云四段名] engine:template:platform:provider——canonical 已按首段解析出权威类型。
-    # 不得落入下方旧轨 includes 兜底：模板名段可含任意引擎词（hermes-git-a-ode），
-    # 旧序 hermes 先于 opencode → opencode:hermes-* 被误判为 hermes，引擎页
-    # hermes 筛选出现 opencode 云引擎（aw11 E-02 实测 2026-11-16；前端
-    # DashboardView.engEngineTypeOf 2026-11-12 已同族修复，此处对齐）。
-    if ":" in n:
-        return c
-    if c != "opencode":
-        return c
-    # 旧轨兜底：名字中段包含引擎词的历史形态（与改造前 includes 判定一致）
-    if "aishell-dsh" in n:
-        return "aishell-dsh"
-    if "aishell" in n or "hwcloud" in n:
-        return "aishell"
-    if "hermes" in n:
-        return "hermes"
-    if "opencode" in n:
-        return "opencode"
-    if "codearts" in n:
-        return "codearts"
-    if "codex" in n:
-        return "codex"
-    if "atomcode" in n:
-        return "atomcode"
-    return ""
+    """从引擎名派生类型标签（[B6 尾] 判定单源迁移至 instances.page_type_of_instance，
+    本函数保留为薄委托——既有测试/调用面 import 路径不变）。"""
+    from src.domains.runtime.engine.instances import page_type_of_instance
+    return page_type_of_instance(
+        (rt.get("instance_name") or rt.get("name") or ""))
 
 _HEALTH_STAT_KEYS = ("online", "recently_lost", "offline", "about_to_gc")
 
@@ -2014,16 +2037,17 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
             "avail_sandbox_types": _avail_sandbox_types, "has_non_sandbox": _has_non_sandbox}
 
 def _device_engine_types(d: dict) -> list:
-    """从设备的引擎列表派生引擎类型标签（与前端 _availTypes 的 includes 判定一致）。"""
-    _KNOWN = [("hermes", "hermes"), ("opencode", "opencode"),
-              ("codearts", "codearts"), ("codex", "codex"),
-              ("atomcode", "atomcode")]
+    """从设备的引擎列表派生引擎类型标签（与前端 _availTypes 的 includes 判定一致）。
+    [B3 点 7] 清单经 registry.device_type_engines() descriptor 派生（原手抄
+    _KNOWN 5 家元组）；includes 历史名扫描留代码。"""
+    from src.domains.runtime.engine.descriptor import get_registry
+    _engines = get_registry().device_type_engines()
     found = []
     for rt in d.get("runtimes", []):
         n = (rt.get("name") or "").lower()
-        for _kw, _label in _KNOWN:
-            if _kw in n and _label not in found:
-                found.append(_label)
+        for _eng in _engines:
+            if _eng in n and _eng not in found:
+                found.append(_eng)
     return found
 
 # 兼容别名：旧路径 /backend-agents（≥2 发布周期，见 agent-runtime-design.md §6.2）

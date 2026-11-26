@@ -11717,6 +11717,38 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/engines/meta": {
+      "get": {
+        "tags": [
+          "engines"
+        ],
+        "summary": "Get engine metadata",
+        "description": "Read-only engine metadata derived from engine descriptors (canonical/aliases/protocol/display/probe). New engines ship one descriptor JSON and appear here automatically.",
+        "operationId": "engines_meta",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
     "/api/plugins": {
       "get": {
         "tags": [
@@ -14271,6 +14303,185 @@
           },
           "required": true
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/convert": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Convert skill scope in place (user ↔ repo)",
+        "description": "Issue #3976: moves a skill between personal(user) and repo scope in place, keeping the skill id, version history, scene references and likes. official skills are read-only.",
+        "operationId": "skills_convert_scope",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConvertScopeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/content": {
+      "put": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Save personal skill SKILL.md without bumping version",
+        "description": "Issue #3976: replaces the SKILL.md inside a personal skill package in place. Refreshes content_hash/updated_at but does NOT write a version row. official/repo skills are read-only.",
+        "operationId": "skills_save_content",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillContentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/ai-fill": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Suggest skill metadata from SKILL.md via platform LLM",
+        "description": "Issue #3976: reads the skill's SKILL.md and asks the platform LLM to suggest summary/description/five intro slots/tags. Returns suggestions only (nothing persisted). official skills are read-only.",
+        "operationId": "skills_ai_fill",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -31314,6 +31525,24 @@
         ],
         "title": "ConversationMessage"
       },
+      "ConvertScopeRequest": {
+        "properties": {
+          "target_scope": {
+            "type": "string",
+            "title": "Target Scope"
+          },
+          "repo": {
+            "type": "string",
+            "title": "Repo",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "target_scope"
+        ],
+        "title": "ConvertScopeRequest"
+      },
       "ConvertSkillRequest": {
         "properties": {
           "skill_name": {
@@ -34648,6 +34877,19 @@
         ],
         "title": "SetPasswordBody"
       },
+      "SkillContentRequest": {
+        "properties": {
+          "content": {
+            "type": "string",
+            "title": "Content"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "title": "SkillContentRequest"
+      },
       "SloCreateBody": {
         "properties": {
           "name": {
@@ -35138,9 +35380,20 @@
             "default": ""
           },
           "description": {
-            "type": "string",
-            "title": "Description",
-            "default": ""
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "clear_description": {
+            "type": "boolean",
+            "title": "Clear Description",
+            "default": false
           },
           "avatar_url": {
             "type": "string",
@@ -35148,19 +35401,37 @@
             "default": ""
           },
           "max_members": {
-            "type": "integer",
-            "title": "Max Members",
-            "default": 0
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Members"
           },
           "max_workers": {
-            "type": "integer",
-            "title": "Max Workers",
-            "default": 0
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Workers"
           },
           "max_repos": {
-            "type": "integer",
-            "title": "Max Repos",
-            "default": 0
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Repos"
           }
         },
         "type": "object",
@@ -36255,14 +36526,19 @@
   },
   "x-changelog": {
     "version": "2.3.0a1",
-    "added": [],
+    "added": [
+      "/api/engines/meta",
+      "/api/skills/by-id/{skill_id}/ai-fill",
+      "/api/skills/by-id/{skill_id}/content",
+      "/api/skills/by-id/{skill_id}/convert"
+    ],
     "removed": [],
     "deprecated": [
       "/api/dashboard/efficiency"
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 403,
+  "x-endpoint-count": 407,
   "x-groups": [
     "a2a",
     "agents",
@@ -36271,6 +36547,7 @@
     "chat",
     "dashboard",
     "devstage",
+    "engines",
     "events",
     "feedback",
     "feishu",
@@ -36297,7 +36574,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "d0839cec8e",
-  "x-generated-at": "2026-11-25T05:56:58.190658+00:00",
-  "tags": []
+  "x-source-commit": "9aed4c0e5",
+  "x-generated-at": "2026-11-25T12:41:18.326878+00:00"
 }

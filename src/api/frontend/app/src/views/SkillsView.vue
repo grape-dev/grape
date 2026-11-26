@@ -360,6 +360,20 @@
               {{ tt('download_skill') }}
             </button>
             <button
+              v-if="detail.scope === 'repo'"
+              class="skd-btn"
+              @click="askScopeConvert(detail)"
+            >
+              {{ tt2('action.convert_to_user') }}
+            </button>
+            <button
+              v-else-if="detail.scope === 'user'"
+              class="skd-btn"
+              @click="askScopeConvert(detail)"
+            >
+              {{ tt2('action.convert_to_repo') }}
+            </button>
+            <button
               v-if="detail.scope !== 'official' || detail.can_edit_display_name"
               class="skd-btn"
               @click="askEditMeta(detail)"
@@ -449,9 +463,25 @@
           </div>
         </div>
 
-        <!-- SKILL.md -->
+        <!-- SKILL.md（个人技能可在线编辑，Issue #3976） -->
         <div v-else-if="skdTab === 'skillmd'" class="skd-panel">
-          <div class="skd-card skd-md-layout">
+          <div v-if="detail.scope === 'user'" class="skd-card skd-md-toolbar">
+            <template v-if="!mdEdit.editing">
+              <button class="skd-btn" @click="startEditMd(detail)">
+                {{ tt2('action.edit_skill_md') }}
+              </button>
+            </template>
+            <template v-else>
+              <button class="skd-btn" @click="cancelEditMd">{{ tt2('action.cancel') }}</button>
+              <button class="skd-btn skd-btn-primary" :disabled="mdEdit.busy" @click="saveSkillMd">
+                {{ mdEdit.busy ? tt2('action.saving') : tt2('action.save') }}
+              </button>
+            </template>
+          </div>
+          <div v-if="mdEdit.editing" class="skd-card">
+            <textarea v-model="mdEdit.content" class="skd-textarea skd-md-textarea" rows="24"></textarea>
+          </div>
+          <div v-else class="skd-card skd-md-layout">
             <aside v-if="skillToc.length" class="skd-toc">
               <div class="skd-toc-title">{{ tt('toc_title') }}</div>
               <a v-for="h in skillToc" :key="'toc-' + h.id" @click="jumpToHeading(h.id)">{{ h.text }}</a>
@@ -753,6 +783,17 @@
       @close="metaCtx.open = false"
     >
       <div class="sk__form sk__meta-form">
+        <div class="sk__ai-row">
+          <AGButton
+            size="sm"
+            variant="plain"
+            :disabled="metaCtx.aiBusy || metaCtx.scope === 'official' || metaCtx.busy"
+            @click="aiFillMeta"
+          >
+            {{ metaCtx.aiBusy ? tt2('action.ai_filling') : tt2('action.ai_fill') }}
+          </AGButton>
+          <span class="sk__ai-hint">{{ tt('ai_fill_hint') }}</span>
+        </div>
         <div class="sk__grp">
           <div class="sk__grp-title">{{ tt('edit_grp_base') }}</div>
           <div class="sk__fld">
@@ -879,20 +920,20 @@
     </AGModal>
 
     <!-- ═══ 转换（复制）确认弹窗 ═══ -->
-    <AGModal :open="convertCtx.open" :title="td('convert_title')" @close="convertCtx.open = false">
+    <AGModal :open="convertCtx.open" :title="tt2('convert_title')" @close="convertCtx.open = false">
       <div class="sk__conf">
         <div class="sk__conf-ic sk__conf-ic--blue">🔄</div>
         <h3>
-          {{ td('convert_name').replace('{name}', convertCtx.skill ? convertCtx.skill.name : '') }}
+          {{ tt2('convert_name').replace('{name}', convertCtx.skill ? convertCtx.skill.name : '') }}
         </h3>
         <div class="sk__conf-desc">{{ convertDesc }}</div>
       </div>
       <template #footer>
         <AGButton size="sm" variant="plain" @click="convertCtx.open = false">{{
-          td('cancel')
+          tt2('action.cancel')
         }}</AGButton>
         <AGButton size="sm" :disabled="convertCtx.busy" @click="confirmConvert">
-          {{ convertCtx.busy ? td('converting') : td('confirm_convert') }}
+          {{ convertCtx.busy ? tt2('converting') : tt2('confirm_convert') }}
         </AGButton>
       </template>
     </AGModal>
@@ -966,6 +1007,7 @@ const KEY_DEFAULTS = {
   display_name_required: '名称不能为空',
   display_name_too_long: '名称不能超过 20 个字符',
   edit_meta: '编辑信息',
+  ai_fill_hint: 'AI 识别 SKILL.md 自动填写，仅填充空白项',
   edit_grp_base: '基本信息',
   edit_grp_class: '分类与标签',
   field_description: '概述',
@@ -1066,6 +1108,21 @@ const KEY2_DEFAULTS = {
   'toast.select_zip': '请选择技能 ZIP 文件',
   'toast.update_success': '更新成功',
   'toast.update_failed': '更新失败',
+  // Issue #3976：scope 互转 / SKILL.md 在线编辑 / AI 填写
+  'action.convert_to_user': '转为个人技能',
+  'action.convert_to_repo': '转为仓库技能',
+  'action.convert_to_user_desc': '原地转为个人技能：技能 ID、历史版本与场景引用保持不变',
+  'action.convert_to_repo_desc': '原地转为仓库技能：技能 ID、历史版本与场景引用保持不变',
+  'action.edit_skill_md': '编辑 SKILL.md',
+  'action.ai_fill': 'AI 填写',
+  'action.ai_filling': 'AI 填写中...',
+  'toast.convert_success': '转换成功',
+  'toast.convert_failed': '转换失败: {{msg}}',
+  'toast.skill_md_saved': 'SKILL.md 已保存（版本号不变）',
+  'toast.skill_md_failed': '保存失败: {{msg}}',
+  'toast.skill_md_empty': 'SKILL.md 内容不能为空',
+  'toast.ai_filled': 'AI 已自动填写',
+  'toast.ai_fill_failed': 'AI 填写失败: {{msg}}',
 }
 const HUAWEI_DEFAULTS = {
   back: '返回',
@@ -1082,11 +1139,6 @@ const D = {
   to_user: '转个人',
   scope_repo: '仓库技能',
   scope_user: '个人技能',
-  convert_title: '确认复制',
-  convert_name: '确认复制「{name}」',
-  cancel: '取消',
-  converting: '复制中...',
-  confirm_convert: '确认复制',
 }
 function td(key) {
   return D[key]
@@ -2088,6 +2140,9 @@ function openDetail(id, tabKey) {
   pkg.value = null
   subSkill.value = null
   resetDetailPanels()
+  mdEdit.editing = false
+  mdEdit.content = ''
+  mdEdit.busy = false
   detailLoading.value = true
   G.API.get('/skills/by-id/' + encodeURIComponent(id))
     .then(function (d) {
@@ -2481,6 +2536,7 @@ const metaCtx = reactive({
   description: '',
   intro: { scope: '', steps: '', products: '', constraints: '', review: '' },
   busy: false,
+  aiBusy: false,
 })
 // 抽屉头部的归属上下文：scope · 仓库 · 元信息编辑不覆盖 SKILL.md 正文
 const editMetaSubtitle = computed(function () {
@@ -2526,6 +2582,40 @@ function askEditMeta(s) {
   })
   metaCtx.intro = intro
   metaCtx.busy = false
+  metaCtx.aiBusy = false
+}
+// Issue #3976：AI 填写——异步识别 SKILL.md，只回填当前为空的字段，失败不清空已填内容。
+function aiFillMeta() {
+  if (metaCtx.scope === 'official' || metaCtx.aiBusy) return
+  metaCtx.aiBusy = true
+  G.API.post('/skills/by-id/' + encodeURIComponent(metaCtx.id) + '/ai-fill', {})
+    .then(function (r) {
+      metaCtx.aiBusy = false
+      if (!r) return
+      if (!String(metaCtx.summary || '').trim() && r.summary) metaCtx.summary = r.summary
+      if (!String(metaCtx.description || '').trim() && r.description) {
+        metaCtx.description = r.description
+      }
+      var intro = r.intro || {}
+      Object.keys(metaCtx.intro || {}).forEach(function (k) {
+        if (!String(metaCtx.intro[k] || '').trim() && intro[k]) {
+          metaCtx.intro[k] = String(intro[k])
+        }
+      })
+      ;(r.tags || []).forEach(function (t) {
+        var name = String((t && t.name) || t || '').trim()
+        if (!name || metaCtx.tagsArr.length >= SKILL_MAX_TAGS) return
+        var exists = metaCtx.tagsArr.some(function (x) {
+          return String(x.name || '').toLowerCase() === name.toLowerCase()
+        })
+        if (!exists) metaCtx.tagsArr.push({ name: name, source: 'manual' })
+      })
+      G.app.showToast(tt2('toast.ai_filled'))
+    })
+    .catch(function (e) {
+      metaCtx.aiBusy = false
+      G.app.showToast(tt2('toast.ai_fill_failed').replace('{{msg}}', (e && e.message) || ''))
+    })
 }
 function doEditMeta() {
   var displayName = validateDisplayName(metaCtx.displayName)
@@ -2591,6 +2681,40 @@ function doEditMeta() {
     })
 }
 
+// ── Issue #3976：个人技能在线编辑 SKILL.md（保存不升版本） ──
+const mdEdit = reactive({ editing: false, content: '', busy: false })
+function startEditMd(d) {
+  mdEdit.content = (d && d.content) || ''
+  mdEdit.busy = false
+  mdEdit.editing = true
+}
+function cancelEditMd() {
+  mdEdit.editing = false
+  mdEdit.content = ''
+  mdEdit.busy = false
+}
+function saveSkillMd() {
+  if (!detail.value) return
+  if (!String(mdEdit.content || '').trim()) {
+    G.app.showToast(tt2('toast.skill_md_empty'))
+    return
+  }
+  mdEdit.busy = true
+  G.API.put('/skills/by-id/' + encodeURIComponent(detail.value.id) + '/content', {
+    content: mdEdit.content,
+  })
+    .then(function (r) {
+      mdEdit.busy = false
+      mdEdit.editing = false
+      G.app.showToast((r && r.message) || tt2('toast.skill_md_saved'))
+      openDetail(detail.value.id, 'skillmd')
+    })
+    .catch(function (e) {
+      mdEdit.busy = false
+      G.app.showToast(tt2('toast.skill_md_failed').replace('{{msg}}', (e && e.message) || ''))
+    })
+}
+
 // ── 删除 ──
 const deleteCtx = reactive({ open: false, skill: null, busy: false })
 function askDelete(s) {
@@ -2613,40 +2737,45 @@ function confirmDelete() {
     })
 }
 
-// ── 转换（复制） ──
-const convertCtx = reactive({ open: false, skill: null, sourceScope: 'user', busy: false })
+// ── Issue #3976：原地互转 scope（user ↔ repo，保留 id/历史版本/场景引用） ──
+const convertCtx = reactive({ open: false, skill: null, targetScope: 'user', busy: false })
 const convertDesc = computed(function () {
   if (!convertCtx.skill) return ''
-  var isUserToRepo = convertCtx.sourceScope === 'user'
-  var sourceLabel = isUserToRepo ? '个人' : '仓库'
-  var targetDesc = isUserToRepo ? '此仓库的仓库' : '个人'
-  return '将' + sourceLabel + '技能复制为' + targetDesc + '技能，原' + sourceLabel + '技能保留'
+  if (convertCtx.targetScope === 'user') {
+    return tt2('action.convert_to_user_desc')
+  }
+  return tt2('action.convert_to_repo_desc')
 })
-function askConvert(s, sourceScope) {
+function askScopeConvert(s) {
+  if (!s || s.scope === 'official') return
   convertCtx.skill = s
-  convertCtx.sourceScope = sourceScope || 'user'
+  convertCtx.targetScope = s.scope === 'repo' ? 'user' : 'repo'
   convertCtx.busy = false
   convertCtx.open = true
 }
 function confirmConvert() {
-  if (!convertCtx.skill || !currentRepo.value) {
-    G.app.showToast('请先选择仓库')
+  if (!convertCtx.skill) return
+  const target = convertCtx.targetScope
+  if (target === 'repo' && !currentRepo.value) {
+    G.app.showToast(tt2('toast.select_repo_first'))
     return
   }
   convertCtx.busy = true
-  G.API.post('/skills/convert', {
-    skill_name: convertCtx.skill.name,
-    repo: currentRepo.value,
-    source_scope: convertCtx.sourceScope,
+  G.API.post('/skills/by-id/' + encodeURIComponent(convertCtx.skill.id) + '/convert', {
+    target_scope: target,
+    repo: target === 'repo' ? currentRepo.value : '',
   })
     .then(function (r) {
       convertCtx.open = false
-      G.app.showToast(r.message || '复制成功')
+      G.app.showToast((r && r.message) || tt2('toast.convert_success'))
       loadAll()
+      if (detail.value && String(detail.value.id) === String(convertCtx.skill.id)) {
+        openDetail(convertCtx.skill.id, skdTab.value)
+      }
     })
     .catch(function (e) {
       convertCtx.busy = false
-      G.app.showToast('复制失败：' + ((e && e.message) || ''))
+      G.app.showToast(tt2('toast.convert_failed').replace('{{msg}}', (e && e.message) || ''))
     })
 }
 
@@ -3760,6 +3889,28 @@ onMounted(function () {
   font-size: 12px;
   color: var(--t2);
   cursor: pointer;
+}
+.skd-md-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.skd-md-textarea {
+  min-height: 480px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  line-height: 1.6;
+}
+.sk__ai-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--b);
+}
+.sk__ai-hint {
+  font-size: 11px;
+  color: var(--t3);
 }
 .skd-md-body {
   min-width: 0;

@@ -745,6 +745,17 @@ function loadAgentTypes() {
   }).catch(() => {});
 }
 
+// [P0b B6] 引擎元数据（/api/engines/meta，descriptor 派生）——前端不再硬编码
+// 引擎颜色表/名称判定（agents.js 徽标自此读 window._ENGINE_META/_ENGINE_DOT）。
+function loadEngineMeta() {
+  fetch('/api/engines/meta').then(r => r.json()).then(d => {
+    const metas = d.engines || [];
+    window._ENGINE_META = metas;
+    window._ENGINE_DOT = {};
+    metas.forEach(m => { window._ENGINE_DOT[m.canonical] = (m.display && m.display.dot_color) || ''; });
+  }).catch(() => {});
+}
+
   function showApp() {
     document.documentElement.setAttribute('data-logged-in', '1');
     $('loginView').classList.add('hid');
@@ -773,6 +784,7 @@ function loadAgentTypes() {
     window._currentView = '';
     $('pageContent').innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
     loadAgentTypes();
+    loadEngineMeta();
     // 串行加载：loadProfile 获取 bindings → 根据绑定状态和 hash 路由决定渲染哪个页面
     loadProfile().then(() => {
       _bootRestore();

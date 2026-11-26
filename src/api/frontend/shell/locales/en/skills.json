@@ -11,6 +11,10 @@
   "action": {
     "add_skill": "＋ Add Skill",
     "convert_to_repo": "Convert to Repo Skill",
+    "convert_to_user": "Convert to Personal Skill",
+    "edit_skill_md": "Edit SKILL.md",
+    "ai_fill": "AI Fill",
+    "ai_filling": "AI filling...",
     "view": "View",
     "delete": "Delete",
     "cancel": "Cancel",
@@ -23,7 +27,9 @@
     "back_to_huawei": "Back to Huawei Cloud Skills",
     "download_skill_title": "Download skill package zip",
     "update_skill": "Upload Update",
-    "confirm_update": "Confirm Overwrite Update"
+    "confirm_update": "Confirm Overwrite Update",
+    "convert_to_user_desc": "Convert in place to personal skill: skill ID, version history and scene references stay unchanged",
+    "convert_to_repo_desc": "Convert in place to repo skill: skill ID, version history and scene references stay unchanged"
   },
   "update": {
     "title": "Upload Skill Update",
@@ -41,6 +47,11 @@
     "select_repo_first": "Please select a current repo first",
     "convert_success": "Converted successfully",
     "convert_failed": "Convert failed: {{msg}}",
+    "skill_md_saved": "SKILL.md saved (version unchanged)",
+    "skill_md_failed": "Save failed: {{msg}}",
+    "skill_md_empty": "SKILL.md content cannot be empty",
+    "ai_filled": "AI filled the empty fields",
+    "ai_fill_failed": "AI fill failed: {{msg}}",
     "download_failed": "Failed to download skill, please try again later",
     "load_failed": "Failed to load",
     "apply_success": "Scene applied",
@@ -270,6 +281,7 @@
   "action.save": "Save",
   "action.saving": "Saving...",
   "edit_meta": "Edit skill info",
+  "ai_fill_hint": "AI reads SKILL.md and fills only the empty fields",
   "edit_grp_base": "Basics",
   "edit_grp_class": "Category & Tags",
   "field_description": "Overview",
@@ -319,5 +331,7 @@
   "tab_resources": "Resources",
   "tab_related": "Related",
   "tab_versions": "Versions",
-  "login_required": "Please sign in to comment"
+  "login_required": "Please sign in to comment",
+  "convert_title": "Confirm Scope Conversion",
+  "convert_name": "Confirm conversion of \"{name}\""
 }

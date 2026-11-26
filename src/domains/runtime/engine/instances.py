@@ -35,16 +35,13 @@ ENGINE_DISPLAY_NAMES = {
 # 解决散落各处的 startswith/in 判定顺序问题（aishell-dsh 必须先于 aishell 命中）：
 # 匹配用最长前缀（与书写顺序无关），所有引擎判定点统一改走 canonical_engine()。
 # 注意：hwcloud 与 aishell 前缀都映射回 hwcloud 后端（D1：旧名不动，backend 键不变）。
-ENGINE_CANONICAL_PREFIXES = {
-    "aishell-dsh": "aishell-dsh",
-    "aishell": "hwcloud",
-    "hwcloud": "hwcloud",
-    "hermes": "hermes",
-    "codearts": "codearts",
-    "codex": "codex",
-    "dsh": "dsh",
-    "atomcode": "atomcode",
-}
+# [P0b B3] 表数据源=engine/descriptors/*.json（prefix_map 派生：canonical+aliases，
+# 排除 is_default 与 ghost 引擎）；drift 守卫对账（本处已派生则恒一致）。
+def _descriptor_prefix_map() -> dict[str, str]:
+    from src.domains.runtime.engine.descriptor import get_registry
+    return get_registry().prefix_map()
+
+ENGINE_CANONICAL_PREFIXES = _descriptor_prefix_map()
 
 
 def canonical_engine(engine_name: str | None) -> str:
@@ -62,9 +59,59 @@ def canonical_engine(engine_name: str | None) -> str:
     return best_val if best_key else "opencode"
 
 
+def page_type_of_instance(engine_name: str | None) -> str:
+    """[B6 尾/C08-A2] 实例名→页面类型单源派生（settings._engine_type_of 迁移至此）。
+
+    canonical→页面标签经 registry.page_type() descriptor 派生（hwcloud 显示
+    历史名 aishell，单源）。非前缀历史名 includes 兜底=顺序敏感旧轨判定，
+    链留代码（B3 点 7 裁定），全仓只此一份；标签同样经 page_type() 派生。
+    """
+    n = (engine_name or "").strip().lower()
+    if not n:
+        return ""
+    from src.domains.runtime.engine.descriptor import get_registry
+    _pt = get_registry().page_type
+    c = canonical_engine(n)
+    if c == "aishell-dsh":
+        return "aishell-dsh"
+    if c == "hwcloud":
+        return "aishell"
+    # [云四段名] engine:template:platform:provider——canonical 已按首段解析出权威类型。
+    # 不得落入下方旧轨 includes 兜底：模板名段可含任意引擎词（hermes-git-a-ode），
+    # 旧序 hermes 先于 opencode → opencode:hermes-* 被误判为 hermes，引擎页
+    # hermes 筛选出现 opencode 云引擎（aw11 E-02 实测 2026-11-16；前端
+    # DashboardView.engEngineTypeOf 2026-11-12 已同族修复，此处对齐）。
+    if ":" in n:
+        return c
+    if c != "opencode":
+        return _pt(c)
+    # 旧轨兜底：名字中段包含引擎词的历史形态（顺序冻结：aishell-dsh 先于
+    # aishell/hwcloud，codearts/codex 先于 atomcode）
+    if "aishell-dsh" in n:
+        return _pt("aishell-dsh")
+    if "aishell" in n or "hwcloud" in n:
+        return _pt("hwcloud")
+    if "hermes" in n:
+        return _pt("hermes")
+    if "opencode" in n:
+        return _pt("opencode")
+    if "codearts" in n:
+        return _pt("codearts")
+    if "codex" in n:
+        return _pt("codex")
+    if "atomcode" in n:
+        return _pt("atomcode")
+    return ""
+
+
 # usage 为空时值得短重试的引擎（日志/账本异步落盘型）；aishell-dsh 的账本
 # 在会话文件（二期解析），一期虽无 usage 也保留重试口径一致。
-USAGE_RETRY_ENGINES = {"hermes", "hwcloud", "aishell-dsh"}
+# [P0b B3] 清单数据源=descriptor usage_retry 位。
+def _descriptor_usage_retry() -> set[str]:
+    from src.domains.runtime.engine.descriptor import get_registry
+    return {c for c, d in get_registry().all().items() if d.get("usage_retry")}
+
+USAGE_RETRY_ENGINES = _descriptor_usage_retry()
 
 
 def usage_retry_engine(engine_name: str | None) -> bool:

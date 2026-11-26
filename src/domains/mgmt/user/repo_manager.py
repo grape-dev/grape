@@ -802,17 +802,21 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
                 source_repo or clone_url, workdir, tmp, bot_token or user_token)
 
         # D105-17：目标 host 已从平台卡派生（见函数头部 fail-closed 前置校验）
-        # D105-18：workflows 目录处理按【凭据能力】三态判定——
-        # True=声明有权限（不删）；False=声明受限（删）；None=未声明 → 回退
-        # D105-19：平台默认值从平台卡 workflows_write 位读（github 内置卡=False，
-        # 其余 True）——provider=="github" 平台名硬分派消除，语义与存量逐字节等价。
+        # D105-18: .github/workflows handling follows the credential capability (three states):
+        # True = declared capable (keep); False = declared restricted (delete); None = **keep**
+        # Owner decision A (2026-11-25, #4301): the unknown case no longer falls
+        # back to the platform-card default (github card = false -> delete).
+        # Silent file loss was worse than an explicit failure; if the kept
+        # directory is actually refused, the push error below is translated into
+        # an actionable hint. #3386 kept this deletion behind a TODO whose exit
+        # conditions are now satisfied by #3386 (scope probe / bind warning) plus
+        # this change (task precheck, template keep), so the fallback is retired.
         _wf = (credential_workflows_write(user_id, provider)
                if user_id else None)
+        _wf_denied = _wf is False
         if _wf is None:
-            from src.domains.runtime.public import get_platform_card as _gpc
-            _pc_wf = _gpc(provider)
-            _wf = (getattr(_pc_wf, "workflows_write", True) if _pc_wf is not None else True)
-        _wf_denied = not _wf
+            log.info("push_template_to_repo: credential workflows capability unknown; "
+                     "keeping .github/workflows (owner decision A, 2026-11-25)")
         # push 目标 URL：任何分支都必须携带真实 token。
         # 历史 bug：受限分支（_wf_denied）曾拼 `https://***@host/...` —— 字面量
         # "***" 当用户名、没有密码，子进程里没有 credential helper/TTY，
@@ -823,17 +827,15 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
         # token 必须照常携带。
         target_url = f"https://oauth2:{user_token}@{_tgt_host}/{owner_login}/{target_repo}.git"
         if _wf_denied:
-            # TODO(Issue #3386): 此「无 workflow 权限 → 静默删除模板 .github/workflows」
-            # 的规避逻辑为过渡兼容保留，本单**不删除**。下线条件：默认 scope 补
-            # workflow / X-OAuth-Scopes 能力探测 / 绑定预警 / 任务预检四项上线并
-            # 验证存量凭据不再误删模板后，单独开单移除（届时此分支只保留显式
-            # False 的 fail-closed 提示，不再破坏用户模板）。
-            # token 无 workflows 权限，push 含 .github/workflows 的仓库会被拒绝
-            # ——怪癖以卡 workflows_write=False 声明（github 内置卡）。
+            # Credential EXPLICITLY declares no workflow write capability -> the
+            # push of .github/workflows would be refused, so drop the directory
+            # (deletion now follows the credential declaration, not a platform
+            # name or card default).
             _wf_dir = os.path.join(workdir, ".github", "workflows")
             if os.path.isdir(_wf_dir):
                 shutil.rmtree(_wf_dir, ignore_errors=True)
-                log.info(f"Removed .github/workflows from template (GitHub App token lacks workflow permission)")
+                log.info("Removed .github/workflows from template "
+                         "(credential declares workflows_write=False)")
         if _run_git_has_origin(workdir):
             _run_git(["remote", "remove", "origin"], workdir)
         _run_git(["remote", "add", "origin", target_url], workdir)
@@ -859,18 +861,26 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
         #      强推，则退到一次性特性分支，绝不中断建仓。
         pushed_to = "main"
         try:
-            _run_git(["push", "-u", "origin", "HEAD:main"], workdir, timeout=180)
-        except RuntimeError as _e1:
-            if _is_protected_branch_error(str(_e1)):
-                pushed_to = _push_init_branch(workdir)
-            else:
-                try:
-                    _run_git(["push", "--force", "-u", "origin", "HEAD:main"],
-                             workdir, timeout=180)
-                except RuntimeError as _e2:
-                    if not _is_protected_branch_error(str(_e2)):
-                        raise
+            try:
+                _run_git(["push", "-u", "origin", "HEAD:main"], workdir, timeout=180)
+            except RuntimeError as _e1:
+                if _is_protected_branch_error(str(_e1)):
                     pushed_to = _push_init_branch(workdir)
+                else:
+                    try:
+                        _run_git(["push", "--force", "-u", "origin", "HEAD:main"],
+                                 workdir, timeout=180)
+                    except RuntimeError as _e2:
+                        if not _is_protected_branch_error(str(_e2)):
+                            raise
+                        pushed_to = _push_init_branch(workdir)
+        except RuntimeError as _e:
+            # Template keeps .github/workflows on the unknown capability case, so a
+            # real refusal must be explained and self-fixable instead of surfacing
+            # the raw platform message to the repository-creation caller.
+            if not _is_workflow_scope_error(str(_e)):
+                raise
+            raise RuntimeError(_workflow_scope_hint(str(_e))) from _e
         if pushed_to != "main":
             log.warning(
                 f"push_template_to_repo: 默认分支受保护（{provider}，{owner_login}/{target_repo}），"
@@ -891,6 +901,28 @@ def _is_protected_branch_error(msg: str) -> bool:
         "protected branch", "protected_branch",
         "not allowed to force push",
         "You are not allowed to push code to protected"))
+
+
+def _is_workflow_scope_error(msg: str) -> bool:
+    """Detect the platform refusal caused by a credential without workflow scope (#4301)."""
+    m = (msg or "").lower()
+    if ("without `workflow` scope" in m
+            or "without 'workflow' scope" in m
+            or "without workflow scope" in m):
+        return True
+    # Fallback for reworded platform copy (review I-7): still anchored on "workflow" so an
+    # unrelated hook decline (pre-receive/secret scan) is never relabelled as this failure.
+    return "workflow" in m and ("push declined" in m or "422" in m)
+
+
+def _workflow_scope_hint(msg: str) -> str:
+    """Turn the workflow-scope refusal into an actionable error (owner decision A)."""
+    first = next((l.strip() for l in (msg or "").splitlines() if l.strip()), "")
+    return ("模板含 .github/workflows，但推送凭据没有 workflow 写权限，平台拒绝了推送"
+            + (f"：{first}" if first else "") + "。"
+            "请为推送账号补上该权限后重试：经典 PAT 勾选 workflow；细粒度 PAT 把 "
+            "Workflows 设为 Read and write；或改用有该权限的仓库 Bot；"
+            "走 GitHub 登录授权推送的，需登录渠道含 workflow 并重新授权一次。")
 
 
 def _push_init_branch(workdir: str) -> str:
@@ -1389,6 +1421,195 @@ def _github_token_scopes(api_token: str) -> str | None:
             return resp.headers.get("x-oauth-scopes")
     except Exception:
         return None
+
+
+# ── Issue #4301 (second batch): workflow capability across the push chain ──────
+# #3386 covers the binding-time probe + warning for user PATs. The items added
+# here are the ones it does not cover: bot credentials, the spec-stage blocker,
+# and a diagnosis that follows the credential that actually pushes.
+
+def workflows_write_from_scopes(scopes: "str | None") -> "bool | None":
+    """Three-state workflow capability from a raw X-OAuth-Scopes header value.
+
+    Thin adapter over ``parse_x_oauth_scopes`` (#3386) so the bot-facing entry
+    points that only hold the raw header string reuse the same parser instead of
+    carrying a second implementation: header present -> True/False, header
+    absent (fine-grained PAT / App token) -> None (unknown, never blocks).
+    """
+    if scopes is None:
+        return None
+    parsed = parse_x_oauth_scopes({"X-OAuth-Scopes": scopes})
+    return None if parsed is None else ("workflow" in parsed)
+
+
+# Platforms whose token verification returns X-OAuth-Scopes (GitHub only today).
+_WORKFLOWS_SCOPE_PLATFORMS = frozenset({"github"})
+
+
+def workflows_probe_supported(provider: str) -> bool:
+    """Whether a platform can be probed for workflow capability via its scope header."""
+    return str(provider or "").strip().lower() in _WORKFLOWS_SCOPE_PLATFORMS
+
+
+# Blocker wording per credential level: same failure, different remedy.
+_WORKFLOWS_BLOCKER_TEXTS = {
+    "pat": (
+        "当前凭据缺少 workflow 权限：涉及 .github/workflows 的推送会被 GitHub "
+        "拒绝。请重新绑定含 workflow 权限的 GitHub PAT（经典 PAT 勾选 workflow；"
+        "细粒度 PAT 勾选 Workflows: Read and write）后再执行该任务。"),
+    "repo_bot": (
+        "本仓库绑定的仓库级 Bot 凭据缺少 workflow 权限：涉及 .github/workflows 的推送"
+        "会被 GitHub 拒绝。请用含 workflow 权限的令牌重新绑定仓库 Bot（经典 PAT 勾选 "
+        "workflow；细粒度 PAT 勾选 Workflows: Read and write）后再执行该任务。"),
+    "global_bot": (
+        "平台全局 Bot 凭据缺少 workflow 权限：涉及 .github/workflows 的推送会被 GitHub "
+        "拒绝。请管理员在平台配置里换成含 workflow 权限的 Bot 令牌（经典 PAT 勾选 "
+        "workflow；细粒度 PAT 勾选 Workflows: Read and write）后再执行该任务。"),
+    "login_channel": (
+        "当前只走 GitHub 登录授权推送，而登录渠道申请的 scope 未含 workflow：涉及 "
+        ".github/workflows 的推送会被 GitHub 拒绝。请管理员把登录渠道 scope 加上 "
+        "workflow，用户重新授权一次；或改绑含 workflow 权限的 GitHub PAT。"),
+}
+
+# Where a platform-level bot capability is stored (meta, 'true'/'false' per provider).
+_GLOBAL_BOT_WORKFLOWS_META = "global_bot_{provider}_workflows_write"
+
+
+def _login_channel_scope(provider: str) -> str:
+    """Login channel scope currently requested (admin value first, file card fallback)."""
+    try:
+        from src.domains.mgmt.auth.providers import get_provider as _gp
+        return str(((_gp(provider) or {}).get("scope")) or "")
+    except Exception:
+        return ""
+
+
+def _login_channel_scope_has(provider: str, name: str) -> "bool | None":
+    """Whether the login channel requests ``name`` (None = channel declares no scope).
+
+    Channel cards separate scopes with spaces while the X-OAuth-Scopes header uses
+    commas, so both separators are accepted here (splitting on commas only would
+    report "workflow missing" for a channel that already requests it).
+    """
+    scopes = _login_channel_scope(provider)
+    if not scopes.strip():
+        return None
+    parts = {p for p in __import__("re").split(r"[,\s]+", scopes) if p}
+    return name in parts
+
+
+def _has_user_pat(user_id: str, provider: str) -> bool:
+    """Whether a PAT row exists for the user (regardless of its capability declaration).
+
+    Needed because ``credential_workflows_write`` returns None both for "row exists but
+    nothing was declared" and "no row at all"; only the second one may fall back to the
+    login-channel verdict, since ``fetch_user_token`` prefers ``<p>_pat`` over OAuth.
+    """
+    try:
+        from src.kernel.ports import tokens as _tokens
+        return bool(_tokens.get_credential(str(user_id), provider, kind="pat"))
+    except Exception:
+        return False
+
+
+def _repo_bot_workflows_write(repo_key: str) -> "bool | None":
+    """Repository bot capability from the rc table (cred_type='workflows_write')."""
+    try:
+        from src.domains.insight.public import repo_credential_value as _rcv
+        raw = str(_rcv(repo_key, "workflows_write") or "").strip().lower()
+    except Exception:
+        return None
+    return True if raw == "true" else (False if raw == "false" else None)
+
+
+def _global_bot_workflows_write(provider: str) -> "bool | None":
+    """Platform bot capability from meta (never probed -> None)."""
+    try:
+        from src.domains.mgmt.user.db import get_meta_value
+        raw = str(get_meta_value(_GLOBAL_BOT_WORKFLOWS_META.format(provider=provider)) or "")
+    except Exception:
+        return None
+    raw = raw.strip().lower()
+    return True if raw == "true" else (False if raw == "false" else None)
+
+
+def push_workflows_capability(repo_key: str) -> dict:
+    """Workflow capability + credential level of the token that actually pushes (#4301).
+
+    The level comes from ``token_resolver.resolve_exec_token`` — the same chain the
+    real push uses (rc bot -> repo bot -> global bot -> user) — so the diagnosis can
+    never drift from what would push. Returns
+    ``{"capability": True|False|None, "source": "repo_bot"|"global_bot"|"pat"|
+    "login_channel"|""}``; None = unknown (never blocks), "" = no usable credential.
+    """
+    provider = ""
+    try:
+        from src.kernel.repo_key import parse_repo_key
+        provider = parse_repo_key(repo_key or "")[0] or ""
+    except Exception:
+        provider = ""
+    level = ""
+    try:
+        from src.kernel.token_resolver import resolve_exec_token
+        level = str(getattr(resolve_exec_token(repo_key), "level", "") or "")
+    except Exception:
+        level = ""
+    if level in ("rc_bot", "repo_bot"):
+        return {"capability": _repo_bot_workflows_write(repo_key), "source": "repo_bot"}
+    if level == "global_bot":
+        return {"capability": _global_bot_workflows_write(provider), "source": "global_bot"}
+    user_id = ""
+    try:
+        from src.kernel.ports import tokens as _tokens
+        user_id = str(_tokens.get_host_user_id(repo_key) or "")
+    except Exception:
+        user_id = ""
+    if user_id not in ("", "0") and provider:
+        capability = credential_workflows_write(user_id, provider)
+        if capability is not None:
+            return {"capability": capability, "source": "pat"}
+        # A PAT row can exist while its capability is unknown (fine-grained PAT returns no
+        # X-OAuth-Scopes, so the binding precheck persists nothing). The push then uses that
+        # PAT -- the login channel is never consulted -- so a channel verdict here would be a
+        # false block with a remedy that cannot work (review C-1, PR #2249).
+        if _has_user_pat(user_id, provider):
+            return {"capability": None, "source": "pat"}
+    # Only GitHub publishes the workflow flag as an OAuth scope. Other platforms
+    # report coarse strings ("all", "user_info", "openid profile email") where the
+    # absence of a "workflow" token carries no meaning -- live probe on 276 managed
+    # repos showed 89 gitcode/gitee repos would have been blocked as false positives.
+    if provider and workflows_probe_supported(provider):
+        has = _login_channel_scope_has(provider, "workflow")
+        if has is False:
+            return {"capability": False, "source": "login_channel"}
+        if has is True:
+            # Channel requests workflow, but an existing token may predate the
+            # change -> unknown, never a false positive block.
+            return {"capability": None, "source": "login_channel"}
+    if user_id in ("", "0"):
+        return {"capability": None, "source": ""}
+    return {"capability": None, "source": "pat"}
+
+
+def workflows_capability_blocker(user_id, provider: str,
+                                 task_requires_workflows: bool = False,
+                                 repo_key: str = "") -> str:
+    """Spec-stage blocker (#4301): only an explicit False blocks; unknown never does.
+
+    With ``repo_key`` the verdict follows the credential that actually pushes;
+    without it, the legacy behaviour (user PAT only) is kept for old callers.
+    """
+    if not task_requires_workflows:
+        return ""
+    source = "pat"
+    capability = credential_workflows_write(user_id, provider)
+    if repo_key:
+        got = push_workflows_capability(repo_key)
+        capability = got.get("capability")
+        source = got.get("source") or ""
+    if capability is not False:
+        return ""
+    return _WORKFLOWS_BLOCKER_TEXTS.get(source) or _WORKFLOWS_BLOCKER_TEXTS["pat"]
 
 
 def probe_github_repo_create(api_token: str, owner: str = "", private: bool = True

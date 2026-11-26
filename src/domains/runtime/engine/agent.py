@@ -68,23 +68,34 @@ import datetime as _datetime
 
 
 # ===== 引擎探测（worker 端，每 10 分钟对本机引擎发起测试对话）=====
-
-_PROBE_COMMANDS = {
-    "opencode": ["opencode", "run", "hello"],
-    "codearts": ["codearts", "run", "hello"],
-    "codex": ["codex", "exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "hello"],
-    "cursor": ["cursor", "run", "hello"],
-    "dsh": ["dsh", "headless", "hello"],
-    # AtomCode：worker 侧探针（此前缺此条目 → 每 10 分钟上报
-    # `skip: unknown engine: atomcode`，调度层无法判断健康）。可选开关
-    # （--ephemeral/--no-tools）由 _probe_engine_worker 按 CLI help 能力追加。
-    "atomcode": ["atomcode", "-p", "Reply OK"],
-}
-_PROBE_TIMEOUT = 30
+# [P0b B3] 表数据源=engine/descriptors/*.json 的 probe.command（mode=cli_run），
+# 运行时派生（原静态表缺 atomcode=worker 探活盲区；insight 侧镜像表缺 dsh/cursor
+# ——两侧互补缺口实证，双表自此同源零漂移）。ACP 三引擎（hermes/hwcloud/
+# aishell-dsh）由 _probe_engine_worker 名字分支握手探活，不在表。
+# [P0b B5 复审 R9] 旧模块级命令表 _PROBE_COMMANDS/_PROBE_TIMEOUT 已删——
+# 深探参数单源在 descriptor（probe.command），运行时由 probe_dispatch 派发；
+# 模块级缓存还会在 import 时触发 registry 加载（探活命令查询走
+# probe_dispatch.probe_deep，无名字分支）。
 # ACP 探活超时（Issue：Windows 实测 hermes 冷启动 initialize/session/new 会到
 # 20~23s；旧的 15s 会让冷启动机器周期性误报「ACP initialize no response」）。
 # 默认 30s，可用 RUNTIME_ACP_PROBE_TIMEOUT 覆盖（5~300s）。
 _ACP_PROBE_TIMEOUT = 30
+# [P0b B5 探活合一] 名字分支已消：深探统一委托 probe_dispatch.probe_deep
+# （按 descriptor probe.mode/impl/command 派发）。本模块保留 ACP 探活实现
+# 本体（hermes/hwcloud/aishell-dsh 三函数 + Windows 兼容层）——引擎 quirk
+# 代码留实现处，分派知识在 descriptor + probe_dispatch 单点。
+from src.domains.runtime.engine import probe_dispatch as _probe_dispatch
+
+
+def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
+    """对本机引擎发起测试对话，返回探测结果（单点分派，无名字分支）。
+
+    [P0b B3] 探活分派知识单源=descriptor probe 域 + probe_dispatch；本函数仅转发。
+    opencode 模型预检（#3820）在 probe_dispatch 内做（F4 口径）。
+    """
+    return _probe_dispatch.probe_deep(engine_name, cli_path)
+
+
 _ACP_PROMPT_TIMEOUT = 30  # hermes ACP prompt 超时（模型推理需要更长时间）
 
 
@@ -975,22 +986,6 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
             _close_proc_pipes(proc)
 
 
-def _opencode_model_probe_error() -> str:
-    """opencode 探活前置：最小模型调用（Issue #3820）。
-
-    返回非空 = 配置模型名不在网关可用列表（含差异文案）；空 = 通过/不可校验（不误判）。
-    """
-    try:
-        from src.domains.runtime.engine import engine_model
-        ok, detail, error = engine_model.probe_engine_model_call("opencode")
-        if ok:
-            return ""
-        return error or str(detail.get("model_call") or "model config error")
-    except Exception as e:  # noqa: BLE001 - 探活失败不得拖垮其它引擎
-        log.warning(f"opencode model probe failed: {e}")
-        return ""
-
-
 def _attach_backend_capability(result: dict, engine_name: str) -> dict:
     """Issue #3928：给 probe_results 附后端能力态（服务端据此摘除缺 CLI 实例）。
 
@@ -1012,86 +1007,6 @@ def _attach_backend_capability(result: dict, engine_name: str) -> dict:
         result.setdefault("backend_status", "unknown")
         result.setdefault("backend_reason", f"capability mapping failed: {e}"[:240])
     return result
-
-
-def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
-    """对本机引擎发起测试对话，返回探测结果。
-
-    hermes 使用 ACP 模式探活（和实际任务执行路径一致）；
-    其他引擎使用 CLI 测试对话。
-    """
-    # hermes 使用 ACP 模式探活
-    if engine_name == "hermes":
-        return _probe_hermes_acp(cli_path)
-    # hwcloud 使用 ACP 模式探活（与实际任务执行路径一致：hwcloud serve --acp）
-    if engine_name == "hwcloud":
-        return _probe_hwcloud_acp(cli_path)
-    # aishell-dsh 使用 ACP 模式探活（与实际任务执行路径一致：aishell acp，四步全真）
-    if engine_name == "aishell-dsh":
-        return _probe_aishell_dsh_acp(cli_path)
-    # Issue #3820：opencode 先做最小模型调用（max_tokens=1）——配置模型名不在网关
-    # 可用列表时直接 fail + 差异，运行时页 probe_error 提前暴露，不再等任务 404。
-    if engine_name.startswith("opencode"):
-        _model_err = _opencode_model_probe_error()
-        if _model_err:
-            return {"status": "fail", "latency": 0, "error": _model_err}
-
-
-    cmd = _PROBE_COMMANDS.get(engine_name)
-    if not cmd:
-        return {"status": "skip", "latency": 0, "error": f"unknown engine: {engine_name}"}
-    if cli_path:
-        cmd = [cli_path] + cmd[1:]
-    # AtomCode：--ephemeral/--no-tools 只在 CLI 支持时追加（5.0.4 没有这些
-    # 开关，盲目传会 exit=2 把健康引擎误报成 fail）。
-    if engine_name == "atomcode":
-        try:
-            from src.domains.runtime.engine.atomcode import cli_help_text as _atom_help
-            _ah = _atom_help(cmd[0])
-            if _ah:
-                if "--no-tools" in _ah:
-                    cmd.append("--no-tools")
-                if "--ephemeral" in _ah:
-                    cmd.append("--ephemeral")
-        except Exception as _ae:  # noqa: BLE001 - 探测失败按基础参数探
-            log.debug(f"atomcode probe capability detection skipped: {_ae}")
-    # Issue #471 C2：codearts 探测走专用数据目录（预写目录信任）——
-    # 探测进程无 TTY，folder-trust 闸门未信任 cwd 时会 exit 1 误报引擎不健康。
-    _probe_env = None
-    if engine_name == "codearts":
-        try:
-            from src.domains.runtime.engine.codearts import probe_env as _codearts_probe_env
-            _probe_env = {**os.environ, **_codearts_probe_env(os.getcwd())}
-        except Exception as _pe:
-            log.warning(f"codearts probe env setup failed: {_pe}")
-    start = _time_mod.time()
-    try:
-        result = _subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=_PROBE_TIMEOUT, stdin=_subprocess.DEVNULL,
-            env=_probe_env,
-        )
-        latency = round(_time_mod.time() - start, 1)
-        if result.returncode == 0:
-            return {"status": "ok", "latency": latency, "error": ""}
-        else:
-            err = (result.stderr or result.stdout or "").strip()[:200]
-            return {"status": "fail", "latency": latency, "error": f"exit={result.returncode}: {err}"}
-    except _subprocess.TimeoutExpired:
-        latency = round(_time_mod.time() - start, 1)
-        return {"status": "fail", "latency": latency, "error": f"timeout ({_PROBE_TIMEOUT}s)"}
-    except FileNotFoundError:
-        return {"status": "fail", "latency": 0, "error": "CLI not found"}
-    except OSError as e:
-        latency = round(_time_mod.time() - start, 1)
-        _msg = f"{type(e).__name__}: {e}"[:200]
-        if _is_spawn_failure(e):
-            return {"status": "spawn_failed", "latency": latency,
-                    "error": f"spawn failed: {_msg}"}
-        return {"status": "fail", "latency": latency, "error": _msg}
-    except Exception as e:
-        latency = round(_time_mod.time() - start, 1)
-        return {"status": "fail", "latency": latency, "error": str(e)[:200]}
 
 
 def _probe_backoff_seconds(fail_streak: int, base: float | None = None,

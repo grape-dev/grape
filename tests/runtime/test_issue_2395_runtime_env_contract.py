@@ -128,32 +128,50 @@ class _FakeACP:
                         "errors": [], "stderr": ""})
 
 
+class _FakeAcpShell:
+    """统一 _stream_acp 的 backend 壳：acp_backend() 钩子自报 ACP 能力。
+
+    [C1 整改] P0a A3 已把三份 _stream_*_acp 收敛为 executor._stream_acp；
+    本套件随迁——同一 backend 壳注入不同引擎的 acp 实现类，验证统一路径
+    对三引擎的 env 注入契约（DEVOPS_EVENT_TYPE 真实事件类型）。
+    """
+
+    def __init__(self, acp_cls):
+        self._acp_cls = acp_cls
+
+    def acp_backend(self):
+        return self._acp_cls()
+
+
 class TestEnginePathsUseUnifiedContract:
     def _run_acp(self, module_name, fn_name, patch_target):
-        import importlib
-        mod = importlib.import_module(module_name)
-        with mock.patch.object(mod, patch_target, _FakeACP):
-            list(getattr(ex, fn_name)(
-                "p", "/tmp", "", "a2a_event", None,
-                "XOcto", 0, {"ACCOUNT": "XOcto"}, "", "",
-                "", "", 60, repo_key="gitcode:o/r",
-            ))
+        """[C1] 统一路径口径：经 executor._stream_acp 以 backend 壳执行。
+
+        壳的 acp_backend() 直接返回 _FakeACP 实例（引擎实现类在统一路径下
+        可整体替换——契约面是 env 注入，不依赖真实引擎实现细节）。
+        """
+        shell = _FakeAcpShell(_FakeACP)
+        list(ex._stream_acp(
+            "p", "/tmp", "", "a2a_event", shell,
+            "XOcto", 0, {"ACCOUNT": "XOcto"}, "", "",
+            "", "", 60, repo_key="gitcode:o/r",
+        ))
         return _FakeACP.last_instance.captured
 
     def test_hermes_acp_path_injects_real_event_type(self):
         env = self._run_acp("src.domains.runtime.agents.hermes_acp",
-                            "_stream_hermes_acp", "HermesACPBackend")
+                            "hermes", "HermesACPBackend")
         assert env["DEVOPS_EVENT_TYPE"] == "a2a_event"
         assert env["ACCOUNT"] == "XOcto"
 
     def test_hwcloud_acp_path_injects_real_event_type(self):
         env = self._run_acp("src.domains.runtime.agents.hwcloud_acp",
-                            "_stream_hwcloud_acp", "HwcloudACPBackend")
+                            "hwcloud", "HwcloudACPBackend")
         assert env["DEVOPS_EVENT_TYPE"] == "a2a_event"
 
     def test_aishell_acp_path_injects_real_event_type(self):
         env = self._run_acp("src.domains.runtime.agents.aishell_acp",
-                            "_stream_aishell_dsh_acp", "AishellDshACPBackend")
+                            "aishell-dsh", "AishellDshACPBackend")
         assert env["DEVOPS_EVENT_TYPE"] == "a2a_event"
 
     def test_generic_cli_path_injects_real_event_type(self):

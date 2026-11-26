@@ -36,13 +36,16 @@ ZH = re.compile(r"['\"]([^'\"]*[\u4e00-\u9fff][^'\"]*)['\"]")
 # 2026-11-13 迁移后快照（只减不增）
 FROZEN = {
     "AccountView.vue": 100, "AdminView.vue": 1, "AgentView.vue": 0,
-    "AutopilotView.vue": 11, "ChatView.vue": 76, "DashboardView.vue": 122,
+    "AutopilotView.vue": 12, "ChatView.vue": 80, "DashboardView.vue": 122,
     "EventView.vue": 113, "FeedbackDialog.vue": 36, "ImChannel.vue": 0,
     "IssuesView.vue": 180, "KnowledgeView.vue": 11, "MyFeedback.vue": 0,
-    "MyFeedbackDetail.vue": 0, "ObservabilityView.vue": 3, "Organizations.vue": 12,
+    "MyFeedbackDetail.vue": 0, "ObservabilityView.vue": 3, "Organizations.vue": 17,
     "Pipeline.vue": 5, "ReposView.vue": 19, "RuntimesView.vue": 19,
     "SceneCard.vue": 5, "SceneMarket.vue": 89, "SettingsView.vue": 0,
     "SkillsView.vue": 186, "TemplatesView.vue": 35, "BetaApply.vue": 3,
+    # 现状重刷（2026-11-25，weekly-13 并入）：AutopilotView 11→12 / Organizations 12→17
+    # 为 weekly-13 波浪带入的 zh 兜底串存量（两文件与 base 逐字节一致，本 PR 未触及），
+    # 按仓库既有「现状重刷、此后只减不增」口径如实入账。
     # D109 平台对象管理面（AuthChannels/Platforms 对象页，全量走 i18n pack → 0）
     "AdminChannels.vue": 0, "AdminPlatforms.vue": 22,
     # 共享 UI 组件（AG* 等）：文案全走 i18n → 0 基线

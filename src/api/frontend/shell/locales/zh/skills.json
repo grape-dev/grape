@@ -11,6 +11,10 @@
   "action": {
     "add_skill": "＋ 新增技能",
     "convert_to_repo": "转为仓库技能",
+    "convert_to_user": "转为个人技能",
+    "edit_skill_md": "编辑 SKILL.md",
+    "ai_fill": "AI 填写",
+    "ai_filling": "AI 填写中...",
     "view": "查看",
     "delete": "删除",
     "cancel": "取消",
@@ -23,7 +27,9 @@
     "back_to_huawei": "返回华为云技能包",
     "download_skill_title": "下载技能包 zip",
     "update_skill": "上传更新",
-    "confirm_update": "确认覆盖更新"
+    "confirm_update": "确认覆盖更新",
+    "convert_to_user_desc": "原地转为个人技能：技能 ID、历史版本与场景引用保持不变",
+    "convert_to_repo_desc": "原地转为仓库技能：技能 ID、历史版本与场景引用保持不变"
   },
   "update": {
     "title": "上传更新技能",
@@ -41,6 +47,11 @@
     "select_repo_first": "请先选择当前仓库",
     "convert_success": "转换成功",
     "convert_failed": "转换失败: {{msg}}",
+    "skill_md_saved": "SKILL.md 已保存（版本号不变）",
+    "skill_md_failed": "保存失败: {{msg}}",
+    "skill_md_empty": "SKILL.md 内容不能为空",
+    "ai_filled": "AI 已自动填写",
+    "ai_fill_failed": "AI 填写失败: {{msg}}",
     "download_failed": "下载技能失败，请稍后重试",
     "load_failed": "加载失败",
     "apply_success": "场景已应用",
@@ -270,6 +281,7 @@
   "action.save": "保存",
   "action.saving": "保存中...",
   "edit_meta": "编辑信息",
+  "ai_fill_hint": "AI 识别 SKILL.md 自动填写，仅填充空白项",
   "edit_grp_base": "基本信息",
   "edit_grp_class": "分类与标签",
   "field_description": "概述",
@@ -319,5 +331,7 @@
   "tab_resources": "资源",
   "tab_related": "相关技能",
   "tab_versions": "版本历史",
-  "login_required": "请先登录后再发表评论"
+  "login_required": "请先登录后再发表评论",
+  "convert_title": "确认转换作用域",
+  "convert_name": "确认转换「{name}」"
 }

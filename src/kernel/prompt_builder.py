@@ -9,6 +9,7 @@ from src.kernel.ports import engines as _engines
 from src.kernel.ports import tokens as _tokens
 from src.kernel.ports import vcs_cards as _vcs_cards
 from src.kernel.ports import plugins as _plugins
+from src.kernel.ports import repos as _repos
 
 # 部署根目录（历史遗留路径 devops-bot 已迁至 grape；统一由 DB_PATH 推导）
 _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
@@ -1057,6 +1058,55 @@ def _build_plugin_capability_section(repo_key: str, agent_type: str = "",
     )
     return "\n".join(lines)
 
+
+# Issue #4301 (Spec AC5): a task touching .github/workflows counts as workflow work.
+# The minority spelling (Windows separators) is covered too; unrelated tasks inject nothing.
+_WORKFLOWS_TASK_RE = re.compile(r"\.github\s*[/\\]\s*workflows", re.IGNORECASE)
+# Only agents that produce the Spec/plan need the blocker before acting (AC5 spec stage).
+_SPEC_STAGE_AGENT_TYPES = ("issue", "coding")
+
+
+def _build_workflows_blocker_section(repo_key: str, agent_type: str = "",
+                                     task_text: str = "") -> str:
+    """Issue #4301 Spec AC5: inject the workflow capability blocker while assembling the spec.
+
+    Consumes ``repo_manager.workflows_capability_blocker`` through the ``repos`` port
+    (kernel never imports domains) and only when:
+      1) the agent produces the Spec/plan (issue / coding);
+      2) the task text mentions ``.github/workflows``;
+      3) the bound user's credential domain EXPLICITLY lacks workflow write (three-state False).
+    Otherwise (capable / unknown / unbound / read failure) it returns an empty string.
+    """
+    if agent_type not in _SPEC_STAGE_AGENT_TYPES:
+        return ""
+    if not repo_key or ":" not in str(repo_key) or not task_text:
+        return ""
+    if not _WORKFLOWS_TASK_RE.search(task_text):
+        return ""
+    try:
+        from src.kernel.repo_key import parse_repo_key
+        provider = parse_repo_key(repo_key)[0]
+        user_id = str(_tokens.get_host_user_id(repo_key) or "")
+        # 0/'' = no bound host user for this repo -> nothing to read (no blocker)
+        if user_id in ("", "0"):
+            return ""
+        # Issue #4301, second batch (owner decision 2026-11-25): pass repo_key so the verdict follows
+        # the real push chain (repo bot -> global bot -> PAT -> login channel scope), not just the PAT.
+        blocker = _repos.workflows_capability_blocker(user_id, provider, True, repo_key)
+    except Exception as _e:
+        _log_safe("debug", f"prompt_builder: workflows blocker probe failed: {_e}")
+        return ""
+    if not blocker:
+        return ""
+    return (
+        "\n## Spec Stage Capability Blocker (workflows)\n"
+        "本任务涉及 `.github/workflows`，平台已预检该仓库绑定凭据的 workflow 写能力：\n"
+        f"{blocker}\n"
+        "MUST: 在需求/Spec 与方案阶段就写明该前置条件与阻断风险（不要等到编码完成后的 "
+        "`git push` 才暴露失败），并在交办编码前告知用户需要补齐凭据权限。\n"
+    )
+
+
 def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,
                  agent_type=""):
     number = extract_event_number(evt['payload'])
@@ -1074,10 +1124,14 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
                       ensure_ascii=False)
     parts = []
     evt_type = evt.get("type", "event")
+    # Issue #4301 (Spec AC5): raw task text (the untruncated body also feeds the check)
+    _wf_text_parts = [str(issue_data.get("title", "") or ""),
+                       str(issue_data.get("body", issue_data.get("description", "")) or "")]
 
     # A2A context injection —— Issue 编号放在最主要位置
     a2a_ctx = evt.get("_a2a_context", "")
     if a2a_ctx:
+        _wf_text_parts.append(str(a2a_ctx))
         issue_num = evt.get("issue_id", "") or ""
         if issue_num:
             parts.append(f"## Task Issue: {issue_num}\n")
@@ -1108,6 +1162,8 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         note = ""
         if isinstance(payload.get("object_attributes"), dict):
             note = payload["object_attributes"].get("note", "")
+        if note:
+            _wf_text_parts.append(str(note))
         prefix = f"User commented on issue #{number} of {repo}" if number is not None else f"User commented on {repo}"
         parts.append(prefix)
         if note:
@@ -1314,6 +1370,13 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
                 _log.warning(f"plugin capability section injection failed: {_e}")
             except Exception:
                 pass
+
+    # Issue #4301 (Spec AC5): inject the workflow blocker while assembling the spec/plan.
+    # Only the repo_key carried by evt is used (a spliced key points at the wrong repo).
+    _wf_section = _build_workflows_blocker_section(
+        _rk, agent_type=agent_type, task_text=" ".join(_wf_text_parts))
+    if _wf_section:
+        parts.append(_wf_section)
 
     parts.append("\n## Role Definition\n" + build_role_definition(skills, agent_type=agent_type, repo_key=_rk))
 

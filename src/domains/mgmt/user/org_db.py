@@ -209,17 +209,29 @@ def list_user_orgs(user_id: str) -> list[dict]:
         return [dict(zip(cols, r)) for r in rows]
 
 
-def update_org(org_id: str, name: str = "", description: str = "",
-               avatar_url: str = "", settings: str = "",
-               max_members: int = 0, max_workers: int = 0,
-               max_repos: int = 0) -> bool:
-    """更新组织信息（仅非空/非零字段）。"""
+def update_org(org_id: str, name: str | None = None,
+               description: str | None = None,
+               avatar_url: str | None = None, settings: str | None = None,
+               max_members: int | None = None, max_workers: int | None = None,
+               max_repos: int | None = None, clear_description: bool = False) -> bool:
+    """更新组织信息。
+
+    字段语义：
+    - ``None`` = 不修改；空字符串 = 历史“不修改”，避免旧客户端整包 PUT 时清空描述；
+      显式清空必须传 ``clear_description=True``（A14 兼容面）。
+    - 上限字段 ``None``/``0`` = 不修改；``0`` 保留历史语义，避免旧客户端把额度误改为 0。
+    - 组织存在但本次没有字段变化 → 返回 True，不能再用 ``rowcount=0`` 判成“组织不存在”
+      （MySQL 下同值 UPDATE 的 affected rows 为 0，会误报 404）。
+    """
     sets = []
     params = []
     if name:
         sets.append("name=?")
         params.append(name)
-    if description is not None and description != "":
+    if clear_description:
+        sets.append("description=?")
+        params.append("")
+    elif description is not None and description != "":
         sets.append("description=?")
         params.append(description)
     if avatar_url:
@@ -228,24 +240,29 @@ def update_org(org_id: str, name: str = "", description: str = "",
     if settings:
         sets.append("settings=?")
         params.append(settings)
-    if max_members and max_members > 0:
+    if max_members is not None and max_members > 0:
         sets.append("max_members=?")
         params.append(max_members)
-    if max_workers and max_workers > 0:
+    if max_workers is not None and max_workers > 0:
         sets.append("max_workers=?")
         params.append(max_workers)
-    if max_repos and max_repos > 0:
+    if max_repos is not None and max_repos > 0:
         sets.append("max_repos=?")
         params.append(max_repos)
-    if not sets:
-        return True
-    sets.append("updated_at=datetime('now')")
-    params.append(org_id)
     with db_lock:
         c = db.cursor()
+        if not sets:
+            c.execute("SELECT 1 FROM organization WHERE id=?", (org_id,))
+            return c.fetchone() is not None
+        sets.append("updated_at=datetime('now')")
+        params.append(org_id)
         c.execute(f"UPDATE organization SET {', '.join(sets)} WHERE id=?", params)
         db.commit()
-        return c.rowcount > 0
+        if c.rowcount > 0:
+            return True
+        # rowcount=0 只说明字段值没变化，不能据此判断组织不存在。
+        c.execute("SELECT 1 FROM organization WHERE id=?", (org_id,))
+        return c.fetchone() is not None
 
 
 def delete_org(org_id: str) -> bool:

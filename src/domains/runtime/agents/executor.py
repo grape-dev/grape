@@ -12,6 +12,7 @@ from .dsh import DshBackend
 from .atomcode import AtomCodeBackend
 from .hwcloud import HwcloudBackend
 from .aishell_acp import AishellDshACPBackend
+from .mock_acp import MockACPBackend
 
 _bwrap_fail_notified = False
 _SESSION_AUTH_FILE_GLOB = ".grape-sess-*.tok"
@@ -141,6 +142,7 @@ _BACKENDS = {
     "atomcode": AtomCodeBackend(),
     "hwcloud": HwcloudBackend(),
     "aishell-dsh": AishellDshACPBackend(),
+    "mock-acp": MockACPBackend(),
 }
 
 # 运行中的 agent 子进程注册表：供服务停机时统一终止，避免 uvicorn 优雅停机
@@ -419,7 +421,22 @@ def register_backend(name: str, backend: AgentBackend):
 
 
 def get_backend(name: str) -> AgentBackend:
-    return _BACKENDS.get(name, _BACKENDS["opencode"])
+    """按名取 backend，未注册显式抛错（P0-4 暗雷修复，2026-11-13 spec A4/A5）。
+
+    历史行为是静默 fallback opencode——拼写错的引擎名会「跑错引擎」而非报错，
+    descriptor 化迁移期尤其危险。显式失败语义在 get_backend_or_none 已局部存在，
+    本函数扶正为主路径；消息带已注册清单便于排障。
+
+    调用方对账（改前盘点）：裸调点仅 executor.py:918（暗雷入口，期望受益）；
+    cloud_worker.py:789 已 try/except 包裹（抛错后走 fail log，语义正好成立）；
+    vcs/adapter.py:49 是同名不同函数（显式 None 判定），不受影响。
+    """
+    if name not in _BACKENDS:
+        raise KeyError(
+            f"unknown agent backend: {name!r}; registered backends: "
+            f"{sorted(_BACKENDS.keys())}"
+        )
+    return _BACKENDS[name]
 
 
 def get_backend_or_none(name: str | None = "") -> AgentBackend | None:
@@ -439,19 +456,12 @@ def discover_backends() -> list[dict]:
 
     Unix: shutil.which() 查 PATH。
     Windows: shutil.which() 查 PATH（含 PATHEXT）+ os_adapter 额外查找常见安装目录。
+    [P0b B3] 引擎清单单源=engine/descriptors/*.json（discover_map 派生），
+    drift 守卫 scripts/engine_descriptor_drift.py 对账——新增引擎只落 descriptor。
     """
     from src.domains.runtime.engine.os_adapter import find_cli
-    known = {
-        "opencode": {"cli": "opencode", "pip": "opencode"},
-        "codearts": {"cli": "codearts", "pip": "codearts-cli"},
-        "hermes": {"cli": "hermes", "pip": "hermes"},
-        "codex": {"cli": "codex", "pip": "@openai/codex"},
-        "dsh": {"cli": "dsh", "pip": "@deepseek-ai/dsh"},
-        "atomcode": {"cli": "atomcode", "pip": "@atomgit.com/atomcode"},
-        "hwcloud": {"cli": "hwcloud", "pip": ""},
-        "aishell-dsh": {"cli": "aishell", "pip": "", "capability": "acp"},
-        "cursor": {"cli": "cursor", "pip": "cursor"},
-    }
+    from src.domains.runtime.engine.descriptor import get_registry
+    known = get_registry().discover_map()
     results = []
     for name, info in known.items():
         cli_path = find_cli(info["cli"])
@@ -467,6 +477,7 @@ def discover_backends() -> list[dict]:
         results.append({
             "name": name,
             "installed": installed,
+            "cli": info["cli"],
             "cli_path": cli_path if installed else "",
             "pip_package": info["pip"],
         })
@@ -656,19 +667,29 @@ def _oom_kill_evidence() -> bool:
     return False
 
 
-def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
-                       account, user_id, env_extra, bot_token, user_token,
-                       agent_name, agent_label, max_exec_seconds,
-                       repo_key: str = "") -> Generator:
-    """hermes ACP 模式入口：构建 env → 调 hermes_acp.HermesACPBackend.stream_execute。
+def _stream_acp(prompt, cwd, session_id, event_type, backend,
+                account, user_id, env_extra, bot_token, user_token,
+                agent_name, agent_label, max_exec_seconds,
+                repo_key: str = "") -> Generator:
+    """ACP 引擎统一入口（P0a A3，2026-11-13 spec：三份同构 _stream_*_acp 收敛）。
 
-    与 stream_agent 的 opencode/codearts 路径并行，不走 build_args/parse_output。
+    分派判定 = backend 自报 acp_backend() 能力钩子（与引擎名解耦，duck-typed；
+    不用 protocol 属性——云沙箱路径已用其判定 hermes 专用 ACP 云分支，本机
+    分派不得连带改变云路径语义）。引擎 quirk 全部经钩子注入：
+    - env 组装：acp.get_env（各引擎自带凭据/环境注入）；
+    - prepare_env（可选，aishell 形态）：env_extra 合并后落 0600 token 文件，
+      结束时清 cwd 下 .grape-sess-*.tok（含 kill 后残留的 glob 兜底）；
+    - 事件流：acp.stream_execute（hermes/hwcloud/aishell 的差异已收编到
+      各自客户端薄子类，见 acp_client.py）。
+    脱敏/占位符/事件收口与原三函数逐行同构（等价性由 C02-C04 E2E 闸门守护）。
     """
-    from src.domains.runtime.agents.hermes_acp import HermesACPBackend
+    acp = backend.acp_backend()
 
     label = f"{agent_label} " if agent_label else ""
 
-    acp = HermesACPBackend()
+    # 基线清理 helper 的 cutoff 锚（只清本任务窗口内创建的 token 文件，不误删并发任务文件）
+    task_started_at = time.time()
+
     env = acp.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
 
@@ -685,161 +706,21 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
                                 repo_key=repo_key, label=label,
                                 backend_name=(getattr(backend, "name", "") or ""))
 
-    # 技能路径占位符替换（direct 模式：按 skills/<agent_type>/<skill>/ 结构解析）
-    try:
-        from src.kernel.config import replace_skill_dir_placeholders
-        prompt = replace_skill_dir_placeholders(prompt)
-    except Exception:
-        pass
-
-    # 脱敏 token 列表
-    _tokens = [t for t in (bot_token, user_token) if t]
-
-    def _redact_text(text):
-        if not text or not _tokens:
-            return text
-        s = str(text)
-        for t in _tokens:
-            if t:
-                s = s.replace(t, "[REDACTED]")
-        return s
-
-    # 会话失效重试（与 stream_agent 一致）
-    for evt_type, data in acp.stream_execute(
-        prompt, cwd, session_id=session_id, env=env,
-        max_exec_seconds=max_exec_seconds, agent_label=label,
-    ):
-        if evt_type == "text":
-            yield ("text", _redact_text(data))
-        elif evt_type == "tool_use":
-            if isinstance(data, dict):
-                data["input"] = _redact_text(json.dumps(data.get("input", {}), ensure_ascii=False, default=str))
-            yield ("tool_use", data)
-        elif evt_type == "tool_result":
-            yield ("tool_result", _redact_text(data))
-        elif evt_type == "done":
-            if isinstance(data, dict):
-                data["text"] = _redact_text(data.get("text", ""))
-                data["stderr"] = _redact_text(data.get("stderr", ""))
-            yield ("done", data)
-        else:
-            yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
-
-
-def _stream_hwcloud_acp(prompt, cwd, session_id, event_type, backend,
-                        account, user_id, env_extra, bot_token, user_token,
-                        agent_name, agent_label, max_exec_seconds,
-                        repo_key: str = "") -> Generator:
-    """hwcloud ACP 模式入口：构建 env → 调 hwcloud_acp.HwcloudACPBackend.stream_execute。
-
-    与 _stream_hermes_acp 并行（docs/hwcloud-runtime-acp-design.md）：
-    - provider 凭据经 env 注入（HWCLOUD_PROVIDER_*，hwcloud_acp 写入 per-task
-      settings.json）；来源：env_extra（用户云凭据 provider=opengw 按 user_id 注入）
-    - session_id 一期不使用（resume 不校验存在性，见设计实测行为 §5）
-    """
-    from src.domains.runtime.agents.hwcloud_acp import HwcloudACPBackend
-
-    label = f"{agent_label} " if agent_label else ""
-
-    acp = HwcloudACPBackend()
-    env = acp.get_env(account=account, user_id=user_id)
-    env["DEVOPS_EVENT_TYPE"] = event_type
-
-    _assemble_env(env, kind=("chat" if event_type == "chat" else "devops"),
-                  label=label, bot_token=bot_token, user_token=user_token,
-                  user_id=user_id, repo_key=repo_key)
-    if agent_name:
-        env["AGENT_NAME"] = agent_name
-    if env_extra:
-        env.update(env_extra)
-    _apply_runtime_env_contract(env, event_type=event_type, account=account,
-                                repo_key=repo_key, label=label,
-                                backend_name=(getattr(backend, "name", "") or ""))
-
-    # 技能路径占位符替换（direct 模式）
-    try:
-        from src.kernel.config import replace_skill_dir_placeholders
-        prompt = replace_skill_dir_placeholders(prompt)
-    except Exception:
-        pass
-
-    # 脱敏 token 列表
-    _tokens = [t for t in (bot_token, user_token) if t]
-
-    def _redact_text(text):
-        if not text or not _tokens:
-            return text
-        s = str(text)
-        for t in _tokens:
-            if t:
-                s = s.replace(t, "[REDACTED]")
-        return s
-
-    for evt_type, data in acp.stream_execute(
-        prompt, cwd, session_id=session_id, env=env,
-        max_exec_seconds=max_exec_seconds, agent_label=label,
-    ):
-        if evt_type == "text":
-            yield ("text", _redact_text(data))
-        elif evt_type == "tool_use":
-            if isinstance(data, dict):
-                data["input"] = _redact_text(json.dumps(data.get("input", {}), ensure_ascii=False, default=str))
-            yield ("tool_use", data)
-        elif evt_type == "tool_result":
-            yield ("tool_result", _redact_text(data))
-        elif evt_type == "done":
-            if isinstance(data, dict):
-                data["text"] = _redact_text(data.get("text", ""))
-                data["stderr"] = _redact_text(data.get("stderr", ""))
-            yield ("done", data)
-        else:
-            yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
-
-
-def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
-                            account, user_id, env_extra, bot_token, user_token,
-                            agent_name, agent_label, max_exec_seconds,
-                            repo_key: str = "") -> Generator:
-    """aishell-dsh ACP 模式入口：构建 env → 调 aishell_acp.AishellDshACPBackend.stream_execute。
-
-    与 _stream_hwcloud_acp 并行（docs/todo/2026-11-06-aishell-dsh-implement-plan.html）：
-    - 凭据设备预配置（D3/D4），grape 不注 key；模型路由 env AISHELL_DSH_MODEL 可选覆盖
-    - 脱敏/占位符/技能路径复用与 hwcloud 相同的收口
-    """
-    from src.domains.runtime.agents.aishell_acp import AishellDshACPBackend
-
-    label = f"{agent_label} " if agent_label else ""
-    task_started_at = time.time()
-
-    acp = AishellDshACPBackend()
-    env = acp.get_env(account=account, user_id=user_id)
-    env["DEVOPS_EVENT_TYPE"] = event_type
-
-    _assemble_env(env, kind=("chat" if event_type == "chat" else "devops"),
-                  label=label, bot_token=bot_token, user_token=user_token,
-                  user_id=user_id, repo_key=repo_key)
-    if agent_name:
-        env["AGENT_NAME"] = agent_name
-    if env_extra:
-        env.update(env_extra)
-    _apply_runtime_env_contract(env, event_type=event_type, account=account,
-                                repo_key=repo_key, label=label,
-                                backend_name=(getattr(backend, "name", "") or ""))
-
-    # 任务级 env 合并完成后的收尾钩子（同 executor 通用 CLI 路径语义）：
+    # 任务级 env 合并完成后的收尾钩子（aishell 形态；同原通用 CLI 路径语义）：
     # aishell（dsh 框架）会 scrub env 里 /TOKEN/i 变量，prepare_env 把
     # GRAPE_SESSION_TOKEN 落成 0600 临时文件 + GRAPE_AUTH_FILE 穿透。
     # 必须在 env_extra 之后：token 是任务级的，此刻才进 env。
     _auth_file = None
-    try:
-        _prepare_env = getattr(acp, "prepare_env", None)
-        if callable(_prepare_env):
+    _prepare_env = getattr(acp, "prepare_env", None)
+    _has_prepare_env = callable(_prepare_env)
+    if _has_prepare_env:
+        try:
             # 传 cwd：bwrap 沙箱 /tmp 为私有 tmpfs，token 文件须落工位目录才沙箱内可见
             _auth_file = _prepare_env(env, cwd=cwd)
-    except Exception as _pe:
-        log.warning(f"{label}prepare_env failed: {_pe}")
+        except Exception as _pe:
+            log.warning(f"{label}prepare_env failed: {_pe}")
 
-    # 技能路径占位符替换（direct 模式）
+    # 技能路径占位符替换（direct 模式：按 skills/<agent_type>/<skill>/ 的结构解析）
     try:
         from src.kernel.config import replace_skill_dir_placeholders
         prompt = replace_skill_dir_placeholders(prompt)
@@ -1301,29 +1182,11 @@ def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
     # text_separator 是 AgentRuntime 基类的新增能力；自定义后端可能没有——缺失按换行拼接。
     _text_sep = getattr(backend, "text_separator", "\n")
 
-    # ── hermes ACP 专用路径 ──
-    if backend_name == "hermes":
-        yield from _stream_hermes_acp(
-            prompt, cwd, session_id, event_type, backend,
-            account, user_id, env_extra, bot_token, user_token,
-            agent_name, agent_label, max_exec_seconds,
-            repo_key=repo_key,
-        )
-        return
-
-    # ── hwcloud ACP 专用路径（docs/hwcloud-runtime-acp-design.md）──
-    if backend_name == "hwcloud":
-        yield from _stream_hwcloud_acp(
-            prompt, cwd, session_id, event_type, backend,
-            account, user_id, env_extra, bot_token, user_token,
-            agent_name, agent_label, max_exec_seconds,
-            repo_key=repo_key,
-        )
-        return
-
-    # ── aishell-dsh ACP 专用路径（docs/issues/aishell-dsh-runtime-acp-implement-plan.md）──
-    if backend_name == "aishell-dsh":
-        yield from _stream_aishell_dsh_acp(
+    # ── ACP 引擎统一路径（P0a A3：按 backend 自报 acp_backend() 能力分派，不按引擎名）──
+    # 新接入 ACP 引擎 = 薄 backend 子类（含 quirk）+ _BACKENDS 一行注册，零 executor 改动。
+    _acp_factory = getattr(backend, "acp_backend", None)
+    if callable(_acp_factory):
+        yield from _stream_acp(
             prompt, cwd, session_id, event_type, backend,
             account, user_id, env_extra, bot_token, user_token,
             agent_name, agent_label, max_exec_seconds,
@@ -1449,57 +1312,9 @@ def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
         if hasattr(os, "getpgid"):  # POSIX：独立进程组，便于整组优雅终止
             _popen_kwargs["start_new_session"] = True
 
-        # hermes 引擎：每个子进程隔离 HERMES_HOME → 独立 state.db，避免并发争锁
-        # （多 hermes chat -q 子进程共享 ~/.hermes/state.db 时 SQLite 写锁互斥阻塞）
-        # 必须把 config.yaml / .env 复制过去，否则 hermes 在空目录里找不到 provider/key
+        # hermes CLI iso-home 隔离块已删（P0b 死代码清理）：P0a A3 后 hermes
+        # 本机执行恒走 ACP（acp_backend 能力钩子在 CLI 段前 return），本块不可达。
         _proc_env = _serve_env  # codearts 方案E2: 用 pre_exec 返回的 env（含 CODEARTS_SERVER_PASSWORD）
-        _iso_home = ""
-        if backend.name == "hermes":
-            import tempfile, shutil as _sh
-            # 使用当前用户家目录下的缓存目录，避免 /tmp 多用户权限冲突（issue #238）
-            _hermes_iso_root = os.path.join(os.path.expanduser("~"), ".cache", "hermes-iso")
-            os.makedirs(_hermes_iso_root, exist_ok=True)
-            _iso_home = tempfile.mkdtemp(prefix="hermes-iso-", dir=_hermes_iso_root)
-            # 从默认 HERMES_HOME（~/.hermes 或 env HERMES_HOME）复制配置文件
-            _src_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
-            for _cfg in ("config.yaml", ".env", "SOUL.md"):
-                _src = os.path.join(_src_home, _cfg)
-                if os.path.isfile(_src):
-                    try:
-                        _sh.copy2(_src, os.path.join(_iso_home, _cfg))
-                    except Exception:
-                        pass
-            # 覆写 config.yaml 中的 tool_progress 为 new（减少 state.db 写入量，
-            # 避免 hermes 内部多线程争锁）。env HERMES_TOOL_PROGRESS_MODE 已 deprecated，
-            # config.yaml 优先级更高，必须改文件才生效。
-            _cfg_path = os.path.join(_iso_home, "config.yaml")
-            if os.path.isfile(_cfg_path):
-                try:
-                    with open(_cfg_path, "r", encoding="utf-8") as _f:
-                        _cfg_text = _f.read()
-                    import re as _re
-                    _cfg_text = _re.sub(
-                        r'(tool_progress:\s*)\w+',
-                        r'\g<1>new',
-                        _cfg_text)
-                    with open(_cfg_path, "w", encoding="utf-8") as _f:
-                        _f.write(_cfg_text)
-                except Exception:
-                    pass
-            # 注入 _grape_memory_db.pth：让 hermes state.db 使用 :memory:（纯内存）。
-            # sitecustomize.py 方式不稳定（import hermes_state 在 Python 启动初期可能失败）。
-            # .pth 文件由 site 模块在 sys.path 初始化后处理，hermes_state 此时已可 import。
-            _inject_dir = os.path.join(_iso_home, "py_inject")
-            os.makedirs(_inject_dir, exist_ok=True)
-            with open(os.path.join(_inject_dir, "_grape_memory_db.pth"), "w", encoding="utf-8") as _f:
-                _f.write("import hermes_state, pathlib; hermes_state.DEFAULT_DB_PATH = pathlib.Path(':memory:')\n")
-            _proc_env = dict(env)
-            _proc_env["HERMES_HOME"] = _iso_home
-            _old_pp = _proc_env.get("PYTHONPATH", "")
-            from src.domains.runtime.engine.os_adapter import path_separator
-            _sep = path_separator()
-            _proc_env["PYTHONPATH"] = _inject_dir + (_sep + _old_pp if _old_pp else "")
-            log.info(f"{label}hermes HERMES_HOME isolated: {_iso_home} (state.db=:memory: via .pth)")
 
         # 组件2：文件系统隔离（issue #500：GRAPE_AGENT_SANDBOX 关闭时先短路，
         # 不进入 sandbox 导入/包装/告警路径，杜绝 wrap failed 刷屏噪音）
@@ -1840,13 +1655,7 @@ def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
                     _serve_proc.kill()
             log.info(f"{label}codearts serve (pid={_serve_proc.pid}) killed, RSS released")
 
-        # 清理 hermes 隔离的 HERMES_HOME 临时目录（state.db 等不再需要）
-        if backend.name == "hermes" and _iso_home:
-            try:
-                import shutil as _shutil
-                _shutil.rmtree(_iso_home, ignore_errors=True)
-            except Exception:
-                pass
+        # hermes iso-home 临时目录清理已随隔离块删除（P0b 死代码清理，同上）。
 
         # ── 异常退出遗言补采（issue #317）──
         # exit!=0 且 stderr 为空 = 引擎"无遗言"死亡：补采 stdout 尾部进 errors；

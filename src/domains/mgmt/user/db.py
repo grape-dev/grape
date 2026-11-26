@@ -4616,8 +4616,14 @@ def is_known_engine_name(name: str) -> bool:
     name = (name or "").strip().lower()
     if not name:
         return False
-    # 静态白名单（避免 lazy import 循环引用导致 always False）
-    _KNOWN = {"opencode", "codearts", "hermes", "codex", "cursor", "atomcode"}
+    # [P0b B3] 静态白名单改由 descriptor 派生（device_known 位；原硬编码 6 引擎
+    # 漏 dsh/hwcloud/aishell-dsh 曾致拒建占位行——散布点收编，新增引擎只落
+    # descriptor JSON）。异常回退静态表，防 descriptor 目录缺失时防幽灵失效。
+    try:
+        from src.domains.runtime.engine.descriptor import get_registry
+        _KNOWN = {c for c, d in get_registry().all().items() if d.get("device_known")}
+    except Exception:
+        _KNOWN = {"opencode", "codearts", "hermes", "codex", "cursor", "atomcode"}
     if name in _KNOWN:
         return True
     try:

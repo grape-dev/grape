@@ -14,13 +14,15 @@
     "client_id": "<your-github-client-id>",
     "client_secret": "<your-github-client-secret>",
     "redirect_uri": "https://<your-grape-domain>/api/auth/callback/github",
-    "scope": "read:user user:email"
+    "scope": "read:user user:email repo workflow admin:repo_hook"
   }
 }
 ```
 
 - 在 GitHub **Settings → Developer settings → OAuth Apps** 创建应用，`Authorization callback URL` 填 `https://<你的域名>/api/auth/callback/github`（与 `redirect_uri` 完全一致）。
-- 登录 `scope` 只申请身份范围（`read:user user:email`），不用于仓库写操作（D108-B）。仓库读写请使用 PAT，创建时勾选 `repo` 与 `workflow`（Issue #3386：缺 `workflow` 会导致 `.github/workflows` 推送被 GitHub 拒绝）。
+- `scope` 分三组：身份 `read:user user:email`、仓库读写 `repo`、工作流 `workflow` + webhook 管理 `admin:repo_hook`。**`workflow` 不可省**：缺它时任何含 `.github/workflows/*.yml` 的推送会被 GitHub 拒绝（`refusing to allow a Personal Access Token to create or update workflow ... without workflow scope`，Issue #4301 / #3386），Grape 只能把工作流塞进 `ci/` 并等人工补交。
+- 刻意不申请 `offline_access`：它只影响 refresh_token 签发（把登录令牌变成长期令牌），对仓库写与推工作流无增益。代价是**升级 scope 后需要全体 GitHub 用户重新授权一次**（GitHub 按 scope 比对记住授权，scope 变化会重新弹授权页）。
+- 仓库写也可走凭据域 PAT（创建时勾选 `repo` + `workflow`）；登录令牌与 PAT 并存，PAT 配了优先用 PAT（2026-11-14 口径）。
 
 **如何验证**：Grape 登录页出现 GitHub 入口 → 点击 → GitHub 授权后回跳并登录成功。
 

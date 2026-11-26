@@ -136,6 +136,7 @@
 import { ref, computed } from 'vue'
 import AGCard from '@/components/ui/AGCard.vue'
 import AGButton from '@/components/ui/AGButton.vue'
+import { loadEngineMeta } from '@/lib/engineMeta.js'
 
 const G = globalThis
 
@@ -336,6 +337,7 @@ function unbindVodIm() {
 // Issue #108: 滚动定位到第一个高亮事件行
 import { onMounted } from 'vue'
 onMounted(function () {
+  loadEngineMeta() // [P0b B6] 引擎徽标元数据（/api/engines/meta，descriptor 派生）
   if (highlightId.value) {
     setTimeout(function () {
       const el = document.querySelector('.hl-flash')

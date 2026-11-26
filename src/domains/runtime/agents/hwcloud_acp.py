@@ -297,7 +297,7 @@ class HwcloudACPBackend:
             _is_chat_task = (_evt == "chat") or ("chat" in _ag.lower())
 
         # ── ACP JSON-RPC 客户端 ──
-        client = _ACPSimpleClient(
+        client = _HwcloudACPSimpleClient(
             stdin=proc.stdin,
             stdout=proc.stdout,
             label=label,
@@ -693,259 +693,69 @@ class HwcloudACPBackend:
             # settings.json 含明文 api_key 但目录已 0700。
             _res.dispose(kill_procs=False)
 
-class _ACPSimpleClient:
-    """极简 ACP JSON-RPC 客户端：request/response + notification 处理。"""
+# ═══════════════ [P0-1/A5] ACP 客户端单源化（2026-11-13 spec）═══════════════
+# 机制（transport/pending/生命周期/收线分派）迁至 acp_client.py；本文件只保留
+# hwcloud 引擎 quirk（fs RPC 实盘服务 / 噪音过滤清单 / plan_update 透传），
+# 在薄子类覆写。aishell_acp 的客户端自此直接 import acp_client 单源。
+from src.domains.runtime.agents.acp_client import (  # noqa: F401
+    _ACPSimpleClient as _ACPSimpleClientBase,
+    _UPDATE_TYPE_MAP,
+    _normalize_update_type,
+    _tool_name_from_title,
+)
 
-    def __init__(self, stdin, stdout, label="", on_message=None, on_prompt_done=None, on_prompt_error=None):
-        self.stdin = stdin
-        self.stdout = stdout
-        self.label = label
-        self.on_message = on_message or (lambda t, c: None)
-        self.on_prompt_done = on_prompt_done or (lambda r: None)
-        self.on_prompt_error = on_prompt_error or (lambda e: None)
-        # 注意：不做 self._on_prompt_done = self.on_prompt_done 别名快照——
-        # 构造后再赋 client.on_prompt_done = ... 时快照仍是 no-op（hermes_acp 的
-        # 潜伏 bug，其生产靠 60s text 静默超时兜底硬撑）。调用点直接读公开属性。
+# hwcloud 噪音事件（阶段 0 实测）：新会话首轮必发 available_*/mcp_servers/
+# session_info/usage_update——不进 grape 事件流。
+_IGNORED_UPDATE_TYPES = {
+    "available_commands_update",
+    "available_skills_update",
+    "mcp_servers_update",
+    "session_info_update",
+    "usage_update",
+}
 
-        self._write_lock = threading.Lock()
-        self._next_id = 1
-        self._pending: dict[int, threading.Event] = {}
-        self._pending_results: dict[int, any] = {}
-        self._pending_errors: dict[int, str] = {}
-        self._prompt_req_id: int = 0  # session/prompt 的 req_id（只有它才触发 prompt_done）
-        self._lock = threading.Lock()
 
-    def write_line(self, data: bytes):
-        with self._write_lock:
-            self.stdin.write(data)
-            self.stdin.flush()
+class _HwcloudACPSimpleClient(_ACPSimpleClientBase):
+    """hwcloud 版 ACP 客户端 = 单源机制 + hwcloud quirk 覆写（不复制基类代码）。"""
 
-    def request(self, method: str, params: dict, timeout: float = 60) -> tuple[dict | None, str | None]:
-        """发送 JSON-RPC 请求，等待响应。返回 (result, error)。"""
-        with self._lock:
-            req_id = self._next_id
-            self._next_id += 1
-            evt = threading.Event()
-            self._pending[req_id] = evt
+    def _ignore_update(self, update_type_norm: str) -> bool:
+        return update_type_norm in _IGNORED_UPDATE_TYPES
 
-        msg = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
-        data = (json.dumps(msg) + "\n").encode("utf-8")
+    def _fs_read_text_file(self, raw: dict, req_id):
+        # Agent→Client RPC：agent 读客户端侧文件（Agent→Client tools 的底层调用，
+        # initialize 已声明 fs.readTextFile 能力）。grape 环境本就有全盘文件访问。
+        params = raw.get("params") or {}
+        path = params.get("path") or ""
         try:
-            self.write_line(data)
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            resp = {"jsonrpc": "2.0", "id": req_id, "result": {"content": content}}
         except Exception as e:
-            with self._lock:
-                del self._pending[req_id]
-            return None, f"write {method}: {e}"
-
-        if evt.wait(timeout=timeout):
-            with self._lock:
-                result = self._pending_results.pop(req_id, None)
-                error = self._pending_errors.pop(req_id, None)
-                self._pending.pop(req_id, None)
-            return result, error
-        else:
-            with self._lock:
-                self._pending.pop(req_id, None)
-            return None, f"{method} timeout after {timeout}s"
-
-    def handle_line(self, line: str):
-        """处理从 hwcloud stdout 收到的一行 JSON-RPC 消息。"""
-        try:
-            raw = json.loads(line)
-        except json.JSONDecodeError:
-            return
-
-        # 1. Response（有 id，有 result/error）→ 匹配 pending request
-        if "id" in raw and ("result" in raw or "error" in raw):
-            self._handle_response(raw)
-            return
-
-        # 2. Agent → client request（有 id，有 method）→ 回复
-        if "id" in raw and "method" in raw:
-            self._handle_agent_request(raw)
-            return
-
-        # 3. Notification（无 id，有 method）→ session/update 等
-        if "method" in raw and "id" not in raw:
-            self._handle_notification(raw)
-            return
-
-    def _handle_response(self, raw: dict):
-        req_id = raw["id"]
-        with self._lock:
-            evt = self._pending.get(req_id)
-        if evt is None:
-            # 未匹配的 response，记录但不处理
-            return
-
-        is_prompt_response = (req_id == self._prompt_req_id)
-
-        if "error" in raw:
-            err = raw["error"]
-            err_msg = err.get("message", str(err))
-            if err.get("data"):
-                err_msg += f" (data={err['data']})"
-            with self._lock:
-                self._pending_errors[req_id] = err_msg
-            # 只有 session/prompt 的 error 才触发 prompt_done
-            if is_prompt_response:
-                self.on_prompt_done({"stopReason": "error", "result": raw})
-        else:
-            result = raw.get("result")
-            with self._lock:
-                self._pending_results[req_id] = result
-            # 只有 session/prompt 的 response 才触发 prompt_done
-            if is_prompt_response:
-                if isinstance(result, dict):
-                    stop_reason = result.get("stopReason", "")
-                    if stop_reason:
-                        self.on_prompt_done({"stopReason": stop_reason, "result": result})
-                    else:
-                        log.info(f"{self.label}hwcloud ACP prompt response without stopReason, treating as done (id={req_id})")
-                        self.on_prompt_done({"stopReason": "end_turn", "result": result})
-                else:
-                    self.on_prompt_done({"stopReason": "end_turn", "result": result or {}})
-
-        evt.set()
-
-    def _write_response(self, resp: dict):
-        """Agent→Client 请求的应答统一写出（NDJSON 一行）。"""
-        data = (json.dumps(resp) + "\n").encode("utf-8")
-        try:
-            self.write_line(data)
-        except Exception as e:
-            log.warning(f"{self.label}hwcloud ACP write response error: {e}")
-
-    def _handle_agent_request(self, raw: dict):
-        """处理 agent → client 的 JSON-RPC 请求（如 session/request_permission）。"""
-        method = raw.get("method", "")
-        req_id = raw["id"]
-
-        if method == "fs/read_text_file":
-            # Agent→Client RPC：agent 读客户端侧文件（Agent→Client tools 的底层调用，
-            # initialize 已声明 fs.readTextFile 能力）。grape 环境本就有全盘文件访问。
-            params = raw.get("params") or {}
-            path = params.get("path") or ""
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read()
-                resp = {"jsonrpc": "2.0", "id": req_id, "result": {"content": content}}
-            except Exception as e:
-                resp = {"jsonrpc": "2.0", "id": req_id,
-                        "error": {"code": -32000, "message": f"read {path}: {e}"}}
-            self._write_response(resp)
-            return
-
-        if method == "fs/write_text_file":
-            # Agent→Client RPC：agent 写客户端侧文件（initialize 已声明 fs.writeTextFile）。
-            params = raw.get("params") or {}
-            path = params.get("path") or ""
-            content = params.get("content") or ""
-            try:
-                _pd = os.path.dirname(path)
-                if _pd:
-                    os.makedirs(_pd, exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                resp = {"jsonrpc": "2.0", "id": req_id, "result": {}}
-            except Exception as e:
-                resp = {"jsonrpc": "2.0", "id": req_id,
-                        "error": {"code": -32000, "message": f"write {path}: {e}"}}
-            self._write_response(resp)
-            return
-
-        if method == "session/request_permission":
-            # 自动批准 allow_once（兜底：default_mode=auto 下通常不触发，
-            # 会话级 mode 覆盖或策略降级时触发）
-            params = raw.get("params")
-            if not isinstance(params, dict):
-                params = {}
-            options = params.get("options", [])
-            option_id = ""
-            for opt in options:
-                kind = opt.get("kind", "")
-                if kind == "allow_once":
-                    option_id = opt.get("optionId", "")
-                    break
-                if kind == "allow_always" and opt.get("optionId") in ("allow_session", "approve_for_session"):
-                    option_id = opt.get("optionId", "")
-                    break
-            if not option_id:
-                # fallback: 第一个 allow 类
-                for opt in options:
-                    if opt.get("kind", "") in ("allow_once", "allow_always"):
-                        option_id = opt.get("optionId", "")
-                        break
-
-            resp = {
-                "jsonrpc": "2.0", "id": req_id,
-                "result": {"outcome": {"outcome": "selected", "optionId": option_id}},
-            }
-        else:
-            resp = {
-                "jsonrpc": "2.0", "id": req_id,
-                "error": {"code": -32601, "message": f"method not found: {method}"},
-            }
-
+            resp = {"jsonrpc": "2.0", "id": req_id,
+                    "error": {"code": -32000, "message": f"read {path}: {e}"}}
         self._write_response(resp)
 
-    def _handle_notification(self, raw: dict):
-        """处理 session/update 通知（agent 消息、工具调用等）。"""
-        method = raw.get("method", "")
-        if method not in ("session/update", "session/notification"):
-            return
-        if not isinstance(raw.get("params"), dict):
-            return
-        update = raw["params"].get("update", raw["params"])
-        if not isinstance(update, dict):
-            return
+    def _fs_write_text_file(self, raw: dict, req_id):
+        # Agent→Client RPC：agent 写客户端侧文件（initialize 已声明 fs.writeTextFile）。
+        import os as _os
+        params = raw.get("params") or {}
+        path = params.get("path") or ""
+        content = params.get("content") or ""
+        try:
+            _pd = _os.path.dirname(path)
+            if _pd:
+                _os.makedirs(_pd, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            resp = {"jsonrpc": "2.0", "id": req_id, "result": {}}
+        except Exception as e:
+            resp = {"jsonrpc": "2.0", "id": req_id,
+                    "error": {"code": -32000, "message": f"write {path}: {e}"}}
+        self._write_response(resp)
 
-        # 提取 update type
-        update_type = update.get("sessionUpdate", update.get("type", ""))
-        update_type_norm = _normalize_update_type(update_type)
-        if not update_type_norm:
-            # 尝试 externally-tagged object
-            if len(update) == 1:
-                key = list(update.keys())[0]
-                update_type_norm = _normalize_update_type(key)
-                update = update[key] if isinstance(update.get(key), dict) else update
-            if not update_type_norm:
-                return
-
-        # hwcloud 噪音事件忽略（阶段 0 实测：新会话首轮必发，
-        # available_*/mcp_servers/session_info/usage_update 不进 grape 事件流）
-        if update_type_norm in _IGNORED_UPDATE_TYPES:
-            return
-
-        if update_type_norm == "agent_message_chunk":
-            text = update.get("content", {}).get("text", "")
-            if text:
-                self.on_message("text", text)
-        elif update_type_norm == "agent_thought_chunk":
-            text = update.get("content", {}).get("text", "")
-            if text:
-                self.on_message("thinking", text)
-        elif update_type_norm == "tool_call":
-            tool_call_id = update.get("toolCallId", "")
-            name = update.get("name", "")
-            title = update.get("title", "")
-            raw_input = update.get("rawInput") or update.get("input") or update.get("parameters") or {}
-            tool_name = _tool_name_from_title(title) or name
-            if tool_name:
-                self.on_message("tool_use", {"tool": tool_name, "input": raw_input})
-        elif update_type_norm == "tool_call_update":
-            status = update.get("status", "")
-            title = update.get("title", update.get("name", ""))
-            tool_name = _tool_name_from_title(title) or title
-            if status in ("completed", "failed"):
-                self.on_message("tool_finish", f"Tool {tool_name} {status}")
-                # 提取 output
-                output = update.get("rawOutput") or update.get("output")
-                if output:
-                    output_text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)[:500]
-                    self.on_message("tool_result", output_text)
-        elif update_type_norm == "plan_update":
-            # hwcloud 新增：计划条目更新，映射 text 透传（一期不单独建事件类型）
+    def _process_extra_update(self, update_type_norm: str, update: dict):
+        # hwcloud 新增：计划条目更新，映射 text 透传（一期不单独建事件类型）
+        if update_type_norm == "plan_update":
             entries = update.get("entries", [])
             if isinstance(entries, list):
                 titles = []
@@ -955,47 +765,8 @@ class _ACPSimpleClient:
                 line = "[plan] " + " | ".join(t for t in titles if t)
                 if line.strip() != "[plan]":
                     self.on_message("text", line)
-        elif update_type_norm == "turn_end":
-            # 提取 stopReason
-            stop_reason = update.get("stopReason", "")
-            self.on_prompt_done({"stopReason": stop_reason, "result": update})
 
-# hwcloud 噪音事件（阶段 0 实测）：available_*/mcp_servers/session_info/usage
-_IGNORED_UPDATE_TYPES = {
-    "available_commands_update",
-    "available_skills_update",
-    "mcp_servers_update",
-    "session_info_update",
-    "usage_update",
-}
 
-_UPDATE_TYPE_MAP = {
-    "agentmessagechunk": "agent_message_chunk",
-    "agentthoughtchunk": "agent_thought_chunk",
-    "toolcall": "tool_call",
-    "toolcallupdate": "tool_call_update",
-    "planupdate": "plan_update",
-    "usageupdate": "usage_update",
-    "turnend": "turn_end",
-    "endturn": "turn_end",
-}
-
-def _normalize_update_type(t: str) -> str:
-    key = t.lower().replace("_", "").replace("-", "")
-    return _UPDATE_TYPE_MAP.get(key, "")
-
-def _tool_name_from_title(title: str) -> str:
-    if not title:
-        return ""
-    title = title.strip()
-    if title.startswith("💻") or title.startswith("$ "):
-        return "terminal"
-    if title.startswith("✅"):
-        return ""
-    # 直接就是 tool name
-    if title.replace("_", "").replace("-", "").isalnum():
-        return title
-    return title
 
 def _extract_session_id(result) -> str:
     if not result or not isinstance(result, dict):

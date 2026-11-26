@@ -621,6 +621,28 @@ def verify_token(provider: str, token: str) -> dict:
     return {"provider": provider, "login": login, "name": user_data.get("name") or login}
 
 
+def verify_token_with_scopes(provider: str, token: str) -> "tuple[dict, 'set[str] | None']":
+    """Verify a bot token and return the parsed X-OAuth-Scopes of the same /user reply.
+
+    Rides on the baseline capability ``verify_token_with_headers`` (#3386) so bot
+    and user entries share one probe path and one parser (``parse_x_oauth_scopes``);
+    a missing header (fine-grained PAT / App token) yields None = unknown.
+    """
+    from src.domains.mgmt.user.repo_manager import parse_x_oauth_scopes
+    from src.domains.mgmt.vcs import create_provider
+    provider_obj = create_provider(provider)
+    verify = getattr(provider_obj, "verify_token_with_headers", None)
+    if callable(verify):
+        info, headers = verify(token)
+    else:  # provider without header support -> plain verify, capability unknown
+        info, headers = provider_obj.verify_token(token), {}
+    if not isinstance(info, dict):
+        raise RuntimeError(f"verify_token_with_scopes({provider}): empty user info")
+    login = str(info.get("login", "") or "")
+    return {"provider": provider, "login": login,
+            "name": info.get("name") or login}, parse_x_oauth_scopes(headers)
+
+
 def _global_bot_token_swap_wrapper(provider: str, old_token: str, new_token: str):
     """R21.1.3/R21.1.7: 后台线程 wrapper——加分布式锁 + 异常隔离。"""
     try:

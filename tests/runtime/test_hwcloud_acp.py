@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import src.domains.runtime.engine.registry  # noqa: E402,F401 先触发（绕开 src.domains.runtime.agents.__init__ 循环导入）
 from src.domains.runtime.agents.hwcloud_acp import (  # noqa: E402
     HwcloudACPBackend,
-    _ACPSimpleClient,
+    _HwcloudACPSimpleClient,
     _build_task_settings,
     _normalize_update_type,
     _extract_session_id,
@@ -70,7 +70,7 @@ class _FakeStdout:
 def _make_client(**kw):
     messages = []
     stdin = _FakeStdin()
-    client = _ACPSimpleClient(stdin=stdin, stdout=_FakeStdout(), label="[test] ",
+    client = _HwcloudACPSimpleClient(stdin=stdin, stdout=_FakeStdout(), label="[test] ",
                               on_message=lambda t, c: messages.append((t, c)), **kw)
     return client, messages, stdin
 

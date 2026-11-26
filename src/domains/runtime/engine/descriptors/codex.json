@@ -1,0 +1,37 @@
+{
+  "canonical": "codex",
+  "aliases": [],
+  "protocol": "ndjson",
+  "discover": {
+    "cli": "codex",
+    "pip": "@openai/codex"
+  },
+  "display": {
+    "name": "Codex",
+    "dot_color": "#10a37f",
+    "device_types": true,
+    "icon": "/static/img/engines/codex.png"
+  },
+  "probe": {
+    "mode": "cli_run",
+    "command": [
+      "codex",
+      "exec",
+      "--json",
+      "--sandbox",
+      "danger-full-access",
+      "--skip-git-repo-check",
+      "hello"
+    ]
+  },
+  "model_config_path": "~/.codex/config.toml",
+  "usage_retry": false,
+  "device_known": true,
+  "capabilities": {
+    "sandbox_installable": true
+  },
+  "usage": {
+    "mode": "event_stream"
+  },
+  "sandbox": {}
+}

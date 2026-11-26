@@ -144,6 +144,14 @@ def test_s7_adapter_on_returns_writable_id(monkeypatch):
     assert rt_adapter.identity_for_actor("alice", "") == (UID, "account")
 
 
+def test_s7b_adapter_task_user_id_wins(monkeypatch):
+    """Issuer 的 user_id 直接生效，不再依赖 VCS 登录名查账号。"""
+    calls = _patch_accounts(monkeypatch, {"alice": UID})
+    monkeypatch.setenv("GRAPE_DISPATCH_USER_ID", "on")
+    assert rt_adapter.identity_for_actor("test-user", "", task_user_id=UID) == (UID, "task")
+    assert calls["n"] == 0
+
+
 def test_s8_adapter_shadow_keeps_row_zero(monkeypatch):
     _patch_accounts(monkeypatch, {"alice": UID})
     monkeypatch.setenv("GRAPE_DISPATCH_USER_ID", "shadow")
@@ -158,10 +166,86 @@ def test_s8b_adapter_default_on_returns_id(monkeypatch):
 
 
 def test_s9_event_pipeline_delegates(monkeypatch):
+    monkeypatch.setattr(event_pipeline, "_get_issue_owner_id", lambda rk, num: "")
     monkeypatch.setattr(event_pipeline, "resolve_actor_account", lambda evt, rk="": "alice")
-    monkeypatch.setattr(rt_adapter, "identity_for_actor", lambda a, b: (UID, "account"))
+    monkeypatch.setattr(rt_adapter, "identity_for_actor",
+                        lambda a, b, task_user_id="": (UID, "account"))
     assert event_pipeline._dispatch_ident({"type": "a2a_event"}, "github:o/r") == (UID, "account", "alice")
     assert event_pipeline._dispatch_ident("not-a-dict", "github:o/r") == ("", "", "")
+
+
+def test_s9c_issue_owner_identity_wins(monkeypatch):
+    """Issue 创建人的 Grape 身份优先于 VCS 登录名（组织下派 403 回归）。"""
+    monkeypatch.setattr(event_pipeline, "_get_issue_owner_id", lambda rk, num: UID)
+    monkeypatch.setattr(event_pipeline, "resolve_actor_account",
+                        lambda evt, rk="": "test-user")
+    seen = {}
+
+    def _identity(account, actor, task_user_id=""):
+        seen["task_user_id"] = task_user_id
+        return task_user_id, "task"
+
+    monkeypatch.setattr(rt_adapter, "identity_for_actor", _identity)
+    evt = {"type": "issue_opened", "issue_id": "#2", "payload": {"issue_number": "2"}}
+    assert event_pipeline._dispatch_ident(evt, "gitcode:o/r") == (UID, "task", "test-user")
+    assert seen["task_user_id"] == UID
+
+
+def test_s9d_scene_user_id_prefers_issue_owner(monkeypatch):
+    """组织/普通流水线入队的 scene_user_id 优先使用 Issue 创建人 UUID。"""
+    monkeypatch.setattr(event_pipeline, "_get_issue_owner_id", lambda rk, num: UID)
+    assert event_pipeline._scene_user_id("gitcode:o/r", "#4", "test-user") == UID
+
+
+def test_s9e_scene_user_id_falls_back_to_legacy_lookup(monkeypatch):
+    monkeypatch.setattr(event_pipeline, "_get_issue_owner_id", lambda rk, num: "")
+    import src.domains.runtime.engine.engine_select as engine_select
+
+    monkeypatch.setattr(engine_select, "_repo_user_id",
+                        lambda rk, issue_creator="": 7)
+    assert event_pipeline._scene_user_id("gitcode:o/r", "#4", "test-user") == 7
+
+
+def test_s9f_scene_uid_sentinel_zero(monkeypatch):
+    """scene_user_id='0'（MySQL varchar 默认）必须视为无归属，触发创建人回退。"""
+    from src.api import session_store
+
+    monkeypatch.setattr(session_store, "get_issue_stage",
+                        lambda rk, i: {"scene_id": "s1", "scene_user_id": "0"})
+    assert session_store.get_issue_scene("gitcode:o/r", "#1") == ("s1", 0)
+
+    monkeypatch.setattr(session_store, "get_issue_stage",
+                        lambda rk, i: {"scene_id": "s1", "scene_user_id": UID})
+    assert session_store.get_issue_scene("gitcode:o/r", "#1") == ("s1", UID)
+
+
+def test_s9g_issue_owner_only_for_team_org(monkeypatch):
+    """组织需求才带创建人身份；个人空间必须保持原仓库身份。"""
+    import src.domains.runtime.public as rt_public
+
+    monkeypatch.setattr(rt_public, "read_one_any",
+                        lambda name, params: (UID, "team-org"))
+    monkeypatch.setattr(mgmt_public, "get_org_is_personal", lambda org_id: False)
+    assert event_pipeline._get_issue_owner_id("gitcode:o/r", "#7") == UID
+
+    monkeypatch.setattr(mgmt_public, "get_org_is_personal", lambda org_id: True)
+    assert event_pipeline._get_issue_owner_id("gitcode:o/r", "#7") == ""
+
+    monkeypatch.setattr(rt_public, "read_one_any", lambda name, params: None)
+    assert event_pipeline._get_issue_owner_id("gitcode:o/r", "#7") == ""
+
+
+def test_s9h_issue_owner_fails_closed(monkeypatch):
+    import src.domains.runtime.public as rt_public
+
+    monkeypatch.setattr(rt_public, "read_one_any",
+                        lambda name, params: (UID, "team-org"))
+
+    def _boom(org_id):
+        raise RuntimeError("mgmt contract down")
+
+    monkeypatch.setattr(mgmt_public, "get_org_is_personal", _boom)
+    assert event_pipeline._get_issue_owner_id("gitcode:o/r", "#7") == ""
 
 
 def test_s9b_adapter_never_raises(monkeypatch):

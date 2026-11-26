@@ -57,7 +57,7 @@ cp configs/oauth-providers.example.json configs/oauth-providers.json
     "auth_url": "https://github.com/login/oauth/authorize",
     "token_url": "https://github.com/login/oauth/access_token",
     "user_url": "https://api.github.com/user",
-    "scope": "repo user admin:repo_hook offline_access"
+    "scope": "read:user user:email repo workflow admin:repo_hook"
   }
 }
 ```

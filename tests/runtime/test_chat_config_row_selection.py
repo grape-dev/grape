@@ -202,3 +202,88 @@ def test_no_rows_still_materializes_default():
             c = db.cursor()
             c.execute("DELETE FROM chat_agent_session WHERE id=?", (f"sess-cfg-{UID2}",))
             db.commit()
+
+
+# ------------------------------------------------ 沙箱四段名引擎（#3396 收尾 #18 方案 Z）
+# 背景：agent_runtimes.name 对沙箱引擎是四段式 `engine:template:provider:provider_id`
+# （cloud_worker._expand_templates 生成）。共享 is_known_engine_name 只认裸名 →
+# 配置行指向沙箱引擎时被误判幽灵（usable=False）→ 选中后回读降级本机兜底
+# （8090 实测：选 rid=22 hermes:t6c… → 回显 mock-acp）。
+# 方案 Z：读侧局部判定 _known_runtime_row_name——裸名走共享白名单；含 ':' 的
+# 仅当四段结构完整且首段过白名单才放行。
+
+R_SBX = 9477        # 沙箱四段名引擎（credential_id>0，模拟远端沙箱行）
+SBX_NAME = "hermes:t6c2e5520-7c32-469d-956a-137f40a12bf0:e2e-claim-88b:13829b68-d653-483b-9c85-d0537febbe1f"
+SBX_UID_STR = "baf4cd77-8870-5881-ab97-f0df0ace34ee"
+
+
+def _seed_sandbox_engine():
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM agent_runtimes WHERE id=?", (R_SBX,))
+        c.execute(
+            "INSERT OR REPLACE INTO agent_runtimes "
+            "(id, credential_id, name, installed, healthy, status, scope, owner_id, last_seen_at, engine_uid) "
+            "VALUES (?,?,?,1,1,?,?,?,datetime('now'),?)",
+            (R_SBX, 16, SBX_NAME, "online", "user", "", SBX_UID_STR))
+        db.commit()
+
+
+def _clean_sandbox_engine():
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM agent_runtimes WHERE id=?", (R_SBX,))
+        db.commit()
+
+
+def _row_uid(uid, row_id, runtime_id, engine_uid, last_active):
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO chat_agent_session "
+            "(id, user_id, repo_key, runtime_id, skill, skill_id, created_at, last_active_at, engine_uid) "
+            "VALUES (?,?,?,?,?,?,datetime('now'),?,?)",
+            (row_id, uid, "", runtime_id, "chat", 0, last_active, engine_uid))
+        db.commit()
+
+
+def test_sandbox_four_part_name_via_uid_is_usable():
+    """uid 轨道指向沙箱四段名引擎 → 回读必须 usable（不再误判幽灵降级）。"""
+    _snap = _snapshot_runtime_ids(); _seed_sandbox_engine(); _clean(UID)
+    _row_uid(UID, f"sess-cfg-{UID}", R_SBX, SBX_UID_STR, "2026-11-24 23:00:00")
+    try:
+        from src.kernel.session_manager import _chat_config_row_engine
+        name, usable, _reason, _rid = _chat_config_row_engine(R_SBX, SBX_UID_STR)
+        assert usable is True, f"沙箱四段名引擎不得判幽灵：name={name}"
+        assert name == SBX_NAME, f"回显应为四段名原样，实际 {name!r}"
+        # 端到端：get_chat_config 读回同一引擎（不降级本机兜底）
+        cfg = get_chat_config(UID)
+        assert cfg.get("runtime_id") == R_SBX, f"配置读不回沙箱引擎（降级了），实际 {cfg}"
+    finally:
+        _clean(UID); _clean_sandbox_engine(); _restore_runtimes(_snap); _reset_engine_cache()
+
+
+def test_sandbox_four_part_name_via_runtime_id_is_usable():
+    """uid 缺失回退 runtime_id 轨道 → 四段名同样 usable（双轨道一致）。"""
+    _snap = _snapshot_runtime_ids(); _seed_sandbox_engine(); _clean(UID)
+    _row_uid(UID, f"sess-cfg-{UID}", R_SBX, "", "2026-11-24 23:00:00")
+    try:
+        from src.kernel.session_manager import _chat_config_row_engine
+        name, usable, _reason, _rid = _chat_config_row_engine(R_SBX, "")
+        assert usable is True and name == SBX_NAME
+    finally:
+        _clean(UID); _clean_sandbox_engine(); _restore_runtimes(_snap); _reset_engine_cache()
+
+
+def test_garbage_colon_name_still_rejected():
+    """散串带 ':' 但结构不对（防幽灵不放松）：'default:x'、三段、末段非数字 → 仍拒。"""
+    from src.kernel.session_manager import _known_runtime_row_name
+    assert _known_runtime_row_name("default:x") is False
+    assert _known_runtime_row_name("hermes:tpl") is False                      # 三段缺二
+    assert _known_runtime_row_name("hermes:tpl:prov") is False                # 缺 provider_id
+    assert _known_runtime_row_name("hermes:tpl:prov:notnum") is False         # 末段非数字
+    assert _known_runtime_row_name("ghost:tpl:prov:1") is False               # 首段非白名单引擎
+    assert _known_runtime_row_name("hermes:t6c2e5520-7c32-469d-956a-137f40a12bf0:e2e-claim-88b:13829b68-d653-483b-9c85-d0537febbe1f") is True  # 8090 实名（uid 末段）
+    assert _known_runtime_row_name("hermes:hermes-git-a--5g:e2e-claim-88b:3") is True  # 基线生成侧（数字末段）
+    assert _known_runtime_row_name("") is False
+    assert _known_runtime_row_name("hermes") is True                           # 裸名口径不变

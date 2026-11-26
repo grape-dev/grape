@@ -2777,6 +2777,8 @@ _ANY_QUERIES: dict[str, str] = {
     'devops_agent_session_insert_uid': "INSERT OR IGNORE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, engine_uid, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
     'agent_runtime_name_by_id': 'SELECT name FROM agent_runtimes WHERE id=?',
     'issue_card_row': 'SELECT stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override, carried_context, status FROM issue WHERE repo_key=? AND issue_number=?',
+    # 派发身份：Issue 创建人的 Grape user_id（跨域只读，四进程都读 owner 库权威行）
+    'issue_owner_context_row': 'SELECT user_id, org_id FROM issue WHERE repo_key=? AND issue_number=?',
     'issue_card_exists': 'SELECT id FROM issue WHERE repo_key=? AND issue_number=?',
     'autopilot_execution_brief': 'SELECT id, task_id FROM autopilot_executions WHERE id=?',
     'autopilot_execution_findings': (
@@ -3175,6 +3177,13 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_category_tags_update": (
         "UPDATE skill SET cat_l1_id=?, cat_l2_id=?, tags=?, updated_at=datetime('now') "
         "WHERE id=?"),
+    # Issue #3976：原地改 scope——只改归属与对象键，id/版本行/场景引用不变。
+    "skill_scope_move_update": (
+        "UPDATE skill SET scope=?, owner_id=?, file_path=?, updated_by=?, "
+        "updated_at=datetime('now') WHERE id=?"),
+    # Issue #3976：在线保存 SKILL.md——只刷内容指纹，不写版本表（版本号不递增）。
+    "skill_content_hash_update": (
+        "UPDATE skill SET content_hash=?, updated_at=datetime('now') WHERE id=?"),
     "skill_row_create_ignore": (
         "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, "
         "skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,?,?,?,?)"),

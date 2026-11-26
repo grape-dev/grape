@@ -1,0 +1,30 @@
+{
+  "canonical": "dsh",
+  "aliases": [],
+  "protocol": "ndjson",
+  "discover": {
+    "cli": "dsh",
+    "pip": "@deepseek-ai/dsh"
+  },
+  "display": {
+    "name": "DSH",
+    "dot_color": ""
+  },
+  "probe": {
+    "mode": "cli_run",
+    "command": [
+      "dsh",
+      "headless",
+      "hello"
+    ]
+  },
+  "model_config_path": "",
+  "usage_retry": false,
+  "device_known": false,
+  "capabilities": {
+    "sandbox_installable": false
+  },
+  "usage": {
+    "mode": "none"
+  }
+}

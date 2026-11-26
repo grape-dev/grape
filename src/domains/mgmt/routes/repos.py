@@ -2981,6 +2981,13 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
             raise HTTPException(status_code=500, detail={"code": 500, "message": "清除 Bot Token 失败"})
         # R15.5.5: best-effort 移除旧 bot 协作者身份
         _remove_old_bot_collaborator(repo_key, owner, repo_name, _provider_str, user)
+        # Issue #4301: the bot is gone, so its capability row goes too - otherwise the diagnosis
+        # keeps judging by a capability whose bot no longer exists.
+        try:
+            from src.domains.insight.public import delete_repo_credential_value as _rc_del
+            _rc_del(repo_key, "workflows_write")
+        except Exception as _cfe:
+            log.warning(f"set_repo_bot_token: clear workflows_write failed: {_cfe}")
         return {"message": "Bot Token 已清除", "bot_username": ""}
 
     # === R15 七步流程 ===
@@ -3001,13 +3008,43 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
     # 步骤 2: 验证 token 有效性（通过 VCSProvider 接口）
     from src.domains.mgmt.vcs import create_provider_from_repo_key
     _vcs_provider = create_provider_from_repo_key(repo_key)
+    _bot_headers: dict = {}
     try:
-        user_data = _vcs_provider.verify_token(body.bot_token)
+        # Issue #4301 / #3386: reuse the baseline per-call header capture instead of
+        # a second /user round-trip (verify_token_with_headers is the single API).
+        verify = getattr(_vcs_provider, "verify_token_with_headers", None)
+        if callable(verify):
+            user_data, _bot_headers = verify(body.bot_token)
+        else:
+            user_data = _vcs_provider.verify_token(body.bot_token)
     except Exception:
         raise HTTPException(status_code=400, detail={
             "code": 400, "error_code": "TOKEN_INVALID",
             "message": "Bot Token 无效，请检查后重试"
         })
+
+    # Issue #4301, second batch (owner decision 2026-11-25): the repo-level bot is the FIRST
+    # credential in the push chain, so binding must precheck workflow write capability -
+    # otherwise the refusal happens upstream with nothing shown here. Known capability lands
+    # in the rc table (cred_type='workflows_write', data row, no DDL); unknown persists nothing.
+    _wf_cap = None
+    _wf_warnings: list[str] = []
+    from src.domains.mgmt.user.repo_manager import (
+        parse_x_oauth_scopes as _parse_scopes,
+        workflows_probe_supported as _wf_probe_ok,
+    )
+    _bot_scopes = _parse_scopes(_bot_headers) if _bot_headers else None
+    if _wf_probe_ok(_provider_str):
+        _wf_cap = None if _bot_scopes is None else ("workflow" in _bot_scopes)
+        if _wf_cap is False:
+            _wf_warnings.append(
+                "该 Bot Token 缺少 workflow 权限：涉及 .github/workflows 的推送会被 GitHub "
+                "拒绝。请用含 workflow 权限的令牌重新绑定（经典 PAT 勾选 workflow；"
+                "细粒度 PAT 把 Workflows 设为 Read and write）。")
+        elif _wf_cap is None:
+            _wf_warnings.append(
+                "未能从令牌确认 workflow 权限（通常为细粒度 PAT）：请确认 Workflows 权限为 "
+                "Read and write，否则涉及 .github/workflows 的推送会被拒绝。")
 
     # 步骤 3: 获取 bot username
     repo_bot_username = (user_data.get("login") or "") if isinstance(user_data, dict) else ""
@@ -3082,10 +3119,31 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
     if repo_bot_username:
         update_managed_repo_bot_username(repo_key, repo_bot_username)
 
+    # Issue #4301: persist the capability in the rc table (known state only;
+    # unknown persists nothing = no blocking, re-probed on the next bind); write failures log only.
+    if _wf_cap is not None:
+        try:
+            from datetime import datetime, timezone
+            from src.domains.insight.public import upsert_repo_credential_value as _rc_upsert
+            _rc_upsert(repo_key, "workflows_write", "true" if _wf_cap else "false",
+                       datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+            # Issue #4301 review F1/C3: the capability decides whether a later template push
+            # keeps or deletes .github/workflows, so the change needs an audit row of its own
+            # (the bind audit sits on the other endpoint). Token value never logged.
+            from src.domains.mgmt.auth.audit import log_audit as _log_audit
+            _log_audit("repo_workflows_capability_set",
+                       user_id=str((user or {}).get("id") or ""),
+                       operator_id=str((user or {}).get("id") or ""),
+                       detail={"repo_key": repo_key, "cred_type": "workflows_write",
+                               "capability": bool(_wf_cap), "source": "repos_bot_token"})
+        except Exception as _wfe:
+            log.warning(f"set_repo_bot_token: persist workflows_write failed: {_wfe}")
+
     # R17.1.3: PAT 无续期提示
     return {
         "message": "Bot Token 已更新",
         "bot_username": repo_bot_username,
+        "scope_warnings": _wf_warnings,
         "pat_no_refresh_hint": "此 Token 为 PAT 类型，不会自动续期，过期后需手动重新配置",
     }
 
