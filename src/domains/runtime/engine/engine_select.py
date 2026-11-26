@@ -1473,6 +1473,14 @@ def _select_rid_from_members(members: list[dict], cfg: dict, repo_key: str,
                       reason=reason,
                       candidates=_decision_candidates(log_members, cfg, agent_type))
 
+    # Issue #4445（QA Optional）：/tmp 水位按候选凭据一次预取，档位循环与兜底复用同一份
+    # 快照——原实现每个档位各查一次 runtime_credentials，派发热路径上重复持锁查询。
+    # 查询失败返回 None（fail-open）统一折成空 dict：无水位数据即放行。
+    tmp_ratios: dict = {}
+    if _tmp_headroom_guard_on() and members:
+        tmp_ratios = _tmp_used_ratios_by_credential(
+            [m.get("credential_id") or 0 for m in members]) or {}
+
     for scope in cfg.get("scopes") or ["repo", "global", "local"]:
         cand = _apply_filters([m for m in members if _member_scope(m, repo) == scope], cfg)
         if not cand:
@@ -1483,7 +1491,10 @@ def _select_rid_from_members(members: list[dict], cfg: dict, repo_key: str,
         if not cand:
             continue  # 该档位全不健康，尝试下一档位
         # Issue #4445：目标节点 /tmp 可用 <10% 时拒绝派发（fail-open，查询异常不挡）
-        cand = _filter_by_tmp_headroom(cand)
+        # QA Optional：水位按候选凭据**一次预取**后在各档位复用——原实现每个档位各查
+        # 一次 runtime_credentials（派发热路径重复持锁查询）。预取失败落空 dict = 无水位
+        # 数据 = 放行，与 _filter_by_tmp_headroom 的 fail-open 语义一致。
+        cand = _filter_by_tmp_headroom(cand, tmp_ratios)
         if not cand:
             continue
         # Issue #3584：档内最小负载优先、负载并列按 seq 取模轮转
@@ -1496,7 +1507,7 @@ def _select_rid_from_members(members: list[dict], cfg: dict, repo_key: str,
             return picked["runtime_id"], scope
     # 所有档位均无健康引擎 → 降级兜底：取所有候选中健康分最高的
     # Issue #4445：兜底同样不得把 /tmp 已见底的节点选回来（否则水位门形同虚设）
-    all_cand = _filter_by_tmp_headroom(_apply_filters(members, cfg))
+    all_cand = _filter_by_tmp_headroom(_apply_filters(members, cfg), tmp_ratios)
     if all_cand:
         _best = _best_health_fallback(all_cand)
         if _best:
