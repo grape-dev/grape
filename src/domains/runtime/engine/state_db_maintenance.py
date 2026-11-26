@@ -594,12 +594,19 @@ def worker_metrics_snapshot() -> dict[str, Any]:
         freed = int(_bytes_freed_total)
         skipped = int(_resume_skipped_total)
     scanned = scan_state_db_sizes()
-    return {
+    snapshot = {
         "acp_state_db_bytes": float(scanned.get("max_bytes", 0)),
         "acp_state_db_cleanup_counts": json.dumps(counts, ensure_ascii=False, sort_keys=True),
         "acp_state_db_bytes_freed_total": float(freed),
         "acp_resume_skipped_total": int(skipped),
     }
+    # Issue #4445：/tmp 任务派生残留 janitor 的累计清理量，随心跳落库并出指标。
+    try:
+        from src.domains.runtime.engine.cleanup import tmp_janitor_metrics_snapshot
+        snapshot.update(tmp_janitor_metrics_snapshot())
+    except Exception:
+        pass
+    return snapshot
 
 
 _SCAN_CACHE: dict[str, Any] = {"taken_at": 0.0, "data": {}}

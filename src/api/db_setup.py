@@ -12295,6 +12295,19 @@ register_migration(
     post_check=_post_acp_state_db_metrics_columns,
 )
 
+from src.domains.runtime.migrations.tmp_janitor_metrics_columns import (
+    add_tmp_janitor_metrics_columns as _fn_tmp_janitor_metrics_columns,
+    verify_tmp_janitor_metrics_columns as _post_tmp_janitor_metrics_columns,
+)
+register_migration(
+    version="202611250014",
+    name="issue4445-tmp-janitor-metrics-columns",
+    kind="safe",
+    fn=_fn_tmp_janitor_metrics_columns,
+    domains=("runtime",),
+    post_check=_post_tmp_janitor_metrics_columns,
+)
+
 # ===== Issue #3877：events 级联补偿五列（存量 runtime 库仍缺列，1054 持续）=====
 # 背景：`cascade_reason` / `report_missing` / `triggered_by` / `cascade_task_status` /
 # `cascade_prev_event_status` 此前只登记在

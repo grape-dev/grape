@@ -6,7 +6,7 @@
 - 对超 TTL 未活跃的僵尸 workdir 兜底清理；
 - 对 chat / feishu / vod / history 目录做 TTL 清理（无活跃会话时删除）。
 """
-import asyncio, contextlib, os, shutil, tempfile, time
+import asyncio, contextlib, fnmatch, os, shutil, tempfile, time
 
 from src.kernel import config, db_registry
 from src.kernel.config import log, CHAT_CWD_BASE
@@ -34,6 +34,23 @@ _OPCODE_FLAT_RESIDUAL_NAMES = frozenset({
 })
 # 会话子目录归属标记（与 session_tmpdir._MARKER_NAME 同步）。
 _SESSION_DIR_MARKER = ".grape-session-tmpdir"
+
+# Issue #4445：节点 /tmp（tmpfs，占用即钉住物理内存）任务派生残留回收。
+# 线上实测 1,032 项残留里绝大多数是 agent/技能自建的 qa*/pr*/verify* 等目录，既无
+# 会话标记也不在既有固定前缀内 → 永不过期。这里按「前缀 + mtime TTL」扩面清理，
+# 同时保留活跃任务、当前 TASK_TMPDIR、符号链接等豁免。
+_TMP_JANITOR_MODE = (os.environ.get("SWEEPER_TMP_JANITOR", "on") or "on").strip().lower()
+_TMP_JANITOR_TTL_SECONDS = int(os.environ.get("SWEEPER_TMP_TTL_SECONDS", "7200"))
+_TMP_JANITOR_PATTERNS = tuple(
+    p.strip() for p in (os.environ.get(
+        "SWEEPER_TMP_PATTERNS",
+        "qa*,pr*,verify*,base*,rev*,deploy-ws,venv*,pkg-*,head*,wt-*",
+    ) or "").split(",") if p.strip())
+# 单轮扫描/删除上限：目录异常大时避免 sweeper 被单个节点拖住（超限留 warning）。
+_TMP_JANITOR_MAX_ITEMS = int(os.environ.get("SWEEPER_TMP_MAX_ITEMS", "2000"))
+
+_tmp_janitor_items_total = 0
+_tmp_janitor_bytes_total = 0
 
 _DEAD_RUNTIME_MINUTES = int(os.environ.get("SWEEPER_DEAD_RUNTIME_MINUTES", "30"))
 # Issue #3352：有会话但长时间没有任何执行消息的 running 任务——worker 侧任务超时（1h）
@@ -1397,6 +1414,8 @@ def _sweep_tmp_residuals() -> int:
 
     # Issue #2225：/tmp/opencode 治理（平铺固定名文件 + 超 TTL 会话子目录）
     cleaned += _sweep_opencode_tmpdirs(_now)
+    # Issue #4445：/tmp 任务派生残留扩面回收（qa*/pr*/verify* 等无标记目录）
+    cleaned += _sweep_tmp_task_residuals(_now)
 
     # 文件类清理（hermes-results 目录内的文件 + 散落文件）
     _file_targets = [
@@ -1433,6 +1452,139 @@ def _sweep_tmp_residuals() -> int:
                 pass
 
     return cleaned
+
+def tmp_janitor_metrics_snapshot() -> dict:
+    """Issue #4445：本进程累计的 /tmp janitor 清理计数（心跳上报/指标导出用）。"""
+    return {
+        "tmp_janitor_removed_items_total": int(_tmp_janitor_items_total),
+        "tmp_janitor_removed_bytes_total": float(_tmp_janitor_bytes_total),
+    }
+
+
+def _tmp_janitor_match(name: str) -> bool:
+    """名字是否命中任务派生残留前缀白名单（支持 env 覆盖 pattern）。"""
+    return any(fnmatch.fnmatchcase(name, pat) for pat in _TMP_JANITOR_PATTERNS)
+
+
+def _tmp_janitor_protected_paths() -> set:
+    """必须豁免的绝对路径：当前任务 TASK_TMPDIR + 会话暂存根。"""
+    protected = set()
+    for key in ("TASK_TMPDIR", "SESSION_DIR"):
+        value = (os.environ.get(key) or "").strip()
+        if value:
+            protected.add(os.path.realpath(value))
+    try:
+        protected.update(os.path.realpath(p) for p in _opencode_staging_roots())
+    except Exception:
+        pass
+    return protected
+
+
+def _tmp_janitor_size(path: str) -> int:
+    """不跟随符号链接统计路径占用字节数（目录递归、lstat 取真实大小）。"""
+    try:
+        if os.path.islink(path):
+            return 0
+        if os.path.isfile(path):
+            return int(os.lstat(path).st_size)
+        total = 0
+        for root, dirs, files in os.walk(path, followlinks=False):
+            for name in files:
+                try:
+                    total += int(os.lstat(os.path.join(root, name)).st_size)
+                except OSError:
+                    pass
+            # 目录项自身（尤其是空目录）也计入，避免「删了不少目录但 bytes=0」
+            for name in dirs:
+                try:
+                    total += int(os.lstat(os.path.join(root, name)).st_size)
+                except OSError:
+                    pass
+        return total
+    except OSError:
+        return 0
+
+
+def _sweep_tmp_task_residuals(now: float | None = None, roots=None) -> int:
+    """Issue #4445：按「前缀白名单 + mtime TTL」清理 /tmp 下任务派生残留。
+
+    返回清理条目数；清理字节数累计到 ``tmp_janitor_metrics_snapshot()``。
+    安全边界（全部命中即跳过，不删除）：
+
+    - 符号链接一律不跟随、不删除（防止越界删除链接目标）；
+    - ``SWEEPER_TMP_JANITOR=off`` 完全关闭；``dry`` 只统计不删除；
+    - 未命中 ``SWEEPER_TMP_PATTERNS`` 前缀白名单的第三方文件不碰；
+    - mtime 在 ``SWEEPER_TMP_TTL_SECONDS``（默认 2h）内的仍在写入对象不删；
+    - 目录名等于 queued/dispatched/running 的 task_id、或路径位于当前
+      ``TASK_TMPDIR``/会话暂存根之下 → 活跃会话豁免。
+
+    ``roots``/``now`` 可注入便于单测（与 ``_sweep_opencode_tmpdirs`` 同款设计）。
+    """
+    global _tmp_janitor_items_total, _tmp_janitor_bytes_total
+    if _TMP_JANITOR_MODE == "off" or not _TMP_JANITOR_PATTERNS:
+        return 0
+    _now = time.time() if now is None else float(now)
+    bases = list(roots) if roots is not None else [tempfile.gettempdir()]
+    active_ids = _active_session_task_ids()
+    protected = {os.path.realpath(p) for p in _tmp_janitor_protected_paths()}
+    items = 0
+    freed = 0
+    skipped = 0
+
+    def _is_protected(p: str) -> bool:
+        real = os.path.realpath(p)
+        if real in protected:
+            return True
+        return any(real.startswith(base + os.sep) for base in protected)
+
+    for base in bases:
+        if not os.path.isdir(base):
+            continue
+        try:
+            names = os.listdir(base)
+        except OSError as e:
+            log.warning(f"tmp janitor: scan failed {base}: {e}")
+            continue
+        for name in names:
+            if items >= _TMP_JANITOR_MAX_ITEMS:
+                log.warning(f"tmp janitor: item cap {_TMP_JANITOR_MAX_ITEMS} reached, "
+                            f"stop this round")
+                break
+            if not _tmp_janitor_match(name):
+                continue
+            p = os.path.join(base, name)
+            try:
+                if os.path.islink(p):
+                    skipped += 1
+                    continue
+                if _is_protected(p):
+                    skipped += 1
+                    continue
+                if os.path.isdir(p) and name in active_ids:
+                    skipped += 1
+                    continue
+                if _now - os.path.getmtime(p) < _TMP_JANITOR_TTL_SECONDS:
+                    continue
+                size = _tmp_janitor_size(p)
+                if _TMP_JANITOR_MODE == "dry":
+                    items += 1
+                    freed += size
+                    continue
+                if os.path.isdir(p):
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    os.remove(p)
+                items += 1
+                freed += size
+            except OSError as e:
+                log.warning(f"tmp janitor: cleanup failed {p}: {e}")
+    if items:
+        _tmp_janitor_items_total += items
+        _tmp_janitor_bytes_total += freed
+    log.info(f"tmp janitor: removed {items} items, freed {freed} bytes, "
+             f"skipped {skipped}(active)")
+    return items
+
 
 def _sweep_stale_workspace_repos() -> int:
     """清理不活跃 repo 的 project-info / codebase 目录。

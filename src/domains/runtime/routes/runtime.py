@@ -409,6 +409,10 @@ class HeartbeatBody(BaseModel):
     acp_state_db_cleanup_counts: str = ""
     acp_state_db_bytes_freed_total: float = 0.0
     acp_resume_skipped_total: int = 0
+    # Issue #4445：缺省 None = 本次心跳没上报（最小在线态心跳不携带指标），不覆盖旧值；
+    # 默认 0 会被每 15~20s 的最小心跳刷掉 janitor 累计量（同 cpu/mem 的「全 0 抖动」根因）。
+    tmp_janitor_removed_items_total: int | None = None
+    tmp_janitor_removed_bytes_total: float | None = None
     log_lines: list[LogLineBody] = []
     probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
 
@@ -980,6 +984,14 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
                                    ("acp_resume_skipped_total", body.acp_resume_skipped_total)):
             _set.append(f"{_acp_col}=?")
             _vals.append(_acp_val)
+        # Issue #4445：janitor 累计量只在本次心跳真的携带时写，避免最小在线态心跳清零。
+        for _jan_col, _jan_val in (("tmp_janitor_removed_items_total",
+                                    body.tmp_janitor_removed_items_total),
+                                   ("tmp_janitor_removed_bytes_total",
+                                    body.tmp_janitor_removed_bytes_total)):
+            if _jan_val is not None:
+                _set.append(f"{_jan_col}=?")
+                _vals.append(_jan_val)
         c.execute(f"UPDATE runtime_credentials SET {', '.join(_set)} WHERE id=?",
                   _vals + [credential_id])
         if body.runtime_ids:
