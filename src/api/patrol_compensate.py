@@ -325,10 +325,16 @@ class ModeHandler(Handler):
             ctx.mode_payload["carried_context"] = {}
         return True
 
-# B2 remediation: caps the fallback conclusion snippet embedded in the
-# redispatch context so the payload stays within review-size limits even
-# when the original task produced a very long result_text.
-_CONTEXT_SNIPPET_LIMIT = 600
+# B2 round-3: the compensated redispatch payload is persisted by
+# src/domains/runtime/routes/webhook.py with context[:500] (its DB-side
+# cap, 5 call sites). The fallback conclusion snippet must therefore be
+# bounded by that cap minus the fixed compensation prefix
+# (巡检器补偿交棒[compensated_by=...]：原任务 <task_id> 已完成但未交下游，…
+# 原任务结论：, ~110 chars incl. marker/task_id slack), or the tail of
+# the conclusion would be silently lost at persistence time.
+_REDISPATCH_CONTEXT_DB_CAP = 500        # webhook.py context[:500] (persisted cap)
+_COMPENSATE_PREFIX_RESERVE = 110        # measured worst-case prefix above
+_CONTEXT_SNIPPET_LIMIT = max(0, _REDISPATCH_CONTEXT_DB_CAP - _COMPENSATE_PREFIX_RESERVE)
 
 
 def _conclusion_snippet(result_text: str) -> str:
