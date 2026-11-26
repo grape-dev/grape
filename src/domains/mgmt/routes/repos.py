@@ -18,6 +18,7 @@ from src.api.org_context import resolve_org_context
 from src.domains.mgmt.auth.audit import log_audit
 from src.domains.mgmt.user.org_db import transfer_managed_repo_to_org
 from src.domains.mgmt.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, repo_has_bot_credential, resolve_managed_repo_key
+from src.domains.mgmt.user.repo_naming import validate_repo_name
 from src.domains.mgmt.routes import _vcs_error_map
 from src.kernel.credential_errors import CREDENTIAL_ERROR_MESSAGES as _CREDENTIAL_ERROR_MESSAGES
 
@@ -1230,6 +1231,11 @@ def check_repo_name(name: str,
                     owner: str = Query("", description="所属空间路径（GitLab 可填组/子组），空=个人空间"),
                     user: dict = Depends(require_no_session_token)):
     """检查指定平台/空间下是否已存在同名仓库（Issue #3580：支持组/子组）。"""
+    # Issue #4231：非法名称在 token/上游调用前拦截（0 次上游调用），只回裸原因。
+    name = (name or "").strip()
+    _name_ok, _name_reason = validate_repo_name(name)
+    if not _name_ok:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": _name_reason})
     if provider:
         api_token = get_user_token_for(user["username"], user_id=str(user.get("id") or ""),
                                        provider=provider)
@@ -1271,13 +1277,13 @@ def check_repo_name(name: str,
         if isinstance(_repo_info, dict) and _repo_info.get("error"):
             _short = sanitize_upstream_error(_repo_info.get("error"))
             raise HTTPException(status_code=502, detail={
-                "code": 502, "message": f"检查失败: {_short}"})
+                "code": 502, "message": _short})
         return {"exists": True, "full_name": f"{login}/{name}"}
     except HTTPException:
         raise
     except Exception as e:
         log.warning(f"check_repo_name failed (provider={provider}, user={user.get('id', '')}): {e}")
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {sanitize_upstream_error(e)}"})
+        raise HTTPException(status_code=502, detail={"code": 502, "message": sanitize_upstream_error(e)})
 
 
 @router.get("/create-targets", operation_id="repos_create_targets",
@@ -1343,21 +1349,21 @@ def _valid_space_path(value: str) -> bool:
 @router.post("/create", operation_id="repos_create", summary="Create repository (optionally auto-host)", description="Creates a repository via the VCS API; optionally auto-hosts it afterwards.")
 def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_session_token)):
     """通过 VCS API 新建仓库，可选创建后自动托管"""
-    import re as _re
     from src.kernel.repo_key import to_repo_key
     name = (body.name or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库名称不能为空"})
-    if not _re.match(r'^[\w\-\.]+$', name):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库名称只能包含字母、数字、下划线、连字符和点"})
+    _name_ok, _name_reason = validate_repo_name(name)
+    if not _name_ok:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": _name_reason})
     owner = (body.owner or "").strip()
     if owner and not _valid_space_path(owner):
         raise HTTPException(status_code=400, detail={
             "code": 400,
             "message": "所属空间格式非法（可填组/子组路径如 group/sub，段只能含字母数字下划线连字符点，禁 .. 与首尾斜杠）"})
     repo_path = (body.path or "").strip()
-    if repo_path and not _re.match(r'^[\w\-\.]+$', repo_path):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库路径只能包含字母、数字、下划线、连字符和点"})
+    if repo_path:
+        _path_ok, _path_reason = validate_repo_name(repo_path, "仓库路径")
+        if not _path_ok:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": _path_reason})
 
     if body.visibility in ("private", "public"):
         private = (body.visibility == "private")

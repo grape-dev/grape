@@ -124,7 +124,7 @@ class TestCheckRepoNameReauth:
         r = client.get("/api/repos/check-name", params={"name": "some-repo"})
         assert r.status_code == 502, r.text
         msg = r.json()["detail"]["message"]
-        assert "检查失败" in msg
+        assert "检查失败" not in msg, "Issue #4231：前缀由前端统一加，后端只回裸原因"
         assert "api.github.com" not in r.text, "脱敏：内部 URL 不得透出"
         assert "(500)" in msg
 
