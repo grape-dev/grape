@@ -125,3 +125,18 @@ def test_converged_reports_missing_objects():
         db.commit()
     with pytest.raises(RuntimeError):
         mig.converged()
+
+
+def test_converged_rejects_wrong_primary_key_shape():
+    """I1（PR #2245 复审）：新表存在但主键形态不对时 post_check 必须 raise，不能盖章。"""
+    mig.migrate()
+    with db_lock:
+        c = db.cursor()
+        c.execute(f"DROP TABLE IF EXISTS {mig.NEW_TABLE}")
+        c.execute(f"""CREATE TABLE {mig.NEW_TABLE} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_key TEXT NOT NULL DEFAULT ''
+        )""")
+        db.commit()
+    with pytest.raises(RuntimeError):
+        mig.converged()

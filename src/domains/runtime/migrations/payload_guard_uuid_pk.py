@@ -4,7 +4,7 @@
 （多实例/分库汇总按 id 关联会撞号）。
 
 旧表 `autopilot_payload_guard`（自增 id）若已落过熔断台账，本迁移把行搬进新表并给每行
-生成 uuid4().hex 主键，然后 DROP 旧表（危险 DDL 只走 `_destructive_ddl` 唯一入口，
+按旧行 id 确定性派生 uuid5(_ID_NAMESPACE, "autopilot_payload_guard:<旧行 id>") 主键（重试幂等），然后 DROP 旧表（危险 DDL 只走 `_destructive_ddl` 唯一入口，
 过 min_code_version 门槛；被拦截 raise 不盖章）。
 
 幂等：新表由 runtime `schema_ddl` 启动期 CREATE IF NOT EXISTS；旧表不存在即跳过；
@@ -84,6 +84,32 @@ def migrate(conn: Any = None) -> int:
     return moved
 
 
+def _id_primary_key_ok(cursor: Any) -> bool:
+    """新表 `id` 必须是 VARCHAR(32) 字符串主键（A12）。
+
+    `CREATE TABLE IF NOT EXISTS` 不会纠正「已存在但主键形态错误」的表，
+    因此 post_check 必须自己复核主键类型，否则会盖章一个不合规的表。
+    """
+    from src.kernel.session_manager import _is_mysql_backend
+
+    if _is_mysql_backend():
+        cursor.execute(
+            "SELECT COLUMN_TYPE, COLUMN_KEY FROM information_schema.columns "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME='id'",
+            (NEW_TABLE,))
+        row = cursor.fetchone()
+        if not row:
+            return False
+        col_type, key = str(row[0] or '').lower(), str(row[1] or '').upper()
+        return col_type.startswith('varchar(32)') and key == 'PRI'
+    cursor.execute(f"PRAGMA table_info({NEW_TABLE})")
+    for r in cursor.fetchall():
+        if str(r[1]) == 'id':
+            col_type = str(r[2] or '').upper().replace(' ', '')
+            return col_type == 'VARCHAR(32)' and int(r[5] or 0) > 0
+    return False
+
+
 def converged(conn: Any = None) -> None:
     """post_check：旧表已不存在，新表存在（不收敛 raise，不盖章）。"""
     from src.api import db_setup as _ds
@@ -94,8 +120,10 @@ def converged(conn: Any = None) -> None:
         try:
             old_left = _table_exists(cursor, OLD_TABLE)
             new_ok = _table_exists(cursor, NEW_TABLE)
+            pk_ok = _id_primary_key_ok(cursor) if new_ok else False
         finally:
             cursor.close()
-    if old_left or not new_ok:
+    if old_left or not new_ok or not pk_ok:
         raise RuntimeError(
-            f"payload guard uuid migration not converged: old={old_left} new={new_ok}")
+            f"payload guard uuid migration not converged: old={old_left} "
+            f"new={new_ok} pk32={pk_ok}")

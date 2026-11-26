@@ -119,3 +119,18 @@ def test_converged_detects_leftover_old_table():
         db.commit()
     with pytest.raises(RuntimeError):
         mig.converged()
+
+
+def test_converged_rejects_wrong_primary_key_shape():
+    """I1：主键不是 VARCHAR(32) 时 post_check 必须 raise。"""
+    mig.migrate()
+    with db_lock:
+        c = db.cursor()
+        c.execute(f"DROP TABLE IF EXISTS {mig.NEW_TABLE}")
+        c.execute(f"""CREATE TABLE {mig.NEW_TABLE} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payload_hash TEXT NOT NULL DEFAULT ''
+        )""")
+        db.commit()
+    with pytest.raises(RuntimeError):
+        mig.converged()
