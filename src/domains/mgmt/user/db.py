@@ -3876,6 +3876,12 @@ def _read_refresh_token_from_identity(user_id: int, provider: str) -> str:
     - refresh_token 字段为空 → 返回空
     - 解密失败 → 返回空（safe 模式，不抛异常）
     - 解密成功 → 返回明文
+
+    口径 status IN (1, 4)：status=4 是「绑定仍在、token 已过期」，重新授权之外
+    唯一的自愈路径就是用行内 refresh_token 续期；只读 status=1 会让过期行永远
+    读不到 refresh_token（日志表现为 "no refresh_token"），把可续期误报成
+    「用户没给刷新权限」。与 `_has_refresh_token`（同一查询已有的 status IN
+    (1, 4) 口径）保持一致。
     """
     try:
         from src.kernel.session_manager import db_lock as _sm_dl
@@ -3885,7 +3891,7 @@ def _read_refresh_token_from_identity(user_id: int, provider: str) -> str:
             try:
                 c.execute(
                     "SELECT refresh_token FROM external_identities "
-                    "WHERE grape_user_id=? AND provider=? AND status=1",
+                    "WHERE grape_user_id=? AND provider=? AND status IN (1, 4)",
                     (user_id, provider),
                 )
                 row = c.fetchone()

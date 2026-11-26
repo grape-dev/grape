@@ -1201,6 +1201,55 @@ def _check_whitelist(provider: str, external_login: str) -> bool:
     from src.kernel.config import is_user_allowed
     return is_user_allowed(provider, external_login)
 
+
+def _bind_whitelist_allows(provider: str, external_id: str, external_login: str,
+                           binding_user_id) -> bool:
+    """绑定侧白名单闸的放行判定（Issue #4254 收口）。
+
+    Issue #4254 在绑定回调最前面加的白名单闸只比对「本次要绑的第三方登录名」，
+    与登录侧口径不一致，导致两类正常用户被挡住：
+    1. token 过期（status=4）后重新授权——登录路径对 status IN (1, 4) 的既有
+       绑定本就不查白名单，绑定路径却查，而重新授权正是过期后唯一的自愈路径；
+    2. 已通过其它绑定平台命中白名单的账号（/api/auth/beta-eligibility 认为其
+       有资格），绑定第二个平台却被拒。
+
+    放行条件（任一命中）：
+    a. 本次身份自身命中 login_whitelist——原有行为；
+    b. 该 external_id 已在本账号名下（status 0/1/4）——这是续期/恢复，不是新绑定；
+    c. 本账号任一已绑定身份命中白名单——与 /api/auth/beta-eligibility 同口径。
+
+    读取失败一律 **fail-closed（拒绝）**：`get_external_identity_any_status` 与
+    `get_grape_account_by_id` 自身吞异常并返回 None，调用方无法区分「确实没有」
+    与「读不出来」，因此这里以「未知即拒绝」收口——与 `is_user_allowed` 对 DB
+    不可用的既有口径（拒绝）一致。本闸是产品门禁而非安全边界，但 DB 抖动时本次
+    绑定写入本身也会失败，不需要为一条执行不了的放行改写真值语义。
+    """
+    if _check_whitelist(provider, external_login):
+        return True
+    try:
+        from src.domains.mgmt.auth.grape_account_db import get_external_identity_any_status
+        own = get_external_identity_any_status(provider, external_id)
+        if own and str(own.get("grape_user_id") or "") == str(binding_user_id or ""):
+            log.info(f"OAuth bind whitelist: identity renewal allowed "
+                     f"(provider={provider}, user={binding_user_id}, status={own.get('status')})")
+            return True
+    except Exception as e:
+        log.warning(f"OAuth bind whitelist: identity lookup failed ({type(e).__name__}): {e} —— refuse")
+        return False
+    try:
+        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+        from src.domains.mgmt.auth.signup_policy import is_beta_whitelisted_user
+        account = get_grape_account_by_id(binding_user_id)
+        # account 为 None = 读失败或账号不存在（未知态）：不判资格，按拒绝收口。
+        if account and is_beta_whitelisted_user(account):
+            log.info(f"OAuth bind whitelist: beta eligibility allowed "
+                     f"(provider={provider}, user={binding_user_id})")
+            return True
+    except Exception as e:
+        log.warning(f"OAuth bind whitelist: eligibility check failed ({type(e).__name__}): {e} —— refuse")
+        return False
+    return False
+
 def _build_redirect_url(request: Request, path: str = "/", params: dict | None = None,
                         hash_frag: str = "", popup: bool = False) -> str:
     """P1-5: 统一构造重定向 URL——消除 scheme/host/lang/app_base 重复拼装。
@@ -1544,9 +1593,13 @@ def _handle_oauth_bind(request, provider, external_id, user_info, access_token, 
     第三方身份不建立绑定——否则会出现「绑得上却登不进、资格也不增加」的尴尬态。
     拦截形态与登录侧完全一致（oauth_error=WHITELIST:<provider>:<ticket>），前端复用
     同一套「申请内测」引导与预填票据。
+
+    闸的放行口径见 `_bind_whitelist_allows`：既有身份续期、以及账号任一已绑身份
+    命中白名单（与 /api/auth/beta-eligibility 同口径）都不拦——登录侧对这些用户
+    本就不查白名单，绑定侧拦住只会让 token 过期用户无路恢复。
     """
     _external_login = (user_info or {}).get("external_login", "")
-    if not _check_whitelist(provider, _external_login):
+    if not _bind_whitelist_allows(provider, external_id, _external_login, binding_user_id):
         _wl_code = "WHITELIST:" + provider if _WL_PROVIDER_KEY_RE.match(provider or "") else "WHITELIST"
         if _WL_PROVIDER_KEY_RE.match(provider or ""):
             _wl_code += ":" + _issue_beta_prefill_ticket(provider, _external_login)

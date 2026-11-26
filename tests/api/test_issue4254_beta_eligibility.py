@@ -260,14 +260,22 @@ def _fake_request(path="/api/auth/callback/gitcode"):
 
 
 def test_oauth_bind_refused_before_any_db_write(monkeypatch):
-    """未命中白名单的第三方身份不得建立绑定：闸必须在任何 DB 读/写之前。"""
+    """未命中白名单、且无续期/资格豁免的第三方身份不得建立绑定。
+
+    拒绝必须发生在任何绑定写入与 status=1 绑定查询之前；`_bind_whitelist_allows`
+    的续期/资格判定是只读查询，允许发生在闸内（见
+    tests/api/test_oauth_bind_whitelist_renewal.py）。
+    """
     from src.domains.mgmt.routes import grape_auth
-    from src.domains.mgmt.auth import grape_account_db
+    from src.domains.mgmt.auth import grape_account_db, signup_policy
 
     monkeypatch.setattr(grape_auth, "_check_whitelist", lambda p, l: False)
+    monkeypatch.setattr(grape_account_db, "get_external_identity_any_status", lambda p, e: None)
+    monkeypatch.setattr(grape_account_db, "get_grape_account_by_id", lambda uid: None)
+    monkeypatch.setattr(signup_policy, "is_beta_whitelisted_user", lambda user: False)
 
     def _must_not_touch_db(*a, **kw):
-        raise AssertionError("白名单闸之前就访问了 DB")
+        raise AssertionError("拒绝路径进入了绑定查询/写入")
 
     monkeypatch.setattr(grape_account_db, "get_external_identity", _must_not_touch_db)
     resp = grape_auth._handle_oauth_bind(
